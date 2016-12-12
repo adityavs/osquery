@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -43,21 +43,21 @@ TEST_F(RegistryTests, test_registry) {
 
   /// Add a CatRegistry item (a plugin) called "house".
   cats.add<HouseCat>("house");
-  EXPECT_EQ(cats.count(), 1);
+  EXPECT_EQ(cats.count(), 1U);
 
   /// Try to add the same plugin with the same name, this is meaningless.
   cats.add<HouseCat>("house");
   /// Now add the same plugin with a different name, a new plugin instance
   /// will be created and registered.
   cats.add<HouseCat>("house2");
-  EXPECT_EQ(cats.count(), 2);
+  EXPECT_EQ(cats.count(), 2U);
 
   /// Request a plugin to call an API method.
   auto cat = cats.get("house");
   cats.setUp();
 
   /// Now let's iterate over every registered Cat plugin.
-  EXPECT_EQ(cats.all().size(), 2);
+  EXPECT_EQ(cats.all().size(), 2U);
 }
 
 /// Normally we have "Registry" that dictates the set of possible API methods
@@ -81,8 +81,8 @@ TEST_F(RegistryTests, test_auto_factory) {
   /// When acting on registries by name we can check the broadcasted
   /// registry name of other plugin processes (via Thrift) as well as
   /// internally registered plugins like HouseCat.
-  EXPECT_EQ(TestCoreRegistry::registry("cat")->count(), 2);
-  EXPECT_EQ(TestCoreRegistry::count("cat"), 2);
+  EXPECT_EQ(TestCoreRegistry::registry("cat")->count(), 2U);
+  EXPECT_EQ(TestCoreRegistry::count("cat"), 2U);
 
   /// And we can call an API method, since we guarantee CatPlugins conform
   /// to the "TestCoreRegistry"'s "TestPluginAPI".
@@ -101,12 +101,16 @@ class DogPlugin : public Plugin {
 
 class Doge : public DogPlugin {
  public:
-  Doge() { some_value_ = 100000; }
+  Doge() {
+    some_value_ = 100000;
+  }
 };
 
 class BadDoge : public DogPlugin {
  public:
-  Status setUp() { return Status(1, "Expect error... this is a bad dog"); }
+  Status setUp() {
+    return Status(1, "Expect error... this is a bad dog");
+  }
 };
 
 auto AutoDogRegistry = TestCoreRegistry::create<DogPlugin>("dog", true);
@@ -115,11 +119,11 @@ TEST_F(RegistryTests, test_auto_registries) {
   TestCoreRegistry::add<Doge>("dog", "doge");
   TestCoreRegistry::registry("dog")->setUp();
 
-  EXPECT_EQ(TestCoreRegistry::count("dog"), 1);
+  EXPECT_EQ(TestCoreRegistry::count("dog"), 1U);
 }
 
 TEST_F(RegistryTests, test_persistant_registries) {
-  EXPECT_EQ(TestCoreRegistry::count("cat"), 2);
+  EXPECT_EQ(TestCoreRegistry::count("cat"), 2U);
 }
 
 TEST_F(RegistryTests, test_registry_exceptions) {
@@ -129,22 +133,22 @@ TEST_F(RegistryTests, test_registry_exceptions) {
   TestCoreRegistry::registry("dog")->setUp();
   // Make sure bad dog does not exist.
   EXPECT_FALSE(TestCoreRegistry::exists("dog", "bad_doge"));
-  EXPECT_EQ(TestCoreRegistry::count("dog"), 2);
+  EXPECT_EQ(TestCoreRegistry::count("dog"), 2U);
 
-  int exception_count = 0;
+  unsigned int exception_count = 0;
   try {
     TestCoreRegistry::registry("does_not_exist");
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range& /* e */) {
     exception_count++;
   }
 
   try {
     TestCoreRegistry::add<HouseCat>("does_not_exist", "cat");
-  } catch (const std::out_of_range& e) {
+  } catch (const std::out_of_range& /* e */) {
     exception_count++;
   }
 
-  EXPECT_EQ(exception_count, 2);
+  EXPECT_EQ(exception_count, 2U);
 }
 
 class WidgetPlugin : public Plugin {
@@ -163,7 +167,7 @@ class WidgetPlugin : public Plugin {
   /// Plugin types should contain generic request/response formatters and
   /// decorators.
   std::string secretPower(const PluginRequest& request) const {
-    if (request.count("secret_power") > 0) {
+    if (request.count("secret_power") > 0U) {
       return request.at("secret_power");
     }
     return "no_secret_power";
@@ -195,12 +199,12 @@ TEST_F(RegistryTests, test_registry_api) {
   auto ri = TestCoreRegistry::get("widgets", "special")->routeInfo();
   EXPECT_EQ(ri[0].at("name"), "special");
   auto rr = TestCoreRegistry::registry("widgets")->getRoutes();
-  EXPECT_EQ(rr.size(), 1);
+  EXPECT_EQ(rr.size(), 1U);
   EXPECT_EQ(rr.at("special")[0].at("name"), "special");
 
   // Broadcast will include all registries, and all their items.
   auto broadcast_info = TestCoreRegistry::getBroadcast();
-  EXPECT_TRUE(broadcast_info.size() >= 3);
+  EXPECT_TRUE(broadcast_info.size() >= 3U);
   EXPECT_EQ(broadcast_info.at("widgets").at("special")[0].at("name"),
             "special");
 
@@ -217,7 +221,7 @@ TEST_F(RegistryTests, test_registry_api) {
 }
 
 TEST_F(RegistryTests, test_real_registry) {
-  EXPECT_TRUE(Registry::count() > 0);
+  EXPECT_TRUE(Registry::count() > 0U);
 
   bool has_one_registered = false;
   for (const auto& registry : Registry::all()) {
@@ -238,13 +242,13 @@ TEST_F(RegistryTests, test_registry_modules) {
   RegistryFactory::locked(false);
 
   // Test initializing a module load and the module's registry modifications.
-  EXPECT_EQ(RegistryFactory::getModule(), 0);
+  EXPECT_EQ(0U, RegistryFactory::getModule());
   RegistryFactory::initModule("/my/test/module");
   // The registry is locked, no modifications during module global ctors.
   EXPECT_TRUE(RegistryFactory::locked());
   // The 'is the registry using a module' is not set during module ctors.
   EXPECT_FALSE(RegistryFactory::usingModule());
-  EXPECT_EQ(RegistryFactory::getModules().size(), 1);
+  EXPECT_EQ(RegistryFactory::getModules().size(), 1U);
   // The unittest can introspect into the current module.
   auto& module = RegistryFactory::getModules().at(RegistryFactory::getModule());
   EXPECT_EQ(module.path, "/my/test/module");
@@ -267,6 +271,6 @@ TEST_F(RegistryTests, test_registry_modules) {
   EXPECT_TRUE(RegistryFactory::locked());
   // And the registry is no longer using a module.
   EXPECT_FALSE(RegistryFactory::usingModule());
-  EXPECT_EQ(RegistryFactory::getModule(), 0);
+  EXPECT_EQ(0U, RegistryFactory::getModule());
 }
 }

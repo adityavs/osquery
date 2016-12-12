@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,14 +8,9 @@
  *
  */
 
-#include <random>
 #include <thread>
 
-#include <signal.h>
-
 #include <gtest/gtest.h>
-
-#include <boost/noncopyable.hpp>
 
 #include <osquery/logger.h>
 
@@ -23,64 +18,16 @@
 #include "osquery/remote/serializers/json.h"
 #include "osquery/remote/transports/tls.h"
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_additional_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace pt = boost::property_tree;
 
 namespace osquery {
 
-class TLSServerRunner : private boost::noncopyable {
- public:
-  /// Create a singleton TLS server runner.
-  static TLSServerRunner& instance() {
-    static TLSServerRunner instance;
-    return instance;
-  }
-
-  /// TCP port accessor.
-  static const std::string& port() { return instance().port_; }
-  /// Start the server if it hasn't started already.
-  static void start();
-  /// Stop the service when the process exits.
-  static void stop();
-
- private:
-  TLSServerRunner()
-      : server_(0), port_(std::to_string(rand() % 10000 + 20000)){};
-  TLSServerRunner(TLSServerRunner const&);
-  void operator=(TLSServerRunner const&);
-  virtual ~TLSServerRunner() { stop(); }
-
- private:
-  pid_t server_;
-  std::string port_;
-};
-
-void TLSServerRunner::start() {
-  auto& self = instance();
-  if (self.server_ != 0) {
-    return;
-  }
-
-  // Fork then exec a shell.
-  self.server_ = fork();
-  if (self.server_ == 0) {
-    // Start a python TLS/HTTPS or HTTP server.
-    auto script = kTestDataPath + "/test_http_server.py --tls " + self.port_;
-    execlp("sh", "sh", "-c", script.c_str(), nullptr);
-    ::exit(0);
-  }
-  ::sleep(1);
-}
-
-void TLSServerRunner::stop() {
-  auto& self = instance();
-  kill(self.server_, SIGTERM);
-}
-
 class TLSTransportsTests : public testing::Test {
  public:
-  bool verify(const Status &status) {
+  bool verify(const Status& status) {
     if (!status.ok()) {
       LOG(ERROR) << "Could not complete TLSRequest (" << status.getCode()
                  << "): " << status.what();
@@ -89,15 +36,25 @@ class TLSTransportsTests : public testing::Test {
     // Sometimes the best we can test is the call workflow.
     if (status.getCode() == 1) {
       // The socket bind failed or encountered a connection error in the test.
-      LOG(ERROR) << "Not failing TLS-based transport tests.";
+      LOG(ERROR) << "Not failing TLS-based transport tests";
+      return false;
+    }
+
+    if (status.getMessage().find("Address family not supported") !=
+        std::string::npos) {
+      LOG(ERROR) << "Not failing TLS-based transport tests";
       return false;
     }
     return true;
   }
 
-  void SetUp() {
+  void SetUp() override {
     TLSServerRunner::start();
     port_ = TLSServerRunner::port();
+  }
+
+  void TearDown() override {
+    TLSServerRunner::stop();
   }
 
  protected:
@@ -208,11 +165,5 @@ TEST_F(TLSTransportsTests, test_call_client_auth) {
   if (verify(status)) {
     EXPECT_TRUE(status.ok());
   }
-}
-
-TEST_F(TLSTransportsTests, test_request_http_client_internals) {
-  auto url = "https://localhost:" + port_;
-  auto r = Request<TLSTransport, JSONSerializer>(url);
-  auto r2 = Request<TLSTransport, JSONSerializer>(url);
 }
 }

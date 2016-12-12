@@ -1,9 +1,8 @@
-`osqueryi` is the osquery interactive query console/shell. It is completely standalone and does not communicate with a daemon and does
-not need to run as an administrator. Use the shell to prototype queries and explore the current state of your operating system.
+`osqueryi` is the osquery interactive query console/shell. It is completely standalone and does not communicate with a daemon and does not need to run as an administrator. Use the shell to prototype queries and explore the current state of your operating system.
 
 ## Executing SQL queries
 
-osqueryi lets you run commands and query osquery tables. See the [table API](https://osquery.io/tables/) for a complete list of tables, types, and column descriptions. For SQL syntax help, see [SQL as understood by SQLite](http://www.sqlite.org/lang.html).
+**osqueryi** lets you run meta-commands and query osquery tables. See the [table API](https://osquery.io/tables/) for a complete list of tables, types, and column descriptions. For SQL syntax help, see [SQL as understood by SQLite](http://www.sqlite.org/lang.html).
 
 Here is an example query:
 
@@ -27,7 +26,7 @@ osquery> SELECT DISTINCT
 osquery>
 ```
 
-The shell accepts a single positional argument and several output modes. If you wanted to script the output and act on JSON or CSV values try:
+The shell accepts a single positional argument and one of the several output modes. If you want to output JSON or CSV values, try:
 
 ```
 $ osqueryi --json "select * from routes where destination = '::1'"
@@ -36,7 +35,7 @@ $ osqueryi --json "select * from routes where destination = '::1'"
 ]
 ```
 
-You may also pipe a query as *stdin*. The input will be executed on the osqueryi shell and must be well-formed SQL or osqueryi commands. Note the added ';' to the query when using *stdin*:
+You may also pipe a query as *stdin*. The input will be executed on the **osqueryi** shell and must be well-formed SQL or **osqueryi** meta-commands. Note the added ';' to the query when using *stdin*:
 
 ```
 $ echo "select * from routes where destination = '::1';" | osqueryi --json
@@ -44,11 +43,11 @@ $ echo "select * from routes where destination = '::1';" | osqueryi --json
 
 ## Getting help
 
-osqueryi is a modified version of the SQLite shell.
-It accepts several "administrative" commands, prefixed with a '.':
+**osqueryi** is a modified version of the SQLite shell.
+It accepts several meta-commands, prefixed with a '.':
 
 * to list all tables: `.tables`
-* to list the schema (columns, types) of a specific table: `pragma table_info(table_name);`
+* to list the schema (columns, types) of a specific table: `.schema table_name` or `pragma table_info(table_name);` for more details
 * to list all available commands: `.help`
 * to exit the console: `.exit` or `^D`
 
@@ -103,5 +102,9 @@ osquery> .exit
 $
 ```
 
-The shell does not keep much state or connect to a osqueryd daemon.
-If you would like to run queries and log changes to the output or log operating system events consider deploying a query **schedule** using [osqueryd](using-osqueryd.md).
+The shell does not keep much state or connect to the **osqueryd** daemon.
+If you would like to run queries and log changes to the output or log operating system events, consider deploying a query **schedule** using [osqueryd](using-osqueryd.md).
+
+**Note:** Event publishers are not started by default. To enable event-based tables, use the flag `--disable_events=false`.
+
+**osqueryi** uses an in-memory database by default. To connect to an existing events database, use the flag `--database_path=/var/osquery/osquery.db` (only one process may attach to the database; see [Checking the database sanity](../deployment/debugging.md#checking-the-database-sanity)).

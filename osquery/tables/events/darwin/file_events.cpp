@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,21 +15,28 @@
 #include <osquery/config.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-#include <osquery/hash.h>
 
 #include "osquery/events/darwin/fsevents.h"
+#include "osquery/tables/events/event_utils.h"
 
 namespace osquery {
+
+extern const std::set<std::string> kCommonFileColumns;
 
 /**
  * @brief Track time, action changes to /etc/passwd
  *
  * This is mostly an example EventSubscriber implementation.
  */
-class FileEventSubscriber
-    : public EventSubscriber<FSEventsEventPublisher> {
+class FileEventSubscriber : public EventSubscriber<FSEventsEventPublisher> {
  public:
-  Status init();
+  Status init() override {
+    configure();
+    return Status(0);
+  }
+
+  /// Walk the configuration's file paths, create subscriptions.
+  void configure() override;
 
   /**
    * @brief This exports a single Callback for INotifyEventPublisher events.
@@ -39,7 +46,8 @@ class FileEventSubscriber
    *
    * @return Was the callback successful.
    */
-  Status Callback(const FSEventsEventContextRef& ec, const void* user_data);
+  Status Callback(const FSEventsEventContextRef& ec,
+                  const FSEventsSubscriptionContextRef& sc);
 };
 
 /**
@@ -51,39 +59,40 @@ class FileEventSubscriber
  */
 REGISTER(FileEventSubscriber, "event_subscriber", "file_events");
 
-Status FileEventSubscriber::init() {
-  ConfigDataInstance config;
-  for (const auto& element_kv : config.files()) {
-    for (const auto& file : element_kv.second) {
-      VLOG(1) << "Added listener to: " << file;
-      auto mc = createSubscriptionContext();
-      mc->path = file;
-      subscribe(&FileEventSubscriber::Callback, mc,
-                (void*)(&element_kv.first));
-    }
-  }
+void FileEventSubscriber::configure() {
+  // Clear all paths from FSEvents.
+  // There may be a better way to find the set intersection/difference.
+  removeSubscriptions();
 
-  return Status(0, "OK");
+  Config::getInstance().files([this](const std::string& category,
+                                     const std::vector<std::string>& files) {
+    for (const auto& file : files) {
+      VLOG(1) << "Added file event listener to: " << file;
+      auto sc = createSubscriptionContext();
+      sc->path = file;
+      sc->category = category;
+      subscribe(&FileEventSubscriber::Callback, sc);
+    }
+  });
 }
 
 Status FileEventSubscriber::Callback(const FSEventsEventContextRef& ec,
-                                            const void* user_data) {
+                                     const FSEventsSubscriptionContextRef& sc) {
+  if (ec->action.empty()) {
+    return Status(0);
+  }
+
   Row r;
   r["action"] = ec->action;
-  r["time"] = ec->time_string;
   r["target_path"] = ec->path;
-  if (user_data != nullptr) {
-    r["category"] = *(std::string*)user_data;
-  } else {
-    r["category"] = "Undefined";
-  }
+  r["category"] = sc->category;
   r["transaction_id"] = INTEGER(ec->transaction_id);
-  r["md5"] = hashFromFile(HASH_TYPE_MD5, ec->path);
-  r["sha1"] = hashFromFile(HASH_TYPE_SHA1, ec->path);
-  r["sha256"] = hashFromFile(HASH_TYPE_SHA256, ec->path);
-  if (ec->action != "") {
-    add(r, ec->time);
-  }
+
+  // Add hashing and 'join' against the file table for stat-information.
+  decorateFileEvent(
+      ec->path, (ec->action == "CREATED" || ec->action == "UPDATED"), r);
+
+  add(r);
   return Status(0, "OK");
 }
 }

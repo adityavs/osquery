@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,10 +10,16 @@
 
 #pragma once
 
+#include <limits.h>
+
 #include <memory>
+#include <string>
+#include <vector>
 
 #include <boost/bind.hpp>
 #include <boost/shared_ptr.hpp>
+
+#include <osquery/status.h>
 
 #ifdef DARWIN
 #include <CoreFoundation/CoreFoundation.h>
@@ -46,6 +52,63 @@ typename boost::shared_ptr<T> std_to_boost_shared_ptr(
 }
 
 /**
+ * @brief Split a given string based on an optional delimiter.
+ *
+ * If no delimiter is supplied, the string will be split based on whitespace.
+ *
+ * @param s the string that you'd like to split
+ * @param delim the delimiter which you'd like to split the string by
+ *
+ * @return a vector of strings split by delim.
+ */
+std::vector<std::string> split(const std::string& s,
+                               const std::string& delim = "\t ");
+
+/**
+ * @brief Split a given string based on an delimiter.
+ *
+ * @param s the string that you'd like to split.
+ * @param delim the delimiter which you'd like to split the string by.
+ * @param occurrences the number of times to split by delim.
+ *
+ * @return a vector of strings split by delim for occurrences.
+ */
+std::vector<std::string> split(const std::string& s,
+                               const std::string& delim,
+                               size_t occurences);
+
+/**
+ * @brief In-line replace all instances of from with to.
+ *
+ * @param str The input/output mutable string.
+ * @param from Search string
+ * @param to Replace string
+ */
+inline void replaceAll(std::string& str,
+                       const std::string& from,
+                       const std::string& to) {
+  if (from.empty()) {
+    return;
+  }
+
+  size_t start_pos = 0;
+  while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+    str.replace(start_pos, from.length(), to);
+    start_pos += to.length();
+  }
+}
+
+/**
+ * @brief Join a vector of strings inserting a token string between elements
+ *
+ * @param s the vector of strings to be joined.
+ * @param tok a token glue string to be inserted between elements.
+ *
+ * @return the joined string.
+ */
+std::string join(const std::vector<std::string>& s, const std::string& tok);
+
+/**
  * @brief Decode a base64 encoded string.
  *
  * @param encoded The encode base64 string.
@@ -69,6 +132,107 @@ std::string base64Encode(const std::string& unencoded);
  */
 bool isPrintable(const std::string& check);
 
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtol(const std::string& rep, size_t base, long int& out) {
+  char* end{nullptr};
+  out = strtol(rep.c_str(), &end, static_cast<int>(base));
+  if (end == nullptr || end == rep.c_str() || *end != '\0' ||
+      ((out == LONG_MIN || out == LONG_MAX) && errno == ERANGE)) {
+    out = 0;
+    return Status(1);
+  }
+  return Status(0);
+}
+
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtoul(const std::string& rep,
+                          size_t base,
+                          unsigned long int& out) {
+  char* end{nullptr};
+  out = strtoul(rep.c_str(), &end, static_cast<int>(base));
+  if (end == nullptr || end == rep.c_str() || *end != '\0' || errno == ERANGE) {
+    out = 0;
+    return Status(1);
+  }
+  return Status(0);
+}
+
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtoll(const std::string& rep, size_t base, long long& out) {
+  char* end{nullptr};
+  out = strtoll(rep.c_str(), &end, static_cast<int>(base));
+  if (end == nullptr || end == rep.c_str() || *end != '\0' ||
+      ((out == LLONG_MIN || out == LLONG_MAX) && errno == ERANGE)) {
+    out = 0;
+    return Status(1);
+  }
+  return Status(0);
+}
+
+/// Safely convert unicode escaped ASCII.
+inline std::string unescapeUnicode(const std::string& escaped) {
+  if (escaped.size() < 6) {
+    return escaped;
+  }
+
+  std::string unescaped;
+  unescaped.reserve(escaped.size());
+  for (size_t i = 0; i < escaped.size(); ++i) {
+    if (i < escaped.size() - 5 && '\\' == escaped[i] && 'u' == escaped[i + 1]) {
+      // Assume 2-byte wide unicode.
+      long value{0};
+      Status stat = safeStrtol(escaped.substr(i + 2, 4), 16, value);
+      if (!stat.ok()) {
+        return "";
+      }
+      if (value < 255) {
+        unescaped += static_cast<char>(value);
+        i += 5;
+        continue;
+      }
+    }
+    unescaped += escaped[i];
+  }
+  return unescaped;
+}
+
+/**
+ * @brief In-line helper function for use with utf8StringSize
+ */
+template <typename _Iterator1, typename _Iterator2>
+inline size_t incUtf8StringIterator(_Iterator1& it, const _Iterator2& last) {
+  if (it == last) {
+    return 0;
+  }
+
+  size_t res = 1;
+  for (++it; last != it; ++it, ++res) {
+    unsigned char c = *it;
+    if (!(c & 0x80) || ((c & 0xC0) == 0xC0)) {
+      break;
+    }
+  }
+
+  return res;
+}
+
+/**
+ * @brief Get the length of a UTF-8 string
+ *
+ * @param str The UTF-8 string
+ *
+ * @return the length of the string
+ */
+inline size_t utf8StringSize(const std::string& str) {
+  size_t res = 0;
+  std::string::const_iterator it = str.begin();
+  for (; it != str.end(); incUtf8StringIterator(it, str.end())) {
+    res++;
+  }
+
+  return res;
+}
+
 #ifdef DARWIN
 /**
  * @brief Convert a CFStringRef to a std::string.
@@ -88,5 +252,4 @@ std::string stringFromCFAbsoluteTime(const CFDataRef& cf_abstime);
 
 std::string stringFromCFData(const CFDataRef& cf_data);
 #endif
-
 }

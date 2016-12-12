@@ -6,4 +6,10 @@ schema([
     Column("type", TEXT, "Startup Item or Login Item"),
     Column("source", TEXT, "Directory or plist containing startup item"),
 ])
+attributes(cacheable=True)
 implementation("startup_items@genStartupItems")
+fuzz_paths([
+    "/System/Library/StartupItems/",
+    "/Library/StartupItems/",
+    "/Library/Preferences/com.apple.loginitems.plist"
+])

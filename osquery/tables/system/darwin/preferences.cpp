@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -85,8 +85,8 @@ void genOSXPrefValues(const CFTypeRef& value,
 
   // Since we recurse when parsing Arrays/Dicts, monitor stack limits.
   if (++depth > kPreferenceDepthLimit) {
-    LOG(WARNING) << "OS X Preference: " << base.at("domain")
-                 << " exceeded subkey depth limit: " << kPreferenceDepthLimit;
+    TLOG << "OS X Preference: " << base.at("domain")
+         << " exceeded subkey depth limit: " << kPreferenceDepthLimit;
     return;
   }
 
@@ -111,7 +111,7 @@ void genOSXPrefValues(const CFTypeRef& value,
     return;
   }
 
-  results.push_back(r);
+  results.push_back(std::move(r));
 }
 
 void genOSXDomainPrefs(const CFStringRef& domain, QueryData& results) {
@@ -157,7 +157,7 @@ void genOSXDomainPrefs(const CFStringRef& domain, QueryData& results) {
 }
 
 void genOSXDefaultPreferences(QueryContext& context, QueryData& results) {
-  CFArrayRef app_map;
+  CFArrayRef app_map = nullptr;
 
   if (context.constraints["domain"].exists(EQUALS)) {
     // If a specific domain is requested, speed up the set of type conversions.
@@ -165,9 +165,8 @@ void genOSXDefaultPreferences(QueryContext& context, QueryData& results) {
     app_map = (CFArrayRef)CFArrayCreateMutable(
         kCFAllocatorDefault, domains.size(), &kCFTypeArrayCallBacks);
     for (const auto& domain : domains) {
-      auto cf_domain = CFStringCreateWithCString(kCFAllocatorDefault,
-                                                 domain.c_str(),
-                                                 kCFStringEncodingASCII);
+      auto cf_domain = CFStringCreateWithCString(
+          kCFAllocatorDefault, domain.c_str(), kCFStringEncodingASCII);
       CFArrayAppendValue((CFMutableArrayRef)app_map, cf_domain);
       CFRelease(cf_domain);
     }
@@ -197,7 +196,7 @@ void genOSXPlistPrefValue(const pt::ptree& tree,
   if (tree.empty()) {
     Row r = base;
     r["value"] = tree.data();
-    results.push_back(r);
+    results.push_back(std::move(r));
     // No more levels to parse.
     return;
   }
@@ -244,9 +243,24 @@ void genOSXPlistPreferences(const std::string& path, QueryData& results) {
 QueryData genOSXPreferences(QueryContext& context) {
   QueryData results;
 
-  if (context.constraints["path"].exists(EQUALS)) {
-    // Read preferences from a plist at path.
+  if (context.constraints["path"].exists(EQUALS | LIKE)) {
+    // Resolve file paths for EQUALS and LIKE operations.
     auto paths = context.constraints["path"].getAll(EQUALS);
+    context.expandConstraints(
+        "path",
+        LIKE,
+        paths,
+        ([&](const std::string& pattern, std::set<std::string>& out) {
+          std::vector<std::string> patterns;
+          auto status =
+              resolveFilePattern(pattern, patterns, GLOB_ALL | GLOB_NO_CANON);
+          if (status.ok()) {
+            for (const auto& resolved : patterns) {
+              out.insert(resolved);
+            }
+          }
+          return status;
+        }));
     for (const auto& path : paths) {
       genOSXPlistPreferences(path, results);
     }

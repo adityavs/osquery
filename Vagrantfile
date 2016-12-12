@@ -1,9 +1,24 @@
 targets = {
-  "centos6.5" => {
-    "box" => "chef/centos-6.5"
+  "debian7" => {
+    "box" => "bento/debian-7.9"
   },
-  "centos7"   => {
-    "box" => "chef/centos-7.0"
+  "debian8" => {
+    "box" => "bento/debian-8.2"
+  },
+  "centos6.5" => {
+    "box" => "bento/centos-6.7"
+  },
+  "centos7.1"   => {
+    "box" => "bento/centos-7.1"
+  },
+  "ubuntu15.04"  => {
+    "box" => "bento/ubuntu-15.04"
+  },
+  "ubuntu15.10"  => {
+    "box" => "bento/ubuntu-15.10"
+  },
+  "ubuntu16.04"  => {
+    "box" => "bento/ubuntu-16.04"
   },
   "ubuntu14"  => {
     "box" => "ubuntu/trusty64"
@@ -12,7 +27,7 @@ targets = {
     "box" => "ubuntu/precise64"
   },
   "freebsd10" => {
-    "box" => "chef/freebsd-10.0"
+    "box" => "bento/freebsd-10.2"
   },
   "aws-amazon2015.03" => {
     "box" => "andytson/aws-dummy",

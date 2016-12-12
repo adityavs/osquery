@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -37,7 +37,7 @@ class Status {
    * Note that the default constructor initialized an osquery::Status instance
    * to a state such that a successful operation is indicated.
    */
-  Status() : code_(0), message_("OK") {}
+  explicit Status(int c = 0) : code_(c), message_("OK") {}
 
   /**
    * @brief A constructor which can be used to concisely express the status of
@@ -105,7 +105,7 @@ class Status {
    *   }
    * @endcode
    */
-  operator bool() const { return ok(); }
+  /* explicit */ operator bool() const { return ok(); }
 
   // Below operator implementations useful for testing with gtest
 

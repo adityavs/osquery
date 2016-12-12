@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,8 +14,8 @@
 
 #include <SystemConfiguration/SCNetworkReachability.h>
 
-#include <osquery/status.h>
 #include <osquery/events.h>
+#include <osquery/status.h>
 
 namespace osquery {
 
@@ -27,22 +27,25 @@ enum SCNetworkSubscriptionType {
 struct SCNetworkSubscriptionContext : public SubscriptionContext {
   // Target type.
   SCNetworkSubscriptionType type;
+
   // The hostname or address target for reachability monitoring.
   std::string target;
-  short family;
+
+  short family{0};
+
   // Limit this target subscription to the set of flags.
-  SCNetworkReachabilityFlags mask;
+  SCNetworkReachabilityFlags mask{0};
 };
 
-typedef std::shared_ptr<SCNetworkSubscriptionContext>
-    SCNetworkSubscriptionContextRef;
+using SCNetworkSubscriptionContextRef =
+    std::shared_ptr<SCNetworkSubscriptionContext>;
 
 struct SCNetworkEventContext : public EventContext {
   SCNetworkSubscriptionContextRef subscription;
   SCNetworkReachabilityFlags flags;
 };
 
-typedef std::shared_ptr<SCNetworkEventContext> SCNetworkEventContextRef;
+using SCNetworkEventContextRef = std::shared_ptr<SCNetworkEventContext>;
 
 /**
  * @brief An osquery EventPublisher for the Apple SCNetwork Reachability API.
@@ -56,11 +59,13 @@ class SCNetworkEventPublisher
   DECLARE_PUBLISHER("scnetwork");
 
  public:
-  void configure();
-  void tearDown();
+  void configure() override;
+
+  Status setUp() override { return Status(1, "Publisher not used"); }
+  void tearDown() override;
 
   // Entrypoint to the run loop
-  Status run();
+  Status run() override;
 
  public:
   /// SCNetwork registers a client callback instead of using a select/poll loop.
@@ -69,15 +74,15 @@ class SCNetworkEventPublisher
                        void* info);
 
  public:
-  SCNetworkEventPublisher() : EventPublisher(), run_loop_(nullptr) {}
   bool shouldFire(const SCNetworkSubscriptionContextRef& sc,
-                  const SCNetworkEventContextRef& ec) const;
+                  const SCNetworkEventContextRef& ec) const override;
 
  private:
   // Restart the run loop by calling configure.
   void restart();
+
   // Stop the run loop.
-  void stop();
+  void stop() override;
 
  private:
   void addHostname(const SCNetworkSubscriptionContextRef& sc);
@@ -85,11 +90,26 @@ class SCNetworkEventPublisher
   void addTarget(const SCNetworkSubscriptionContextRef& sc,
                  const SCNetworkReachabilityRef& target);
 
+  /// Helper method to clear all targets.
+  void clearAll();
+
  private:
+  /// Configured hostname targets.
   std::vector<std::string> target_names_;
+
+  /// Configured host address targets.
   std::vector<std::string> target_addresses_;
+
+  /// A container for all reachability targets.
   std::vector<SCNetworkReachabilityRef> targets_;
+
+  /// A target-association context sortage.
   std::vector<SCNetworkReachabilityContext*> contexts_;
-  CFRunLoopRef run_loop_;
+
+  /// This publisher thread's runloop.
+  CFRunLoopRef run_loop_{nullptr};
+
+  /// Storage/container operations protection mutex.
+  mutable Mutex mutex_;
 };
 }

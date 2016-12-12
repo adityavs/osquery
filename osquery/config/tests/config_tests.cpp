@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#include <memory>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -14,41 +16,67 @@
 #include <osquery/config.h>
 #include <osquery/core.h>
 #include <osquery/flags.h>
+#include <osquery/packs.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
+#include <osquery/system.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/core/json.h"
+#include "osquery/tests/test_util.h"
+
+namespace pt = boost::property_tree;
 
 namespace osquery {
 
-// The config_path flag is defined in the filesystem config plugin.
-DECLARE_string(config_path);
+// Blacklist testing methods, internal to config implementations.
+extern void restoreScheduleBlacklist(std::map<std::string, size_t>& blacklist);
+extern void saveScheduleBlacklist(
+    const std::map<std::string, size_t>& blacklist);
+extern void stripConfigComments(std::string& json);
 
 class ConfigTests : public testing::Test {
  public:
-  ConfigTests() {
-    Registry::setActive("config", "filesystem");
-    FLAGS_config_path = kTestDataPath + "test.config";
-  }
+  ConfigTests() { Config::getInstance().reset(); }
 
  protected:
-  void SetUp() {
-    createMockFileStructure();
-    Registry::setUp();
-    Config::load();
-  }
+  void SetUp() { createMockFileStructure(); }
 
   void TearDown() { tearDownMockFileStructure(); }
+
+ protected:
+  Status load() { return Config::getInstance().load(); }
+  void setLoaded() { Config::getInstance().loaded_ = true; }
+  Config& get() { return Config::getInstance(); }
 };
 
 class TestConfigPlugin : public ConfigPlugin {
  public:
-  TestConfigPlugin() {}
-  Status genConfig(std::map<std::string, std::string>& config) {
-    config["data"] = "foobar";
-    return Status(0, "OK");
-    ;
+  TestConfigPlugin() {
+    genConfigCount = 0;
+    genPackCount = 0;
   }
+
+  Status genConfig(std::map<std::string, std::string>& config) override {
+    genConfigCount++;
+    std::string content;
+    auto s = readFile(kTestDataPath + "test_noninline_packs.conf", content);
+    config["data"] = content;
+    return s;
+  }
+
+  Status genPack(const std::string& name,
+                 const std::string& value,
+                 std::string& pack) override {
+    genPackCount++;
+    std::stringstream ss;
+    pt::write_json(ss, getUnrestrictedPack(), false);
+    pack = ss.str();
+    return Status(0, "OK");
+  }
+
+ public:
+  int genConfigCount{0};
+  int genPackCount{0};
 };
 
 TEST_F(ConfigTests, test_plugin) {
@@ -62,103 +90,161 @@ TEST_F(ConfigTests, test_plugin) {
 
   EXPECT_EQ(status.ok(), true);
   EXPECT_EQ(status.toString(), "OK");
-  EXPECT_EQ(response[0].at("data"), "foobar");
 }
 
-TEST_F(ConfigTests, test_queries_execute) {
-  ConfigDataInstance config;
-  EXPECT_EQ(config.schedule().size(), 3);
-}
-
-TEST_F(ConfigTests, test_watched_files) {
-  ConfigDataInstance config;
-  ASSERT_EQ(config.files().size(), 3);
-  // From the deprecated "additional_monitoring" collection.
-  EXPECT_EQ(config.files().at("downloads").size(), 5);
-
-  // From the new, recommended top-level "file_paths" collection.
-  EXPECT_EQ(config.files().at("downloads2").size(), 5);
-  EXPECT_EQ(config.files().at("system_binaries").size(), 3);
-}
-
-TEST_F(ConfigTests, test_locking) {
-  {
-    // Assume multiple instance accessors will be active.
-    ConfigDataInstance config1;
-    ConfigDataInstance config2;
-
-    // But a unique lock cannot be acquired.
-    boost::unique_lock<boost::shared_mutex> lock(Config::getInstance().mutex_,
-                                                 boost::defer_lock);
-    ASSERT_FALSE(lock.try_lock());
-  }
-
-  {
-    // However, a unique lock can be obtained when without instances accessors.
-    boost::unique_lock<boost::shared_mutex> lock(Config::getInstance().mutex_,
-                                                 boost::defer_lock);
-    ASSERT_TRUE(lock.try_lock());
-  }
-}
-
-TEST_F(ConfigTests, test_config_update) {
-  std::string digest;
-  // Get a snapshot of the digest before making config updates.
-  auto status = Config::getMD5(digest);
-  EXPECT_TRUE(status);
-
-  // Request an update of the 'new_source1'. Set new1 = value.
-  status =
-      Config::update({{"new_source1", "{\"options\": {\"new1\": \"value\"}}"}});
-  EXPECT_TRUE(status);
-
-  // At least, the amalgamated config digest should have changed.
-  std::string new_digest;
-  Config::getMD5(new_digest);
-  EXPECT_NE(digest, new_digest);
-
-  // Access the option that was added in the update to source 'new_source1'.
-  {
-    ConfigDataInstance config;
-    auto option = config.data().get<std::string>("options.new1", "");
-    EXPECT_EQ(option, "value");
-  }
-
-  // Add a lexically larger source that emits the same option 'new1'.
-  Config::update({{"new_source2", "{\"options\": {\"new1\": \"changed\"}}"}});
-
-  {
-    ConfigDataInstance config;
-    auto option = config.data().get<std::string>("options.new1", "");
-    // Expect the amalgamation to have overwritten 'new_source1'.
-    EXPECT_EQ(option, "changed");
-  }
-
-  // Again add a source but emit a different option, both 'new1' and 'new2'
-  // should be in the amalgamated/merged config.
-  Config::update({{"new_source3", "{\"options\": {\"new2\": \"different\"}}"}});
-
-  {
-    ConfigDataInstance config;
-    auto option = config.data().get<std::string>("options.new1", "");
-    EXPECT_EQ(option, "changed");
-    option = config.data().get<std::string>("options.new2", "");
-    EXPECT_EQ(option, "different");
-  }
-}
-
-TEST_F(ConfigTests, test_bad_config_update) {
+TEST_F(ConfigTests, test_invalid_content) {
   std::string bad_json = "{\"options\": {},}";
-  ASSERT_NO_THROW(Config::update({{"bad_source", bad_json}}));
+  ASSERT_NO_THROW(get().update({{"bad_source", bad_json}}));
+}
+
+TEST_F(ConfigTests, test_strip_comments) {
+  std::string json_comments =
+      "// Comment\n // Comment //\n  # Comment\n# Comment\n{\"options\":{}}";
+
+  // Test support for stripping C++ and hash style comments from config JSON.
+  auto actual = json_comments;
+  stripConfigComments(actual);
+  std::string expected = "{\"options\":{}}\n";
+  EXPECT_EQ(actual, expected);
+
+  // Make sure the config update source logic applies the stripping.
+  EXPECT_TRUE(get().update({{"data", json_comments}}));
+}
+
+TEST_F(ConfigTests, test_schedule_blacklist) {
+  auto current_time = getUnixTime();
+  std::map<std::string, size_t> blacklist;
+  saveScheduleBlacklist(blacklist);
+  restoreScheduleBlacklist(blacklist);
+  EXPECT_EQ(blacklist.size(), 0U);
+
+  // Create some entries.
+  blacklist["test_1"] = current_time * 2;
+  blacklist["test_2"] = current_time * 3;
+  saveScheduleBlacklist(blacklist);
+  blacklist.clear();
+  restoreScheduleBlacklist(blacklist);
+  ASSERT_EQ(blacklist.count("test_1"), 1U);
+  ASSERT_EQ(blacklist.count("test_2"), 1U);
+  EXPECT_EQ(blacklist.at("test_1"), current_time * 2);
+  EXPECT_EQ(blacklist.at("test_2"), current_time * 3);
+
+  // Now save an expired query.
+  blacklist["test_1"] = 1;
+  saveScheduleBlacklist(blacklist);
+  blacklist.clear();
+
+  // When restoring, the values below the current time will not be included.
+  restoreScheduleBlacklist(blacklist);
+  EXPECT_EQ(blacklist.size(), 1U);
+}
+
+TEST_F(ConfigTests, test_pack_noninline) {
+  Registry::add<TestConfigPlugin>("config", "test");
+  // Change the active config plugin.
+  EXPECT_TRUE(Registry::setActive("config", "test").ok());
+
+  // Get a specialized config/test plugin.
+  const auto& plugin = std::dynamic_pointer_cast<TestConfigPlugin>(
+      Registry::get("config", "test"));
+
+  this->load();
+  // Expect the test plugin to have recorded 1 pack.
+  // This value is incremented when its genPack method is called.
+  EXPECT_EQ(plugin->genPackCount, 1);
+
+  int total_packs = 0;
+  // Expect the config to have recorded a pack for the inline and non-inline.
+  get().packs(
+      [&total_packs](const std::shared_ptr<Pack>& pack) { total_packs++; });
+  EXPECT_EQ(total_packs, 2);
+}
+
+TEST_F(ConfigTests, test_pack_restrictions) {
+  auto tree = getExamplePacksConfig();
+  auto packs = tree.get_child("packs");
+  for (const auto& pack : packs) {
+    get().addPack(pack.first, "", pack.second);
+  }
+
+  std::map<std::string, bool> results = {
+      {"unrestricted_pack", true},
+      {"discovery_pack", false},
+      {"fake_version_pack", false},
+      // Although this is a valid discovery query, there is no SQL plugin in
+      // the core tests.
+      {"valid_discovery_pack", false},
+      {"restricted_pack", false},
+  };
+
+  get().packs(([&results](std::shared_ptr<Pack>& pack) {
+    if (results[pack->getName()]) {
+      EXPECT_TRUE(pack->shouldPackExecute());
+    } else {
+      EXPECT_FALSE(pack->shouldPackExecute());
+    }
+  }));
+}
+
+TEST_F(ConfigTests, test_pack_removal) {
+  size_t pack_count = 0;
+  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  EXPECT_EQ(pack_count, 0U);
+
+  pack_count = 0;
+  get().addPack("unrestricted_pack", "", getUnrestrictedPack());
+  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  EXPECT_EQ(pack_count, 1U);
+
+  pack_count = 0;
+  get().removePack("unrestricted_pack");
+  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  EXPECT_EQ(pack_count, 0U);
+}
+
+TEST_F(ConfigTests, test_content_update) {
+  // Read config content manually.
+  std::string content;
+  readFile(kTestDataPath + "test_parse_items.conf", content);
+
+  // Create the output of a `genConfig`.
+  std::map<std::string, std::string> config_data;
+  config_data["awesome"] = content;
+
+  // Update, then clear, packs should have been cleared.
+  get().update(config_data);
+  size_t count = 0;
+  auto packCounter = [&count](std::shared_ptr<Pack>& pack) { count++; };
+  get().packs(packCounter);
+  EXPECT_GT(count, 0U);
+
+  // Now clear.
+  config_data["awesome"] = "";
+  get().update(config_data);
+  count = 0;
+  get().packs(packCounter);
+  EXPECT_EQ(count, 0U);
+}
+
+TEST_F(ConfigTests, test_get_scheduled_queries) {
+  std::vector<ScheduledQuery> queries;
+  get().addPack("unrestricted_pack", "", getUnrestrictedPack());
+  get().scheduledQueries(
+      ([&queries](const std::string&, const ScheduledQuery& query) {
+        queries.push_back(query);
+      }));
+  EXPECT_EQ(queries.size(), getUnrestrictedPack().get_child("queries").size());
 }
 
 class TestConfigParserPlugin : public ConfigParserPlugin {
  public:
-  std::vector<std::string> keys() {
+  std::vector<std::string> keys() const override {
+    // This config parser requests the follow top-level-config keys.
     return {"dictionary", "dictionary2", "list"};
   }
 
-  Status update(const std::map<std::string, ConfigTree>& config) {
+  Status update(const std::string& source,
+                const ParserConfig& config) override {
     // Set a simple boolean indicating the update callin occurred.
     update_called = true;
     // Copy all expected keys into the parser's data.
@@ -171,6 +257,7 @@ class TestConfigParserPlugin : public ConfigParserPlugin {
     return Status(0, "OK");
   }
 
+  // Flag tracking that the update method was called.
   static bool update_called;
 
  private:
@@ -180,79 +267,82 @@ class TestConfigParserPlugin : public ConfigParserPlugin {
 // An intermediate boolean to check parser updates.
 bool TestConfigParserPlugin::update_called = false;
 
-TEST_F(ConfigTests, test_config_parser) {
-  // Register a config parser plugin.
+TEST_F(ConfigTests, test_get_parser) {
   Registry::add<TestConfigParserPlugin>("config_parser", "test");
-  Registry::get("config_parser", "test")->setUp();
 
-  {
-    // Access the parser's data without having updated the configuration.
-    ConfigDataInstance config;
-    const auto& test_data = config.getParsedData("test");
+  auto s = get().update(getTestConfigMap());
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(s.toString(), "OK");
 
-    // Expect the setUp method to have run and set blank defaults.
-    // Accessing an invalid property tree key will abort.
-    ASSERT_EQ(test_data.get_child("dictionary").count(""), 0);
-  }
+  auto plugin = get().getParser("test");
+  EXPECT_TRUE(plugin != nullptr);
+  EXPECT_TRUE(plugin.get() != nullptr);
 
-  // Update or load the config, expect the parser to be called.
-  Config::update(
-      {{"source1",
-        "{\"dictionary\": {\"key1\": \"value1\"}, \"list\": [\"first\"]}"}});
-  ASSERT_TRUE(TestConfigParserPlugin::update_called);
+  const auto& parser =
+      std::dynamic_pointer_cast<TestConfigParserPlugin>(plugin);
+  const auto& data = parser->getData();
 
-  {
-    // Now access the parser's data AFTER updating the config (no longer blank)
-    ConfigDataInstance config;
-    const auto& test_data = config.getParsedData("test");
-
-    // Expect a value that existed in the configuration.
-    EXPECT_EQ(test_data.count("dictionary"), 1);
-    EXPECT_EQ(test_data.get("dictionary.key1", ""), "value1");
-    // Expect a value for every key the parser requested.
-    // Every requested key will be present, event if the key's tree is empty.
-    EXPECT_EQ(test_data.count("dictionary2"), 1);
-    // Expect the parser-created data item.
-    EXPECT_EQ(test_data.count("dictionary3"), 1);
-    EXPECT_EQ(test_data.get("dictionary3.key2", ""), "value2");
-  }
-
-  // Update from a secondary source into a dictionary.
-  // Expect that the keys in the top-level dictionary are merged.
-  Config::update({{"source2", "{\"dictionary\": {\"key3\": \"value3\"}}"}});
-  // Update from a third source into a list.
-  // Expect that the items from each source in the top-level list are merged.
-  Config::update({{"source3", "{\"list\": [\"second\"]}"}});
-
-  {
-    ConfigDataInstance config;
-    const auto& test_data = config.getParsedData("test");
-
-    EXPECT_EQ(test_data.count("dictionary"), 1);
-    EXPECT_EQ(test_data.get("dictionary.key1", ""), "value1");
-    EXPECT_EQ(test_data.get("dictionary.key3", ""), "value3");
-    EXPECT_EQ(test_data.count("list"), 1);
-    EXPECT_EQ(test_data.get_child("list").count(""), 2);
-  }
+  EXPECT_EQ(data.count("list"), 1U);
+  EXPECT_EQ(data.count("dictionary"), 1U);
 }
 
-TEST_F(ConfigTests, test_splay) {
-  auto val1 = splayValue(100, 10);
-  EXPECT_GE(val1, 90);
-  EXPECT_LE(val1, 110);
+class PlaceboConfigParserPlugin : public ConfigParserPlugin {
+ public:
+  std::vector<std::string> keys() const override { return {}; }
+  Status update(const std::string&, const ParserConfig&) override {
+    return Status(0);
+  }
 
-  auto val2 = splayValue(100, 10);
-  EXPECT_GE(val2, 90);
-  EXPECT_LE(val2, 110);
+  /// Make sure configure is called.
+  void configure() override { configures++; }
 
-  auto val3 = splayValue(10, 0);
-  EXPECT_EQ(val3, 10);
+  size_t configures{0};
+};
 
-  auto val4 = splayValue(100, 1);
-  EXPECT_GE(val4, 99);
-  EXPECT_LE(val4, 101);
+TEST_F(ConfigTests, test_plugin_reconfigure) {
+  // Add a configuration plugin (could be any plugin) that will react to
+  // config updates.
+  Registry::add<PlaceboConfigParserPlugin>("config_parser", "placebo");
 
-  auto val5 = splayValue(1, 10);
-  EXPECT_EQ(val5, 1);
+  // Create a config that has been loaded.
+  setLoaded();
+  get().update({{"data", "{}"}});
+  // Get the placebo.
+  auto placebo = std::static_pointer_cast<PlaceboConfigParserPlugin>(
+      Registry::get("config_parser", "placebo"));
+  EXPECT_EQ(placebo->configures, 1U);
+}
+
+TEST_F(ConfigTests, test_pack_file_paths) {
+  size_t count = 0;
+  auto fileCounter =
+      [&count](const std::string& c, const std::vector<std::string>& files) {
+        count += files.size();
+      };
+
+  get().addPack("unrestricted_pack", "", getUnrestrictedPack());
+  get().files(fileCounter);
+  EXPECT_EQ(count, 2U);
+
+  count = 0;
+  get().removePack("unrestricted_pack");
+  get().files(fileCounter);
+  EXPECT_EQ(count, 0U);
+
+  count = 0;
+  get().addPack("restricted_pack", "", getRestrictedPack());
+  get().files(fileCounter);
+  EXPECT_EQ(count, 0U);
+
+  // Test a more-generic update.
+  count = 0;
+  get().update({{"data", "{\"file_paths\": {\"new\": [\"/new\"]}}"}});
+  get().files(fileCounter);
+  EXPECT_EQ(count, 1U);
+
+  count = 0;
+  get().update({{"data", "{}"}});
+  get().files(fileCounter);
+  EXPECT_EQ(count, 0U);
 }
 }

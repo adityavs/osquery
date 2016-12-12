@@ -2,6 +2,8 @@
 # Usage: add table spec names to this list to prevent table generation
 # Example: add tables that are not yet ready for release
 # Example: add a platform:table_name, which is not yet ready
+
+# Blacklist a ton of tables for FreeBSD:
 freebsd:acpi_tables
 freebsd:arp_cache
 freebsd:block_devices
@@ -9,12 +11,13 @@ freebsd:chrome_extensions
 freebsd:disk_encryption
 freebsd:file_events
 freebsd:firefox_addons
+freebsd:device_file
+freebsd:device_partitions
 freebsd:user_groups
 freebsd:hardware_events
 freebsd:kernel_info
 freebsd:last
 freebsd:opera_extensions
-freebsd:os_version
 freebsd:passwd_changes
 freebsd:pci_devices
 freebsd:routes
@@ -24,4 +27,6 @@ freebsd:yara_events
 freebsd:yara
 freebsd:system_controls
 freebsd:smbios_tables
+
+# Blacklisting as an example:
 example

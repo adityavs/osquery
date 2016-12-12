@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -17,6 +17,8 @@
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
+
+#include "osquery/core/conversions.h"
 
 namespace fs = boost::filesystem;
 namespace pt = boost::property_tree;
@@ -88,7 +90,7 @@ void genLaunchdItem(const pt::ptree& tree,
     r[it.second] = boost::algorithm::join(arguments, " ");
   }
 
-  results.push_back(r);
+  results.push_back(std::move(r));
 }
 
 QueryData genLaunchd(QueryContext& context) {
@@ -116,6 +118,10 @@ QueryData genLaunchd(QueryContext& context) {
   for (const auto& path : launchers) {
     if (!context.constraints["path"].matches(path)) {
       // Optimize by not searching when a path is a constraint.
+      continue;
+    }
+
+    if (!osquery::pathExists(path)) {
       continue;
     }
 

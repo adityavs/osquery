@@ -1,9 +1,11 @@
+file(GLOB OS_CORE_SOURCE "${PROCESS_FAMILY}/*.cpp")
+file(GLOB OS_CORE_TESTS_SOURCE "tests/${PROCESS_FAMILY}/*.cpp")
+
 if(APPLE)
   set (OS_CORE_SOURCE
+    ${OS_CORE_SOURCE}
     darwin/conversions.cpp
   )
-else()
-  set (OS_CORE_SOURCE "")
 endif()
 
 ADD_OSQUERY_LIBRARY(TRUE osquery_core
@@ -12,11 +14,11 @@ ADD_OSQUERY_LIBRARY(TRUE osquery_core
   system.cpp
   ${OS_CORE_SOURCE}
   tables.cpp
-  text.cpp
   flags.cpp
   hash.cpp
   watcher.cpp
+  process_shared.cpp
 )
 
 file(GLOB OSQUERY_CORE_TESTS "tests/*.cpp")
-ADD_OSQUERY_TEST(TRUE ${OSQUERY_CORE_TESTS})
+ADD_OSQUERY_TEST(TRUE ${OSQUERY_CORE_TESTS} ${OS_CORE_TESTS_SOURCE})

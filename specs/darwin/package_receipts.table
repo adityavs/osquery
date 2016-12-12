@@ -1,4 +1,4 @@
-table_name("package_receipts")
+table_name("package_receipts", aliases=["packages"])
 description("OS X package receipt details.")
 schema([
     Column("package_id", TEXT, "Package domain identifier"),
@@ -12,5 +12,9 @@ schema([
 ])
 implementation("packages@genPackageReceipts")
 examples([
-  "select * from package_bom where path = '/var/db/receipts/com.apple.pkg.MobileDevice.bom'"
+    "select * from package_bom where path = '/var/db/receipts/com.apple.pkg.MobileDevice.bom'"
+])
+fuzz_paths([
+    "/private/var/db/receipts/",
+    "/Library/Receipts/",
 ])

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -11,15 +11,56 @@
 #include <cstdlib>
 #include <sstream>
 
+#ifndef WIN32
 #include <dlfcn.h>
-
-#include <boost/property_tree/json_parser.hpp>
+#endif
 
 #include <osquery/extensions.h>
 #include <osquery/logger.h>
 #include <osquery/registry.h>
 
+#include "osquery/core/conversions.h"
+#include "osquery/core/json.h"
+
+namespace pt = boost::property_tree;
+
 namespace osquery {
+
+HIDDEN_FLAG(bool, registry_exceptions, false, "Allow plugin exceptions");
+
+using InitializerMap = std::map<std::string, InitializerInterface*>;
+
+InitializerMap& registry_initializer() {
+  static InitializerMap registry_;
+  return registry_;
+}
+
+InitializerMap& plugin_initializer() {
+  static InitializerMap plugin_;
+  return plugin_;
+}
+
+void registerRegistry(InitializerInterface* const item) {
+  if (item != nullptr) {
+    registry_initializer().insert({item->id(), item});
+  }
+}
+
+void registerPlugin(InitializerInterface* const item) {
+  if (item != nullptr) {
+    plugin_initializer().insert({item->id(), item});
+  }
+}
+
+void registryAndPluginInit() {
+  for (const auto& it : registry_initializer()) {
+    it.second->run();
+  }
+
+  for (const auto& it : plugin_initializer()) {
+    it.second->run();
+  }
+}
 
 void RegistryHelperCore::remove(const std::string& item_name) {
   if (items_.count(item_name) > 0) {
@@ -49,19 +90,33 @@ bool RegistryHelperCore::isInternal(const std::string& item_name) const {
 }
 
 Status RegistryHelperCore::setActive(const std::string& item_name) {
-  if (items_.count(item_name) == 0 && external_.count(item_name) == 0) {
-    return Status(1, "Unknown registry item");
+  // Default support multiple active plugins.
+  for (const auto& item : osquery::split(item_name, ",")) {
+    if (items_.count(item) == 0 && external_.count(item) == 0) {
+      return Status(1, "Unknown registry plugin: " + item);
+    }
   }
 
+  Status status(0, "OK");
   active_ = item_name;
   // The active plugin is setup when initialized.
-  if (exists(item_name, true)) {
-    Registry::get(name_, item_name)->setUp();
+  for (const auto& item : osquery::split(item_name, ",")) {
+    if (exists(item, true)) {
+      status = Registry::get(name_, item)->setUp();
+    } else if (exists(item, false) && !Registry::external()) {
+      // If the active plugin is within an extension we must wait.
+      // An extension will first broadcast the registry, then receive the list
+      // of active plugins, active them if they are extension-local, and finally
+      // start their extension socket.
+      status = pingExtension(getExtensionSocket(external_.at(item_name)));
+    }
   }
-  return Status(0, "OK");
+  return status;
 }
 
-const std::string& RegistryHelperCore::getActive() const { return active_; }
+const std::string& RegistryHelperCore::getActive() const {
+  return active_;
+}
 
 RegistryRoutes RegistryHelperCore::getRoutes() const {
   RegistryRoutes route_table;
@@ -91,14 +146,16 @@ RegistryRoutes RegistryHelperCore::getRoutes() const {
 Status RegistryHelperCore::call(const std::string& item_name,
                                 const PluginRequest& request,
                                 PluginResponse& response) {
+  // Search local plugins (items) for the plugin.
   if (items_.count(item_name) > 0) {
     return items_.at(item_name)->call(request, response);
   }
 
+  // Check if the item was broadcasted as a plugin within an extension.
   if (external_.count(item_name) > 0) {
     // The item is a registered extension, call the extension by UUID.
-    return callExtension(external_.at(item_name), name_, item_name, request,
-                         response);
+    return callExtension(
+        external_.at(item_name), name_, item_name, request, response);
   } else if (routes_.count(item_name) > 0) {
     // The item has a route, but no extension, pass in the route info.
     response = routes_.at(item_name);
@@ -128,6 +185,20 @@ const std::string& RegistryHelperCore::getAlias(
   return aliases_.at(alias);
 }
 
+Status RegistryHelperCore::add(const std::string& item_name, bool internal) {
+  // The item can be listed as internal, meaning it does not broadcast.
+  if (internal) {
+    internal_.push_back(item_name);
+  }
+
+  // The item may belong to a module.
+  if (RegistryFactory::usingModule()) {
+    modules_[item_name] = RegistryFactory::getModule();
+  }
+
+  return Status(0, "OK");
+}
+
 void RegistryHelperCore::setUp() {
   // If this registry does not auto-setup do NOT setup the registry items.
   if (!auto_setup_) {
@@ -155,6 +226,48 @@ void RegistryHelperCore::setUp() {
   }
 }
 
+void RegistryHelperCore::configure() {
+  if (!active_.empty() && exists(active_, true)) {
+    items_.at(active_)->configure();
+  } else {
+    for (auto& item : items_) {
+      item.second->configure();
+    }
+  }
+}
+
+Status RegistryHelperCore::addExternal(const RouteUUID& uuid,
+                                       const RegistryRoutes& routes) {
+  // Add each route name (item name) to the tracking.
+  for (const auto& route : routes) {
+    // Keep the routes info assigned to the registry.
+    routes_[route.first] = route.second;
+    auto status = addExternalPlugin(route.first, route.second);
+    external_[route.first] = uuid;
+    if (!status.ok()) {
+      return status;
+    }
+  }
+  return Status(0, "OK");
+}
+
+/// Remove all the routes for a given uuid.
+void RegistryHelperCore::removeExternal(const RouteUUID& uuid) {
+  std::vector<std::string> removed_items;
+  for (const auto& item : external_) {
+    if (item.second == uuid) {
+      removeExternalPlugin(item.first);
+      removed_items.push_back(item.first);
+    }
+  }
+
+  // Remove items belonging to the external uuid.
+  for (const auto& item : removed_items) {
+    external_.erase(item);
+    routes_.erase(item);
+  }
+}
+
 /// Facility method to check if a registry item exists.
 bool RegistryHelperCore::exists(const std::string& item_name,
                                 bool local) const {
@@ -179,10 +292,14 @@ std::vector<std::string> RegistryHelperCore::names() const {
 }
 
 /// Facility method to count the number of items in this registry.
-size_t RegistryHelperCore::count() const { return items_.size(); }
+size_t RegistryHelperCore::count() const {
+  return items_.size();
+}
 
 /// Allow the registry to introspect into the registered name (for logging).
-void RegistryHelperCore::setName(const std::string& name) { name_ = name; }
+void RegistryHelperCore::setName(const std::string& name) {
+  name_ = name;
+}
 
 const std::map<std::string, PluginRegistryHelperRef>& RegistryFactory::all() {
   return instance().registries_;
@@ -213,7 +330,9 @@ RegistryBroadcast RegistryFactory::getBroadcast() {
 
 Status RegistryFactory::addBroadcast(const RouteUUID& uuid,
                                      const RegistryBroadcast& broadcast) {
-  if (instance().extensions_.count(uuid) > 0) {
+  auto& self = instance();
+  WriteLock lock(self.mutex_);
+  if (self.extensions_.count(uuid) > 0) {
     return Status(1, "Duplicate extension UUID: " + std::to_string(uuid));
   }
 
@@ -253,11 +372,13 @@ Status RegistryFactory::addBroadcast(const RouteUUID& uuid,
       Registry::registry(registry.first)->removeExternal(uuid);
     }
   }
-  instance().extensions_.insert(uuid);
+  self.extensions_.insert(uuid);
   return status;
 }
 
 Status RegistryFactory::removeBroadcast(const RouteUUID& uuid) {
+  auto& self = instance();
+  WriteLock lock(self.mutex_);
   if (instance().extensions_.count(uuid) == 0) {
     return Status(1, "Unknown extension UUID: " + std::to_string(uuid));
   }
@@ -295,14 +416,28 @@ Status RegistryFactory::call(const std::string& registry_name,
                              PluginResponse& response) {
   // Forward factory call to the registry.
   try {
+    if (item_name.find(",") != std::string::npos) {
+      // Call is multiplexing plugins (usually for multiple loggers).
+      for (const auto& item : osquery::split(item_name, ",")) {
+        registry(registry_name)->call(item, request, response);
+      }
+      // All multiplexed items are called without regard for statuses.
+      return Status(0);
+    }
     return registry(registry_name)->call(item_name, request, response);
   } catch (const std::exception& e) {
     LOG(ERROR) << registry_name << " registry " << item_name
                << " plugin caused exception: " << e.what();
+    if (FLAGS_registry_exceptions) {
+      throw;
+    }
     return Status(1, e.what());
   } catch (...) {
     LOG(ERROR) << registry_name << " registry " << item_name
                << " plugin caused unknown exception";
+    if (FLAGS_registry_exceptions) {
+      throw std::runtime_error(registry_name + ": " + item_name + " failed");
+    }
     return Status(2, "Unknown exception");
   }
 }
@@ -328,11 +463,26 @@ Status RegistryFactory::call(const std::string& registry_name,
   return call(registry_name, request, response);
 }
 
+Status RegistryFactory::callTable(const std::string& table_name,
+                                  QueryContext& context,
+                                  PluginResponse& response) {
+  auto& tables = registry("table")->items_;
+  // This only works for local tables.
+  if (tables.count(table_name) > 0) {
+    auto plugin = std::dynamic_pointer_cast<TablePlugin>(tables.at(table_name));
+    response = plugin->generate(context);
+    return Status(0);
+  } else {
+    // If the table is not local then it does not benefit from complex contexts.
+    PluginRequest request = {{"action", "generate"}};
+    TablePlugin::setRequestFromContext(context, request);
+    return call("table", table_name, request, response);
+  }
+}
+
 Status RegistryFactory::setActive(const std::string& registry_name,
                                   const std::string& item_name) {
-  if (!exists(registry_name, item_name)) {
-    return Status(1, "Registry plugin does not exist");
-  }
+  WriteLock lock(instance().mutex_);
   return registry(registry_name)->setActive(item_name);
 }
 
@@ -376,14 +526,18 @@ std::vector<std::string> RegistryFactory::names(
 }
 
 std::vector<RouteUUID> RegistryFactory::routeUUIDs() {
+  auto& self = instance();
+  WriteLock lock(self.mutex_);
   std::vector<RouteUUID> uuids;
-  for (const auto& extension : instance().extensions_) {
+  for (const auto& extension : self.extensions_) {
     uuids.push_back(extension);
   }
   return uuids;
 }
 
-size_t RegistryFactory::count() { return instance().registries_.size(); }
+size_t RegistryFactory::count() {
+  return instance().registries_.size();
+}
 
 size_t RegistryFactory::count(const std::string& registry_name) {
   if (instance().registries_.count(registry_name) == 0) {
@@ -392,25 +546,13 @@ size_t RegistryFactory::count(const std::string& registry_name) {
   return instance().registry(registry_name)->count();
 }
 
-Status RegistryHelperCore::add(const std::string& item_name, bool internal) {
-  // The item can be listed as internal, meaning it does not broadcast.
-  if (internal) {
-    internal_.push_back(item_name);
-  }
-
-  // The item may belong to a module.
-  if (RegistryFactory::usingModule()) {
-    modules_[item_name] = RegistryFactory::getModule();
-  }
-
-  return Status(0, "OK");
-}
-
 const std::map<RouteUUID, ModuleInfo>& RegistryFactory::getModules() {
   return instance().modules_;
 }
 
-RouteUUID RegistryFactory::getModule() { return instance().module_uuid_; }
+RouteUUID RegistryFactory::getModule() {
+  return instance().module_uuid_;
+}
 
 bool RegistryFactory::usingModule() {
   // Check if the registry is allowing a module's registrations.
@@ -448,10 +590,11 @@ RegistryModuleLoader::RegistryModuleLoader(const std::string& path)
   // Locking the registry prevents the module's global initialization from
   // adding or creating registry items.
   RegistryFactory::initModule(path_);
-  handle_ = dlopen(path_.c_str(), RTLD_NOW | RTLD_LOCAL);
+
+  handle_ = platformModuleOpen(path_);
   if (handle_ == nullptr) {
     VLOG(1) << "Failed to load module: " << path_;
-    VLOG(1) << dlerror();
+    VLOG(1) << platformModuleGetError();
     return;
   }
 
@@ -460,7 +603,7 @@ RegistryModuleLoader::RegistryModuleLoader(const std::string& path)
   // the SDK's CREATE_MODULE macro, which adds the global-scope constructor.
   if (RegistryFactory::locked()) {
     VLOG(1) << "Failed to declare module: " << path_;
-    dlclose(handle_);
+    platformModuleClose(handle_);
     handle_ = nullptr;
   }
 }
@@ -474,14 +617,15 @@ void RegistryModuleLoader::init() {
   // Locate a well-known symbol in the module.
   // This symbol name is protected against rewriting when the module uses the
   // SDK's CREATE_MODULE macro.
-  auto initializer = (ModuleInitalizer)dlsym(handle_, "initModule");
+  auto initializer =
+      (ModuleInitalizer)platformModuleGetSymbol(handle_, "initModule");
   if (initializer != nullptr) {
     initializer();
     VLOG(1) << "Initialized module: " << path_;
   } else {
     VLOG(1) << "Failed to initialize module: " << path_;
-    VLOG(1) << dlerror();
-    dlclose(handle_);
+    VLOG(1) << platformModuleGetError();
+    platformModuleClose(handle_);
     handle_ = nullptr;
   }
 }
@@ -518,7 +662,11 @@ void Plugin::setResponse(const std::string& key,
                          const boost::property_tree::ptree& tree,
                          PluginResponse& response) {
   std::ostringstream output;
-  boost::property_tree::write_json(output, tree, false);
+  try {
+    boost::property_tree::write_json(output, tree, false);
+  } catch (const pt::json_parser::json_parser_error& /* e */) {
+    // The plugin response could not be serialized.
+  }
   response.push_back({{key, output.str()}});
 }
 }

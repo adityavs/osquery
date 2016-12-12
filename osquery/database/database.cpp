@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,60 +8,51 @@
  *
  */
 
-#include <algorithm>
-#include <iostream>
-#include <sstream>
 #include <set>
-#include <string>
-#include <vector>
 
 #include <boost/lexical_cast.hpp>
-#include <boost/property_tree/json_parser.hpp>
 
 #include <osquery/database.h>
 #include <osquery/logger.h>
+
+#include "osquery/core/json.h"
 
 namespace pt = boost::property_tree;
 
 namespace osquery {
 
-typedef unsigned char byte;
+/// Generate a specific-use registry for database access abstraction.
+CREATE_REGISTRY(DatabasePlugin, "database");
 
-/////////////////////////////////////////////////////////////////////////////
-// Row - the representation of a row in a set of database results. Row is a
-// simple map where individual column names are keys, which map to the Row's
-// respective value
-/////////////////////////////////////////////////////////////////////////////
+CLI_FLAG(bool, database_dump, false, "Dump the contents of the backing store");
 
-std::string escapeNonPrintableBytes(const std::string& data) {
-  std::string escaped;
-  // clang-format off
-  char const hex_chars[16] = {
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-    'A', 'B', 'C', 'D', 'E', 'F',
-  };
-  // clang-format on
-  for (int i = 0; i < data.length(); i++) {
-    if (((byte)data[i]) < 0x20 || ((byte)data[i]) >= 0x80) {
-      escaped += "\\x";
-      escaped += hex_chars[(((byte)data[i])) >> 4];
-      escaped += hex_chars[((byte)data[i] & 0x0F) >> 0];
-    } else {
-      escaped += data[i];
-    }
-  }
-  return escaped;
-}
+CLI_FLAG(string,
+         database_path,
+         OSQUERY_DB_HOME "/osquery.db",
+         "If using a disk-based backing store, specify a path");
+FLAG_ALIAS(std::string, db_path, database_path);
 
-void escapeQueryData(const QueryData& oldData, QueryData& newData) {
-  for (const auto& r : oldData) {
-    Row newRow;
-    for (auto& i : r) {
-      newRow[i.first] = escapeNonPrintableBytes(i.second);
-    }
-    newData.push_back(newRow);
-  }
-}
+FLAG(bool, disable_database, false, "Disable the persistent RocksDB storage");
+DECLARE_bool(decorations_top_level);
+
+#if defined(SKIP_ROCKSDB)
+#define DATABASE_PLUGIN "sqlite"
+#else
+#define DATABASE_PLUGIN "rocksdb"
+#endif
+const std::string kInternalDatabase = DATABASE_PLUGIN;
+
+const std::string kPersistentSettings = "configurations";
+const std::string kQueries = "queries";
+const std::string kEvents = "events";
+const std::string kLogs = "logs";
+
+const std::vector<std::string> kDomains = {kPersistentSettings, kQueries,
+                                           kEvents, kLogs};
+
+bool DatabasePlugin::kDBHandleOptionAllowOpen(false);
+bool DatabasePlugin::kDBHandleOptionRequireWrite(false);
+std::atomic<bool> DatabasePlugin::kCheckingDB(false);
 
 Status serializeRow(const Row& r, pt::ptree& tree) {
   try {
@@ -82,7 +73,12 @@ Status serializeRowJSON(const Row& r, std::string& json) {
   }
 
   std::ostringstream output;
-  pt::write_json(output, tree, false);
+  try {
+    pt::write_json(output, tree, false);
+  } catch (const pt::json_parser::json_parser_error& e) {
+    // The content could not be represented as JSON.
+    return Status(1, e.what());
+  }
   json = output.str();
   return Status(0, "OK");
 }
@@ -108,11 +104,6 @@ Status deserializeRowJSON(const std::string& json, Row& r) {
   return deserializeRow(tree, r);
 }
 
-/////////////////////////////////////////////////////////////////////////////
-// QueryData - the representation of a database query result set. It's a
-// vector of rows
-/////////////////////////////////////////////////////////////////////////////
-
 Status serializeQueryData(const QueryData& q, pt::ptree& tree) {
   for (const auto& r : q) {
     pt::ptree serialized;
@@ -133,7 +124,12 @@ Status serializeQueryDataJSON(const QueryData& q, std::string& json) {
   }
 
   std::ostringstream output;
-  pt::write_json(output, tree, false);
+  try {
+    pt::write_json(output, tree, false);
+  } catch (const pt::json_parser::json_parser_error& e) {
+    // The content could not be represented as JSON.
+    return Status(1, e.what());
+  }
   json = output.str();
   return Status(0, "OK");
 }
@@ -162,39 +158,37 @@ Status deserializeQueryDataJSON(const std::string& json, QueryData& qd) {
   return deserializeQueryData(tree, qd);
 }
 
-/////////////////////////////////////////////////////////////////////////////
-// DiffResults - the representation of two diffed QueryData result sets.
-// Given and old and new QueryData, DiffResults indicates the "added" subset
-// of rows and the "removed" subset of Rows
-/////////////////////////////////////////////////////////////////////////////
-
 Status serializeDiffResults(const DiffResults& d, pt::ptree& tree) {
-  pt::ptree added;
-  auto status = serializeQueryData(d.added, added);
-  if (!status.ok()) {
-    return status;
-  }
-  tree.add_child("added", added);
-
+  // Serialize and add "removed" first.
+  // A property tree is somewhat ordered, this provides a loose contract to
+  // the logger plugins and their aggregations, allowing them to parse chunked
+  // lines. Note that the chunking is opaque to the database functions.
   pt::ptree removed;
-  status = serializeQueryData(d.removed, removed);
+  auto status = serializeQueryData(d.removed, removed);
   if (!status.ok()) {
     return status;
   }
   tree.add_child("removed", removed);
+
+  pt::ptree added;
+  status = serializeQueryData(d.added, added);
+  if (!status.ok()) {
+    return status;
+  }
+  tree.add_child("added", added);
   return Status(0, "OK");
 }
 
 Status deserializeDiffResults(const pt::ptree& tree, DiffResults& dr) {
-  if (tree.count("added") > 0) {
-    auto status = deserializeQueryData(tree.get_child("added"), dr.added);
+  if (tree.count("removed") > 0) {
+    auto status = deserializeQueryData(tree.get_child("removed"), dr.removed);
     if (!status.ok()) {
       return status;
     }
   }
 
-  if (tree.count("removed") > 0) {
-    auto status = deserializeQueryData(tree.get_child("removed"), dr.removed);
+  if (tree.count("added") > 0) {
+    auto status = deserializeQueryData(tree.get_child("added"), dr.added);
     if (!status.ok()) {
       return status;
     }
@@ -210,7 +204,12 @@ Status serializeDiffResultsJSON(const DiffResults& d, std::string& json) {
   }
 
   std::ostringstream output;
-  pt::write_json(output, tree, false);
+  try {
+    pt::write_json(output, tree, false);
+  } catch (const pt::json_parser::json_parser_error& e) {
+    // The content could not be represented as JSON.
+    return Status(1, e.what());
+  }
   json = output.str();
   return Status(0, "OK");
 }
@@ -238,31 +237,60 @@ DiffResults diff(const QueryData& old, const QueryData& current) {
   return r;
 }
 
-/////////////////////////////////////////////////////////////////////////////
-// QueryLogItem - the representation of a log result occuring when a
-// scheduled query yields operating system state change.
-/////////////////////////////////////////////////////////////////////////////
+inline void addLegacyFieldsAndDecorations(const QueryLogItem& item,
+                                          pt::ptree& tree) {
+  // Apply legacy fields.
+  tree.put<std::string>("name", item.name);
+  tree.put<std::string>("hostIdentifier", item.identifier);
+  tree.put<std::string>("calendarTime", item.calendar_time);
+  tree.put<size_t>("unixTime", item.time);
 
-Status serializeQueryLogItem(const QueryLogItem& i, pt::ptree& tree) {
+  // Append the decorations.
+  if (item.decorations.size() > 0) {
+    auto decorator_parent = std::ref(tree);
+    if (!FLAGS_decorations_top_level) {
+      tree.add_child("decorations", pt::ptree());
+      decorator_parent = tree.get_child("decorations");
+    }
+    for (const auto& name : item.decorations) {
+      decorator_parent.get().put<std::string>(name.first, name.second);
+    }
+  }
+}
+
+inline void getLegacyFieldsAndDecorations(const pt::ptree& tree,
+                                          QueryLogItem& item) {
+  if (tree.count("decorations") > 0) {
+    auto& decorations = tree.get_child("decorations");
+    for (const auto& name : decorations) {
+      item.decorations[name.first] = name.second.data();
+    }
+  }
+
+  item.name = tree.get<std::string>("name", "");
+  item.identifier = tree.get<std::string>("hostIdentifier", "");
+  item.calendar_time = tree.get<std::string>("calendarTime", "");
+  item.time = tree.get<int>("unixTime", 0);
+}
+
+Status serializeQueryLogItem(const QueryLogItem& item, pt::ptree& tree) {
   pt::ptree results_tree;
-  if (i.results.added.size() > 0 || i.results.removed.size() > 0) {
-    auto status = serializeDiffResults(i.results, results_tree);
+  if (item.results.added.size() > 0 || item.results.removed.size() > 0) {
+    auto status = serializeDiffResults(item.results, results_tree);
     if (!status.ok()) {
       return status;
     }
     tree.add_child("diffResults", results_tree);
   } else {
-    auto status = serializeQueryData(i.snapshot_results, results_tree);
+    auto status = serializeQueryData(item.snapshot_results, results_tree);
     if (!status.ok()) {
       return status;
     }
     tree.add_child("snapshot", results_tree);
+    tree.put<std::string>("action", "snapshot");
   }
 
-  tree.put<std::string>("name", i.name);
-  tree.put<std::string>("hostIdentifier", i.identifier);
-  tree.put<std::string>("calendarTime", i.calendar_time);
-  tree.put<int>("unixTime", i.time);
+  addLegacyFieldsAndDecorations(item, tree);
   return Status(0, "OK");
 }
 
@@ -274,7 +302,12 @@ Status serializeQueryLogItemJSON(const QueryLogItem& i, std::string& json) {
   }
 
   std::ostringstream output;
-  pt::write_json(output, tree, false);
+  try {
+    pt::write_json(output, tree, false);
+  } catch (const pt::json_parser::json_parser_error& e) {
+    // The content could not be represented as JSON.
+    return Status(1, e.what());
+  }
   json = output.str();
   return Status(0, "OK");
 }
@@ -294,10 +327,7 @@ Status deserializeQueryLogItem(const pt::ptree& tree, QueryLogItem& item) {
     }
   }
 
-  item.name = tree.get<std::string>("name", "");
-  item.identifier = tree.get<std::string>("hostIdentifier", "");
-  item.calendar_time = tree.get<std::string>("calendarTime", "");
-  item.time = tree.get<int>("unixTime", 0);
+  getLegacyFieldsAndDecorations(tree, item);
   return Status(0, "OK");
 }
 
@@ -317,11 +347,7 @@ Status deserializeQueryLogItemJSON(const std::string& json,
 Status serializeEvent(const QueryLogItem& item,
                       const pt::ptree& event,
                       pt::ptree& tree) {
-  tree.put<std::string>("name", item.name);
-  tree.put<std::string>("hostIdentifier", item.identifier);
-  tree.put<std::string>("calendarTime", item.calendar_time);
-  tree.put<int>("unixTime", item.time);
-
+  addLegacyFieldsAndDecorations(item, tree);
   pt::ptree columns;
   for (auto& i : event) {
     // Yield results as a "columns." map to avoid namespace collisions.
@@ -334,6 +360,10 @@ Status serializeEvent(const QueryLogItem& item,
 
 Status serializeQueryLogItemAsEvents(const QueryLogItem& i, pt::ptree& tree) {
   pt::ptree diff_results;
+  // Note, snapshot query results will bypass the "AsEvents" call, even when
+  // log_result_events is set. This is because the schedule will call an
+  // explicit ::logSnapshotQuery, which does not check for the result_events
+  // configuration.
   auto status = serializeDiffResults(i.results, diff_results);
   if (!status.ok()) {
     return status;
@@ -351,18 +381,22 @@ Status serializeQueryLogItemAsEvents(const QueryLogItem& i, pt::ptree& tree) {
 }
 
 Status serializeQueryLogItemAsEventsJSON(const QueryLogItem& i,
-                                         std::string& json) {
+                                         std::vector<std::string>& items) {
   pt::ptree tree;
   auto status = serializeQueryLogItemAsEvents(i, tree);
   if (!status.ok()) {
     return status;
   }
 
-  std::ostringstream output;
   for (auto& event : tree) {
-    pt::write_json(output, event.second, false);
+    std::ostringstream output;
+    try {
+      pt::write_json(output, event.second, false);
+    } catch (const pt::json_parser::json_parser_error& e) {
+      return Status(1, e.what());
+    }
+    items.push_back(output.str());
   }
-  json = output.str();
   return Status(0, "OK");
 }
 
@@ -372,6 +406,42 @@ bool addUniqueRowToQueryData(QueryData& q, const Row& r) {
   }
   q.push_back(r);
   return true;
+}
+
+bool DatabasePlugin::initPlugin() {
+  // Initialize the database plugin using the flag.
+  auto plugin = (FLAGS_disable_database) ? "ephemeral" : kInternalDatabase;
+  return Registry::setActive("database", plugin).ok();
+}
+
+void DatabasePlugin::shutdown() {
+  auto datbase_registry = Registry::registry("database");
+  for (auto& plugin : datbase_registry->names()) {
+    datbase_registry->remove(plugin);
+  }
+}
+
+Status DatabasePlugin::reset() {
+  tearDown();
+  return setUp();
+}
+
+bool DatabasePlugin::checkDB() {
+  kCheckingDB = true;
+  bool result = true;
+  try {
+    auto status = setUp();
+    if (kDBHandleOptionRequireWrite && read_only_) {
+      result = false;
+    }
+    tearDown();
+    result = status.ok();
+  } catch (const std::exception& e) {
+    VLOG(1) << "Database plugin check failed: " << e.what();
+    result = false;
+  }
+  kCheckingDB = false;
+  return result;
 }
 
 Status DatabasePlugin::call(const PluginRequest& request,
@@ -398,10 +468,16 @@ Status DatabasePlugin::call(const PluginRequest& request,
   } else if (request.at("action") == "remove") {
     return this->remove(domain, key);
   } else if (request.at("action") == "scan") {
+    // Accumulate scanned keys into a vector.
     std::vector<std::string> keys;
-    auto status = this->scan(domain, keys);
-    for (const auto& key : keys) {
-      response.push_back({{"k", key}});
+    // Optionally allow the caller to request a max number of keys.
+    size_t max = 0;
+    if (request.count("max") > 0) {
+      max = std::stoul(request.at("max"));
+    }
+    auto status = this->scan(domain, keys, request.at("prefix"), max);
+    for (const auto& k : keys) {
+      response.push_back({{"k", k}});
     }
     return status;
   }
@@ -409,50 +485,113 @@ Status DatabasePlugin::call(const PluginRequest& request,
   return Status(1, "Unknown database plugin action");
 }
 
+static inline std::shared_ptr<DatabasePlugin> getDatabasePlugin() {
+  if (!Registry::exists("database", Registry::getActive("database"), true)) {
+    return nullptr;
+  }
+
+  auto plugin = Registry::get("database", Registry::getActive("database"));
+  return std::dynamic_pointer_cast<DatabasePlugin>(plugin);
+}
+
 Status getDatabaseValue(const std::string& domain,
                         const std::string& key,
                         std::string& value) {
-  PluginRequest request = {{"action", "get"}, {"domain", domain}, {"key", key}};
-  PluginResponse response;
-  auto status = Registry::call("database", "rocks", request, response);
-  if (!status.ok()) {
-    VLOG(1) << "Cannot get database " << domain << "/" << key << ": "
-            << status.getMessage();
+  if (Registry::external()) {
+    // External registries (extensions) do not have databases active.
+    // It is not possible to use an extension-based database.
+    PluginRequest request = {
+        {"action", "get"}, {"domain", domain}, {"key", key}};
+    PluginResponse response;
+    auto status = Registry::call("database", request, response);
+    if (status.ok()) {
+      // Set value from the internally-known "v" key.
+      if (response.size() > 0 && response[0].count("v") > 0) {
+        value = response[0].at("v");
+      }
+    }
     return status;
+  } else {
+    auto plugin = getDatabasePlugin();
+    return plugin->get(domain, key, value);
   }
-
-  // Set value from the internally-known "v" key.
-  if (response.size() > 0 && response[0].count("v") > 0) {
-    value = response[0].at("v");
-  }
-  return status;
 }
 
 Status setDatabaseValue(const std::string& domain,
                         const std::string& key,
                         const std::string& value) {
-  PluginRequest request = {
-      {"action", "put"}, {"domain", domain}, {"key", key}, {"value", value}};
-  return Registry::call("database", "rocks", request);
+  if (Registry::external()) {
+    // External registries (extensions) do not have databases active.
+    // It is not possible to use an extension-based database.
+    PluginRequest request = {
+        {"action", "put"}, {"domain", domain}, {"key", key}, {"value", value}};
+    return Registry::call("database", request);
+  } else {
+    auto plugin = getDatabasePlugin();
+    return plugin->put(domain, key, value);
+  }
 }
 
 Status deleteDatabaseValue(const std::string& domain, const std::string& key) {
-  PluginRequest request = {
-      {"action", "remove"}, {"domain", domain}, {"key", key}};
-  return Registry::call("database", "rocks", request);
+  if (Registry::external()) {
+    // External registries (extensions) do not have databases active.
+    // It is not possible to use an extension-based database.
+    PluginRequest request = {
+        {"action", "remove"}, {"domain", domain}, {"key", key}};
+    return Registry::call("database", request);
+  } else {
+    auto plugin = getDatabasePlugin();
+    return plugin->remove(domain, key);
+  }
 }
 
 Status scanDatabaseKeys(const std::string& domain,
-                        std::vector<std::string>& keys) {
-  PluginRequest request = {{"action", "scan"}, {"domain", domain}};
-  PluginResponse response;
-  auto status = Registry::call("database", "rocks", request, response);
+                        std::vector<std::string>& keys,
+                        size_t max) {
+  return scanDatabaseKeys(domain, keys, "", max);
+}
 
-  for (const auto& item : response) {
-    if (item.count("k") > 0) {
-      keys.push_back(item.at("k"));
+/// Get a list of keys for a given domain.
+Status scanDatabaseKeys(const std::string& domain,
+                        std::vector<std::string>& keys,
+                        const std::string& prefix,
+                        size_t max) {
+  if (Registry::external()) {
+    // External registries (extensions) do not have databases active.
+    // It is not possible to use an extension-based database.
+    PluginRequest request = {{"action", "scan"},
+                             {"domain", domain},
+                             {"prefix", prefix},
+                             {"max", std::to_string(max)}};
+    PluginResponse response;
+    auto status = Registry::call("database", request, response);
+
+    for (const auto& item : response) {
+      if (item.count("k") > 0) {
+        keys.push_back(item.at("k"));
+      }
+    }
+    return status;
+  } else {
+    auto plugin = getDatabasePlugin();
+    return plugin->scan(domain, keys, prefix, max);
+  }
+}
+
+void dumpDatabase() {
+  for (const auto& domain : kDomains) {
+    std::vector<std::string> keys;
+    if (!scanDatabaseKeys(domain, keys)) {
+      continue;
+    }
+    for (const auto& key : keys) {
+      std::string value;
+      if (!getDatabaseValue(domain, key, value)) {
+        continue;
+      }
+      fprintf(
+          stdout, "%s[%s]: %s\n", domain.c_str(), key.c_str(), value.c_str());
     }
   }
-  return status;
 }
 }

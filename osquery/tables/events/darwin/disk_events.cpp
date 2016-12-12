@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -9,9 +9,9 @@
  */
 
 #include <osquery/core.h>
+#include <osquery/events.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-#include <osquery/events.h>
 
 #include "osquery/events/darwin/diskarbitration.h"
 
@@ -20,10 +20,9 @@ namespace osquery {
 class DiskEventSubscriber
     : public EventSubscriber<DiskArbitrationEventPublisher> {
  public:
-  Status init();
+  Status init() override;
 
-  Status Callback(const DiskArbitrationEventContextRef& ec,
-                  const void* user_data);
+  Status Callback(const ECRef& ec, const SCRef& sc);
 };
 
 REGISTER(DiskEventSubscriber, "event_subscriber", "disk_events");
@@ -33,14 +32,12 @@ Status DiskEventSubscriber::init() {
   // Don't want physical disk events
   subscription->physical_disks = false;
 
-  subscribe(&DiskEventSubscriber::Callback, subscription, nullptr);
+  subscribe(&DiskEventSubscriber::Callback, subscription);
   return Status(0, "OK");
 }
 
-Status DiskEventSubscriber::Callback(const DiskArbitrationEventContextRef& ec,
-                                     const void* user_data) {
+Status DiskEventSubscriber::Callback(const ECRef& ec, const SCRef& sc) {
   Row r;
-
   r["action"] = ec->action;
   r["path"] = ec->path;
   r["name"] = ec->name;
@@ -56,14 +53,13 @@ Status DiskEventSubscriber::Callback(const DiskArbitrationEventContextRef& ec,
   r["filesystem"] = ec->filesystem;
   r["checksum"] = ec->checksum;
 
+  EventTime et = ec->time;
   if (ec->action == "add") {
-    r["time"] = ec->disk_appearance_time;
-    add(r, boost::lexical_cast<uint32_t>(ec->disk_appearance_time));
-  } else if (ec->action == "remove") {
-    r["time"] = INTEGER(ec->time);
-    add(r, ec->time);
+    // Disk appearance time may be used in the future.
+    boost::conversion::try_lexical_convert(ec->disk_appearance_time, et);
   }
 
+  add(r);
   return Status(0, "OK");
 }
 }

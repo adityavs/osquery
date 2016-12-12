@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -52,7 +52,7 @@ void genKeychainItem(const SecKeychainItemRef& item, QueryData& results) {
   info.tag = tags;
   info.format = nullptr;
 
-  SecItemClass item_class = 0;
+  SecItemClass item_class;
   SecKeychainAttributeList* attr_list = nullptr;
 
   // Any tag that does not exist for the item will prevent the entire result.
@@ -63,7 +63,7 @@ void genKeychainItem(const SecKeychainItemRef& item, QueryData& results) {
 
     if (attr_list != nullptr) {
       // Expect each specific tag to return string data.
-      for (int i = 0; i < attr_list->count; ++i) {
+      for (size_t i = 0; i < attr_list->count; ++i) {
         SecKeychainAttribute* attr = &attr_list->attr[i];
         if (attr->length > 0) {
           r[attr_tag.second] = std::string((char*)attr->data, attr->length);

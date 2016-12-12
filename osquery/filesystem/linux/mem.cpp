@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -35,7 +35,7 @@ Status readMem(int fd, size_t base, size_t length, uint8_t* buffer) {
   // Read from raw memory until an unrecoverable read error or the all of the
   // requested bytes are read.
   size_t total_read = 0;
-  size_t bytes_read = 0;
+  ssize_t bytes_read = 0;
   while (total_read != length && bytes_read != 0) {
     bytes_read = read(fd, buffer + total_read, length - total_read);
     if (bytes_read == -1) {
@@ -96,6 +96,7 @@ Status readRawMem(size_t base, size_t length, void** buffer) {
     if (!readMem(fd, base, length, (uint8_t*)*buffer).ok()) {
       close(fd);
       free(*buffer);
+      *buffer = nullptr;
       return Status(1, "Cannot memory map or seek/read memory");
     }
   } else {

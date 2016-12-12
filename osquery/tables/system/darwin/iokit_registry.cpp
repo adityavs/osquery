@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -11,7 +11,7 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/tables/system/darwin/iokit_utils.h"
+#include "osquery/events/darwin/iokit.h"
 
 namespace osquery {
 namespace tables {
@@ -22,12 +22,6 @@ void genIOKitDevice(const io_service_t& device,
                     int depth,
                     QueryData& results) {
   Row r;
-
-  // Get the device details
-  CFMutableDictionaryRef details;
-  IORegistryEntryCreateCFProperties(
-      device, &details, kCFAllocatorDefault, kNilOptions);
-
   io_name_t name, device_class;
   auto kr = IORegistryEntryGetName(device, name);
   if (kr == KERN_SUCCESS) {
@@ -86,7 +80,6 @@ void genIOKitDevice(const io_service_t& device,
   r["retain_count"] = INTEGER(retain_count);
 
   results.push_back(r);
-  CFRelease(details);
 }
 
 void genIOKitDeviceChildren(const io_registry_entry_t& service,

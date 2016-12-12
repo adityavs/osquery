@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant 
+#  LICENSE file in the root directory of this source tree. An additional grant
 #  of patent rights can be found in the PATENTS file in the same directory.
 
 from __future__ import absolute_import
@@ -15,6 +15,10 @@ from __future__ import unicode_literals
 import json
 import os
 import sys
+import time
+import subprocess
+import shutil
+import re
 
 def red(msg):
     return "\033[41m\033[1;30m %s \033[0m" % str(msg)
@@ -48,6 +52,16 @@ def write_config(data={}, path=None):
         fh.write(json.dumps(data))
 
 
+def reset_dir(p):
+    # Note that files may be added concurrently.
+    # If they are then either of these will fail.
+    shutil.rmtree(p, ignore_errors=True)
+    try:
+        os.makedirs(p)
+    except Exception:
+        pass
+
+
 def platform():
     platform = sys.platform
     if platform.find("linux") == 0:
@@ -59,11 +73,14 @@ def platform():
 
 def queries_from_config(config_path):
     config = {}
+    rmcomment = re.compile('\/\*[\*A-Za-z0-9\n\s\.\{\}\'\/\\\:]+\*/|//.*')
     try:
         with open(config_path, "r") as fh:
-            config = json.loads(fh.read())
+            configcontent = fh.read()
+            content = rmcomment.sub('',configcontent)
+            config = json.loads(content)
     except Exception as e:
-        print ("Cannot open/parse config: %s" % str(e))
+        print("Cannot open/parse config: %s" % str(e))
         exit(1)
     queries = {}
     if "scheduledQueries" in config:
@@ -72,8 +89,19 @@ def queries_from_config(config_path):
     if "schedule" in config:
         for name, details in config["schedule"].iteritems():
             queries[name] = details["query"]
+    if "packs" in config:
+        for keys,values in config["packs"].iteritems():
+            with open(values) as fp:
+                packfile = fp.read()
+                packcontent = rmcomment.sub('',packfile)
+                packqueries = json.loads(packcontent)
+                for queryname,query in packqueries["queries"].iteritems():
+                    queries["pack_"+queryname] = query["query"]
+
+
+        pass
     if len(queries) == 0:
-        print ("Could not find a schedule/queries in config: %s" % config_path)
+        print("Could not find a schedule/queries in config: %s" % config_path)
         exit(0)
     return queries
 
@@ -90,7 +118,7 @@ def queries_from_tables(path, restrict):
                 continue
             spec_platform = os.path.basename(base)
             table_name = spec.split(".table", 1)[0]
-            if spec_platform not in ["specs", platform]:
+            if spec_platform not in ["specs", "posix", platform()]:
                 continue
             # Generate all tables to select from, with abandon.
             tables.append("%s.%s" % (spec_platform, table_name))
@@ -102,3 +130,65 @@ def queries_from_tables(path, restrict):
         queries[table] = "SELECT * FROM %s;" % table.split(".", 1)[1]
     return queries
 
+
+def get_stats(p, interval=1):
+    """Run psutil and downselect the information."""
+    utilization = p.cpu_percent(interval=interval)
+    return {
+        "utilization": utilization,
+        "counters": p.io_counters() if platform() != "darwin" else None,
+        "fds": p.num_fds(),
+        "cpu_times": p.cpu_times(),
+        "memory": p.memory_info_ex(),
+    }
+
+
+def profile_cmd(cmd, proc=None, shell=False, timeout=0, count=1):
+    import psutil
+    start_time = time.time()
+    if proc is None:
+        proc = subprocess.Popen(cmd,
+                                shell=shell,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+    p = psutil.Process(pid=proc.pid)
+
+    delay = 0
+    step = 0.5
+
+    percents = []
+    # Calculate the CPU utilization in intervals of 1 second.
+    stats = {}
+    while p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+        try:
+            current_stats = get_stats(p, step)
+            if (current_stats["memory"].rss == 0):
+                break
+            stats = current_stats
+            percents.append(stats["utilization"])
+        except psutil.AccessDenied:
+            break
+        delay += step
+        if timeout > 0 and delay >= timeout + 2:
+            proc.kill()
+            break
+    duration = time.time() - start_time - 2
+
+    utilization = [percent for percent in percents if percent != 0]
+    if len(utilization) == 0:
+        avg_utilization = 0
+    else:
+        avg_utilization = sum(utilization) / len(utilization)
+
+    if len(stats.keys()) == 0:
+        raise Exception("No stats recorded, perhaps binary returns -1?")
+    return {
+        "utilization": avg_utilization,
+        "duration": duration,
+        "memory": stats["memory"].rss,
+        "user_time": stats["cpu_times"].user,
+        "system_time": stats["cpu_times"].system,
+        "cpu_time": stats["cpu_times"].user + stats["cpu_times"].system,
+        "fds": stats["fds"],
+        "exit": p.wait(),
+    }

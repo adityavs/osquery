@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -7,6 +7,8 @@
  *  of patent rights can be found in the PATENTS file in the same directory.
  *
  */
+
+#pragma once
 
 #include <osquery/tables.h>
 
@@ -28,8 +30,56 @@ typedef struct DMIEntryPoint {
   uint8_t bcdRevision;
 } __attribute__((packed)) DMIEntryPoint;
 
-extern const std::map<int, std::string> kSMBIOSTypeDescriptions;
+/// Get friendly names for each SMBIOS table/section type.
+extern const std::map<uint8_t, std::string> kSMBIOSTypeDescriptions;
 
-void genSMBIOSTables(const uint8_t* tables, size_t length, QueryData& results);
+constexpr uint8_t kSMBIOSTypeBIOS = 0;
+constexpr uint8_t kSMBIOSTypeSystem = 1;
+
+/**
+ * @brief A generic parser for SMBIOS tables.
+ *
+ * This generic class does not provide interfaces for finding tables only
+ * parsing data once it has been provided.
+ */
+class SMBIOSParser : private boost::noncopyable {
+ public:
+  /// Walk the tables and apply a predicate.
+  virtual void tables(std::function<void(size_t index,
+                                         const SMBStructHeader* hdr,
+                                         uint8_t* address,
+                                         size_t size)> predicate);
+
+ public:
+  virtual ~SMBIOSParser() {}
+
+ protected:
+  /// This protected data member is used during table parsing and must be set.
+  uint8_t* table_data_{nullptr};
+
+  /// Table size discovered from SMBIOS.
+  size_t table_size_{0};
+};
+
+/// Helper, cross platform, table row generator.
+void genSMBIOSTable(size_t index,
+                    const SMBStructHeader* hdr,
+                    uint8_t* address,
+                    size_t size,
+                    QueryData& results);
+
+/**
+ * @brief Return a 0-terminated strings from an SMBIOS address and handle.
+ *
+ * SMBIOS strings are 0-terminated and 'stacked' at the end of the type
+ * structure. Each structure identifies (loosely) the type of data within.
+ * Using the structure field 'handle' or offset, the stacked data can be parsed
+ * and a string returned.
+ *
+ * @param data A pointer to the SMBIOS structure.
+ * @param address A pointer to the stacked data following the structure.
+ * @Param offset The field index into address.
+ */
+std::string dmiString(uint8_t* data, uint8_t* address, size_t offset);
 }
 }

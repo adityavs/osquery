@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,8 +8,14 @@
  *
  */
 
+#include <string>
+
+#include <thrift/TOutput.h>
+
+#include <osquery/core.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/system.h>
 
 #include "osquery/extensions/interface.h"
 
@@ -17,6 +23,10 @@ using namespace osquery::extensions;
 
 namespace osquery {
 namespace extensions {
+
+const std::vector<std::string> kSDKVersionChanges = {
+    {"1.7.7"},
+};
 
 void ExtensionHandler::ping(ExtensionStatus& _return) {
   _return.code = ExtensionCode::EXT_SUCCESS;
@@ -32,6 +42,10 @@ void ExtensionHandler::call(ExtensionResponse& _return,
   // internal registry call. It is the ONLY actor that resolves registry
   // item aliases.
   auto local_item = Registry::getAlias(registry, item);
+  if (local_item.empty()) {
+    // Extensions may not know about active (non-option based registries).
+    local_item = Registry::getActive(registry);
+  }
 
   PluginResponse response;
   PluginRequest plugin_request;
@@ -44,13 +58,35 @@ void ExtensionHandler::call(ExtensionResponse& _return,
   _return.status.code = status.getCode();
   _return.status.message = status.getMessage();
   _return.status.uuid = uuid_;
-
   if (status.ok()) {
     for (const auto& response_item : response) {
       // Translate a PluginResponse to an ExtensionPluginResponse.
       _return.response.push_back(response_item);
     }
   }
+}
+
+void ExtensionHandler::shutdown() {
+  // Request a graceful shutdown of the Thrift listener.
+  VLOG(1) << "Extension " << uuid_ << " requested shutdown";
+  Initializer::requestShutdown(EXIT_SUCCESS);
+}
+
+/**
+ * @brief Updates the Thrift server output to be VLOG
+ *
+ * On Windows, the thrift server will output to stdout, which displays
+ * messages to the user on exiting the client. This function is used
+ * instead of the default output for thrift.
+ *
+ * @param msg The text to be logged
+ */
+void thriftLoggingOutput(const char* msg) {
+  VLOG(1) << "Thrift message: " << msg;
+}
+
+ExtensionManagerHandler::ExtensionManagerHandler() {
+  GlobalOutput.setOutputFunction(thriftLoggingOutput);
 }
 
 void ExtensionManagerHandler::extensions(InternalExtensionList& _return) {
@@ -78,15 +114,26 @@ void ExtensionManagerHandler::registerExtension(
     return;
   }
 
+  // Enforce API change requirements.
+  for (const auto& change : kSDKVersionChanges) {
+    if (!versionAtLeast(change, info.sdk_version)) {
+      LOG(WARNING) << "Could not add extension " << info.name
+                   << ": incompatible extension SDK " << info.sdk_version;
+      _return.code = ExtensionCode::EXT_FAILED;
+      _return.message = "Incompatible extension SDK version";
+      return;
+    }
+  }
+
   // Every call to registerExtension is assigned a new RouteUUID.
-  RouteUUID uuid = rand();
-  LOG(INFO) << "Registering extension (" << info.name << ", " << uuid
-            << ", version=" << info.version << ", sdk=" << info.sdk_version
-            << ")";
+  RouteUUID uuid = (uint16_t)rand();
+  VLOG(1) << "Registering extension (" << info.name << ", " << uuid
+          << ", version=" << info.version << ", sdk=" << info.sdk_version
+          << ")";
 
   if (!Registry::addBroadcast(uuid, registry).ok()) {
-    LOG(WARNING) << "Could not add extension (" << info.name << ", " << uuid
-                 << ") broadcast to registry";
+    LOG(WARNING) << "Could not add extension " << info.name
+                 << ": invalid extension registry";
     _return.code = ExtensionCode::EXT_FAILED;
     _return.message = "Failed adding registry broadcast";
     return;
@@ -138,8 +185,9 @@ void ExtensionManagerHandler::getQueryColumns(ExtensionResponse& _return,
   _return.status.uuid = uuid_;
 
   if (status.ok()) {
-    for (const auto& column : columns) {
-      _return.response.push_back({{column.first, column.second}});
+    for (const auto& col : columns) {
+      _return.response.push_back(
+          {{std::get<0>(col), columnTypeName(std::get<1>(col))}});
     }
   }
 }
@@ -173,28 +221,59 @@ bool ExtensionManagerHandler::exists(const std::string& name) {
 }
 }
 
-ExtensionRunnerCore::~ExtensionRunnerCore() { remove(path_); }
+ExtensionRunnerCore::~ExtensionRunnerCore() {
+  remove(path_);
+}
 
 void ExtensionRunnerCore::stop() {
+  {
+    std::unique_lock<std::mutex> lock(service_start_);
+    service_stopping_ = true;
+    if (transport_ != nullptr) {
+      // This is an opportunity to interrupt the transport listens.
+    }
+  }
+
+  // In most cases the service thread has started before the stop request.
   if (server_ != nullptr) {
     server_->stop();
   }
 }
 
+inline void removeStalePaths(const std::string& manager) {
+  std::vector<std::string> paths;
+  // Attempt to remove all stale extension sockets.
+  resolveFilePattern(manager + ".*", paths);
+  for (const auto& path : paths) {
+    remove(path);
+  }
+}
+
 void ExtensionRunnerCore::startServer(TProcessorRef processor) {
-  auto transport = TServerTransportRef(new TServerSocket(path_));
-  auto transport_fac = TTransportFactoryRef(new TBufferedTransportFactory());
-  auto protocol_fac = TProtocolFactoryRef(new TBinaryProtocolFactory());
+  {
+    std::unique_lock<std::mutex> lock(service_start_);
+    // A request to stop the service may occur before the thread starts.
+    if (service_stopping_) {
+      return;
+    }
 
-  auto thread_manager_ =
-      ThreadManager::newSimpleThreadManager((size_t)FLAGS_worker_threads, 0);
-  auto thread_fac = ThriftThreadFactory(new PosixThreadFactory());
-  thread_manager_->threadFactory(thread_fac);
-  thread_manager_->start();
+    transport_ = TServerTransportRef(new TPlatformServerSocket(path_));
 
-  // Start the Thrift server's run loop.
-  server_ = TThreadPoolServerRef(new TThreadPoolServer(
-      processor, transport, transport_fac, protocol_fac, thread_manager_));
+    if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+      // Before starting and after stopping the manager, remove stale sockets.
+      // This is not relevant in Windows
+      removeStalePaths(path_);
+    }
+
+    // Construct the service's transport, protocol, thread pool.
+    auto transport_fac = TTransportFactoryRef(new TBufferedTransportFactory());
+    auto protocol_fac = TProtocolFactoryRef(new TBinaryProtocolFactory());
+
+    // Start the Thrift server's run loop.
+    server_ = TThreadedServerRef(new TThreadedServer(
+        processor, transport_, transport_fac, protocol_fac));
+  }
+
   server_->serve();
 }
 
@@ -209,6 +288,14 @@ void ExtensionRunner::start() {
   } catch (const std::exception& e) {
     LOG(ERROR) << "Cannot start extension handler: " << path_ << " ("
                << e.what() << ")";
+  }
+}
+
+ExtensionManagerRunner::~ExtensionManagerRunner() {
+  // Only attempt to remove stale paths if the server was started.
+  std::unique_lock<std::mutex> lock(service_start_);
+  if (server_ != nullptr) {
+    removeStalePaths(path_);
   }
 }
 

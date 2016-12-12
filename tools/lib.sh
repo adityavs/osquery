@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -9,28 +9,17 @@
 
 ORACLE_RELEASE=/etc/oracle-release
 SYSTEM_RELEASE=/etc/system-release
-UBUNTU_RELEASE=/etc/lsb-release
+LSB_RELEASE=/etc/lsb-release
+DEBIAN_VERSION=/etc/debian_version
+LIB_SCRIPT_DIR=$(dirname "${BASH_SOURCE[0]}")
+
+# For OS X, define the distro that builds the kernel extension.
+DARWIN_KERNEL_VERSION="10.11"
 
 function platform() {
   local  __out=$1
-  if [[ -f "$ORACLE_RELEASE" ]]; then
-    FAMILY="redhat"
-    eval $__out="oracle"
-  elif [[ -n `grep -o "CentOS" $SYSTEM_RELEASE 2>/dev/null` ]]; then
-    FAMILY="redhat"
-    eval $__out="centos"
-  elif [[ -n `grep -o "Red Hat Enterprise" $SYSTEM_RELEASE 2>/dev/null` ]]; then
-    FAMILY="redhat"
-    eval $__out="rhel"
-  elif [[ -n `grep -o "Amazon Linux" $SYSTEM_RELEASE 2>/dev/null` ]]; then
-    FAMILY="redhat"
-    eval $__out="amazon"
-  elif [[ -f "$UBUNTU_RELEASE" ]]; then
-    FAMILY="debian"
-    eval $__out="ubuntu"
-  else
-    eval $__out=`uname -s | tr '[:upper:]' '[:lower:]'`
-  fi
+  FAMILY=$(python "$LIB_SCRIPT_DIR/get_platform.py" --family)
+  eval $__out=$(python "$LIB_SCRIPT_DIR/get_platform.py" --platform)
 }
 
 function _platform() {
@@ -40,23 +29,7 @@ function _platform() {
 
 function distro() {
   local __out=$2
-  if [[ $1 = "oracle" ]]; then
-    eval $__out=`grep -o "release [5-7]" $SYSTEM_RELEASE | sed 's/release /oracle/g'`
-  elif [[ $1 = "centos" ]]; then
-    eval $__out=`grep -o "release [6-7]" $SYSTEM_RELEASE | sed 's/release /centos/g'`
-  elif [[ $1 = "rhel" ]]; then
-    eval $__out=`grep -o "release [6-7]" $SYSTEM_RELEASE | sed 's/release /rhel/g'`
-  elif [[ $1 = "amazon" ]]; then
-    eval $__out=`grep -o "release 20[12][0-9]\.[0-9][0-9]" $SYSTEM_RELEASE | sed 's/release /amazon/g'`
-  elif [[ $1 = "ubuntu" ]]; then
-    eval $__out=`grep DISTRIB_CODENAME $UBUNTU_RELEASE | awk -F'=' '{print $2}'`
-  elif [[ $1 = "darwin" ]]; then
-    eval $__out=`sw_vers -productVersion | awk -F '.' '{print $1 "." $2}'`
-  elif [[ $1 = "freebsd" ]]; then
-    eval $__out=`uname -r | awk -F '-' '{print $1}'`
-  else
-    eval $__out="unknown_version"
-  fi
+  eval $__out=$(python "$LIB_SCRIPT_DIR/get_platform.py" --distro)
 }
 
 function _distro() {
@@ -74,7 +47,7 @@ function threads() {
   elif [[ $OS = "freebsd" ]]; then
     eval $__out=`sysctl -n kern.smp.cpus`
   else
-    eval $__out=1
+    eval $__out=`nproc`
   fi
 }
 
@@ -102,6 +75,12 @@ function set_cc() {
   export CMAKE_C_COMPILER=$1
 }
 
+function do_sudo() {
+  ARGS="$@"
+  log "requesting sudo: $ARGS"
+  sudo $@
+}
+
 function contains_element() {
   local e
   for e in "${@:2}"; do [[ "$e" == "$1" ]] && return 0; done
@@ -113,5 +92,122 @@ function in_ec2() {
     return 0
   else
     return 1
+  fi
+}
+
+function build_kernel_cleanup() {
+  # Cleanup kernel
+  $MAKE kernel-test-unload || sudo reboot
+}
+
+function checkout_thirdparty() {
+  # Reset any work or artifacts from build tests in TP.
+  (cd third-party && git reset --hard HEAD)
+  git submodule init
+  git submodule update
+}
+
+function build_target() {
+  threads THREADS
+
+  # Clean previous build artifacts.
+  $MAKE clean
+
+  # Build osquery.
+  if [[ -z "$RUN_TARGET" ]]; then
+    $MAKE -j$THREADS
+  else
+    $MAKE $RUN_TARGET -j$THREADS
+  fi
+}
+
+function check_deterministic() {
+  # Expect the project to have been built.
+  ALIAS=$DISTRO
+  if [[ "$OS" = "darwin" ]]; then
+    ALIAS=darwin
+  fi
+  DAEMON=build/$ALIAS/osquery/osqueryd
+  strip $DAEMON
+  RUN1=$(shasum -a 256 $DAEMON)
+
+  # Build again.
+  $MAKE distclean
+  build_target
+
+  strip $DAEMON
+  RUN2=$(shasum -a 256 $DAEMON)
+  echo "Initial build: $RUN1"
+  echo " Second build: $RUN2"
+  if [[ "$RUN1" = "$RUN2" ]]; then
+    exit 0
+  fi
+
+  # The build is not deterministic.
+  exit 1
+}
+
+function initialize() {
+  DISTRO=$1
+  checkout_thirdparty
+
+  # Remove any previously-cached variables
+  rm build/$DISTRO/CMakeCache.txt >/dev/null 2>&1 || true
+}
+
+function build() {
+  platform PLATFORM
+  distro $PLATFORM DISTRO
+
+  # Build kernel extension/module and tests.
+  BUILD_KERNEL=0
+  if [[ -z "$SKIP_KERNEL" && "$PLATFORM" = "darwin" ]]; then
+    if [[ "$DISTRO" = "$DARWIN_KERNEL_VERSION" ]]; then
+      BUILD_KERNEL=1
+    fi
+  fi
+
+  MAKE=make
+  if [[ "$PLATFORM" = "freebsd" ]]; then
+    MAKE=gmake
+  fi
+
+  RUN_TESTS=$1
+
+  cd $LIB_SCRIPT_DIR/../
+
+  # Run build host provisions and install library dependencies.
+  if [[ ! -z $RUN_BUILD_DEPS ]]; then
+    $MAKE deps
+  else
+    initialize $DISTRO
+  fi
+
+  # Build osquery.
+  build_target
+
+  if [[ $BUILD_KERNEL = 1 ]]; then
+    # Build osquery kernel (optional).
+    $MAKE kernel-build
+
+    # Setup cleanup code for catastrophic test failures.
+    trap build_kernel_cleanup EXIT INT TERM
+
+    # Load osquery kernel (optional).
+    $MAKE kernel-test-load
+  fi
+
+  if [[ ! -z "$RUN_DETERMINISTIC" ]]; then
+    check_deterministic
+  fi
+
+  if [[ $RUN_TESTS = true ]]; then
+    # Run code unit and integration tests.
+    $MAKE test/fast
+
+    if [[ $BUILD_KERNEL = 1 ]]; then
+      # Run kernel unit and integration tests (optional).
+      $MAKE kernel-test/fast
+    fi
   fi
 }

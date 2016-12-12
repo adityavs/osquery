@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,7 +13,7 @@
 #include <osquery/filesystem.h>
 #include <osquery/tables.h>
 
-#include "osquery/tables/system/sysctl_utils.h"
+#include "osquery/tables/system/posix/sysctl_utils.h"
 
 namespace osquery {
 namespace tables {
@@ -36,7 +36,7 @@ namespace tables {
 #define MAX_CONTROLS 1024
 
 const std::vector<std::string> kControlNames{
-    "", "kern", "vm", "vfs", "net", "debug", "hw", "macdep", "user"};
+    "", "kern", "vm", "vfs", "net", "debug", "hw", "machdep", "user"};
 
 const std::vector<std::string> kControlTypes{
     "", "node", "int", "string", "quad", "opaque", "struct"};
@@ -62,7 +62,7 @@ void genControlInfo(int* oid,
   }
 
   r["name"] = std::string(response);
-  if (oid[0] < kControlNames.size()) {
+  if (oid[0] > 0 && oid[0] < static_cast<int>(kControlNames.size())) {
     r["subsystem"] = kControlNames[oid[0]];
   }
 

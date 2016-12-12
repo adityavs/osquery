@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,7 +10,6 @@
 
 #include <fstream>
 
-#include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/trim.hpp>
 
 #include <osquery/core.h>
@@ -18,10 +17,12 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
+#include "osquery/core/conversions.h"
+
 namespace osquery {
 namespace tables {
 
-const std::string kKernelModulePath = "/proc/modules";
+static const std::string kKernelModulePath = "/proc/modules";
 
 QueryData genKernelModules(QueryContext& context) {
   QueryData results;
@@ -41,15 +42,15 @@ QueryData genKernelModules(QueryContext& context) {
   auto module_info = std::string(std::istreambuf_iterator<char>(fd),
                                  std::istreambuf_iterator<char>());
 
-  for (const auto& module : split(module_info, "\n")) {
+  for (const auto& module : osquery::split(module_info, "\n")) {
     Row r;
-    auto module_info = split(module, " ");
-    if (module_info.size() < 6) {
+    auto details = osquery::split(module, " ");
+    if (details.size() < 6) {
       // Interesting error case, this module line is not well formed.
       continue;
     }
 
-    for (auto& detail : module_info) {
+    for (auto& detail : details) {
       // Clean up the delimiters
       boost::trim(detail);
       if (detail.back() == ',') {
@@ -57,11 +58,11 @@ QueryData genKernelModules(QueryContext& context) {
       }
     }
 
-    r["name"] = module_info[0];
-    r["size"] = module_info[1];
-    r["used_by"] = module_info[3];
-    r["status"] = module_info[4];
-    r["address"] = module_info[5];
+    r["name"] = details[0];
+    r["size"] = details[1];
+    r["used_by"] = details[3];
+    r["status"] = details[4];
+    r["address"] = details[5];
     results.push_back(r);
   }
 

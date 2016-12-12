@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,19 +10,39 @@
 
 #pragma once
 
+#include <osquery/dispatcher.h>
 #include <osquery/extensions.h>
 
-#include "osquery/dispatcher/dispatcher.h"
+#ifdef WIN32
+#pragma warning(push, 3)
+
+/*
+ * MSVC complains that ExtensionManagerHandler inherits the call() function from
+ * ExtensionHandler via dominance. This is because ExtensionManagerHandler
+ * implements ExtensionManagerIf and ExtensionHandler who both implement
+ * ExtensionIf. ExtensionIf declares a virtual call() function that
+ * ExtensionHandler defines. This _shouldn't_ cause any issues.
+ */
+#pragma warning(disable : 4250)
+#endif
 
 // osquery is built with various versions of thrift that use different search
 // paths for their includes. Unfortunately, changing include paths is not
 // possible in every build system.
 // clang-format off
-#include CONCAT(OSQUERY_THRIFT_SERVER_LIB,/TThreadPoolServer.h)
+#include CONCAT(OSQUERY_THRIFT_SERVER_LIB,/TThreadedServer.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/protocol/TBinaryProtocol.h)
+
+#ifdef WIN32
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TPipeServer.h)
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TPipe.h)
+#else
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TServerSocket.h)
-#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TBufferTransports.h)
 #include CONCAT(OSQUERY_THRIFT_LIB,/transport/TSocket.h)
+#endif
+
+#include CONCAT(OSQUERY_THRIFT_LIB,/transport/TBufferTransports.h)
+#include CONCAT(OSQUERY_THRIFT_LIB,/concurrency/ThreadManager.h)
 
 // Include intermediate Thrift-generated interface definitions.
 #include CONCAT(OSQUERY_THRIFT,Extension.h)
@@ -39,7 +59,17 @@ using namespace apache::thrift::concurrency;
 
 /// Create easier to reference typedefs for Thrift layer implementations.
 #define SHARED_PTR_IMPL OSQUERY_THRIFT_POINTER::shared_ptr
-typedef SHARED_PTR_IMPL<TSocket> TSocketRef;
+
+#ifdef WIN32
+typedef TPipe TPlatformSocket;
+typedef TPipeServer TPlatformServerSocket;
+typedef SHARED_PTR_IMPL<TPipe> TPlatformSocketRef;
+#else
+typedef TSocket TPlatformSocket;
+typedef TServerSocket TPlatformServerSocket;
+typedef SHARED_PTR_IMPL<TSocket> TPlatformSocketRef;
+#endif
+
 typedef SHARED_PTR_IMPL<TTransport> TTransportRef;
 typedef SHARED_PTR_IMPL<TProtocol> TProtocolRef;
 
@@ -47,8 +77,13 @@ typedef SHARED_PTR_IMPL<TProcessor> TProcessorRef;
 typedef SHARED_PTR_IMPL<TServerTransport> TServerTransportRef;
 typedef SHARED_PTR_IMPL<TTransportFactory> TTransportFactoryRef;
 typedef SHARED_PTR_IMPL<TProtocolFactory> TProtocolFactoryRef;
+typedef SHARED_PTR_IMPL<ThreadManager> TThreadManagerRef;
+
+#ifndef WIN32
 typedef SHARED_PTR_IMPL<PosixThreadFactory> PosixThreadFactoryRef;
-typedef std::shared_ptr<TThreadPoolServer> TThreadPoolServerRef;
+#endif
+
+using TThreadedServerRef = std::shared_ptr<TThreadedServer>;
 
 namespace extensions {
 
@@ -81,6 +116,9 @@ class ExtensionHandler : virtual public ExtensionIf {
             const std::string& item,
             const ExtensionPluginRequest& request);
 
+  /// Request an extension to shutdown.
+  void shutdown();
+
  protected:
   /// Transient UUID assigned to the extension after registering.
   RouteUUID uuid_;
@@ -100,7 +138,7 @@ class ExtensionHandler : virtual public ExtensionIf {
 class ExtensionManagerHandler : virtual public ExtensionManagerIf,
                                 public ExtensionHandler {
  public:
-  ExtensionManagerHandler() {}
+  ExtensionManagerHandler();
 
   /// Return a list of Route UUIDs and extension metadata.
   void extensions(InternalExtensionList& _return);
@@ -175,6 +213,10 @@ class ExtensionManagerHandler : virtual public ExtensionManagerIf,
    */
   void getQueryColumns(ExtensionResponse& _return, const std::string& sql);
 
+ protected:
+  /// A shutdown request does not apply to ExtensionManagers.
+  void shutdown() {}
+
  private:
   /// Check if an extension exists by the name it registered.
   bool exists(const std::string& name);
@@ -203,7 +245,7 @@ class ExtensionWatcher : public InternalRunnable {
 
  public:
   /// The Dispatcher thread entry point.
-  void start();
+  void start() override;
 
   /// Perform health checks.
   virtual void watch();
@@ -228,8 +270,11 @@ class ExtensionManagerWatcher : public ExtensionWatcher {
   ExtensionManagerWatcher(const std::string& path, size_t interval)
       : ExtensionWatcher(path, interval, false) {}
 
+  /// The Dispatcher thread entry point.
+  void start() override;
+
   /// Start a specialized health check for an ExtensionManager.
-  void watch();
+  void watch() override;
 
  private:
   /// Allow extensions to fail for several intervals.
@@ -239,7 +284,7 @@ class ExtensionManagerWatcher : public ExtensionWatcher {
 class ExtensionRunnerCore : public InternalRunnable {
  public:
   virtual ~ExtensionRunnerCore();
-  ExtensionRunnerCore(const std::string& path)
+  explicit ExtensionRunnerCore(const std::string& path)
       : path_(path), server_(nullptr) {}
 
  public:
@@ -253,8 +298,17 @@ class ExtensionRunnerCore : public InternalRunnable {
   /// The UNIX domain socket used for requests from the ExtensionManager.
   std::string path_;
 
+  /// Transport instance, will be interrupted if the thread is removed.
+  TServerTransportRef transport_{nullptr};
+
   /// Server instance, will be stopped if thread service is removed.
-  TThreadPoolServerRef server_;
+  TThreadedServerRef server_{nullptr};
+
+  /// Protect the service start and stop, this mutex protects server creation.
+  std::mutex service_start_;
+
+  /// Record a dispatcher's request to stop the service.
+  bool service_stopping_{false};
 };
 
 /**
@@ -276,7 +330,9 @@ class ExtensionRunner : public ExtensionRunnerCore {
   void start();
 
   /// Access the UUID provided by the ExtensionManager.
-  RouteUUID getUUID() { return uuid_; }
+  RouteUUID getUUID() {
+    return uuid_;
+  }
 
  private:
   /// The unique and transient Extension UUID assigned by the ExtensionManager.
@@ -292,6 +348,7 @@ class ExtensionRunner : public ExtensionRunnerCore {
  */
 class ExtensionManagerRunner : public ExtensionRunnerCore {
  public:
+  virtual ~ExtensionManagerRunner();
   explicit ExtensionManagerRunner(const std::string& manager_path)
       : ExtensionRunnerCore(manager_path) {}
 
@@ -303,14 +360,16 @@ class ExtensionManagerRunner : public ExtensionRunnerCore {
 class EXInternal {
  public:
   explicit EXInternal(const std::string& path)
-      : socket_(new TSocket(path)),
+      : socket_(new TPlatformSocket(path)),
         transport_(new TBufferedTransport(socket_)),
         protocol_(new TBinaryProtocol(transport_)) {}
 
-  virtual ~EXInternal() { transport_->close(); }
+  virtual ~EXInternal() {
+    transport_->close();
+  }
 
  protected:
-  TSocketRef socket_;
+  TPlatformSocketRef socket_;
   TTransportRef transport_;
   TProtocolRef protocol_;
 };
@@ -318,12 +377,15 @@ class EXInternal {
 /// Internal accessor for a client to an extension (from an extension manager).
 class EXClient : public EXInternal {
  public:
-  explicit EXClient(const std::string& path) : EXInternal(path) {
-    client_ = std::make_shared<extensions::ExtensionClient>(protocol_);
+  explicit EXClient(const std::string& path)
+      : EXInternal(path),
+        client_(std::make_shared<extensions::ExtensionClient>(protocol_)) {
     (void)transport_->open();
   }
 
-  const std::shared_ptr<extensions::ExtensionClient>& get() { return client_; }
+  const std::shared_ptr<extensions::ExtensionClient>& get() {
+    return client_;
+  }
 
  private:
   std::shared_ptr<extensions::ExtensionClient> client_;
@@ -333,8 +395,9 @@ class EXClient : public EXInternal {
 class EXManagerClient : public EXInternal {
  public:
   explicit EXManagerClient(const std::string& manager_path)
-      : EXInternal(manager_path) {
-    client_ = std::make_shared<extensions::ExtensionManagerClient>(protocol_);
+      : EXInternal(manager_path),
+        client_(
+            std::make_shared<extensions::ExtensionManagerClient>(protocol_)) {
     (void)transport_->open();
   }
 
@@ -346,3 +409,7 @@ class EXManagerClient : public EXInternal {
   std::shared_ptr<extensions::ExtensionManagerClient> client_;
 };
 }
+
+#ifdef WIN32
+#pragma warning(pop)
+#endif

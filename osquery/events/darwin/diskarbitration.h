@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -11,12 +11,8 @@
 #pragma once
 
 #include <CoreServices/CoreServices.h>
-#include <IOKit/IOKitLib.h>
 #include <DiskArbitration/DiskArbitration.h>
-
-#include <boost/thread/locks.hpp>
-#include <boost/thread/mutex.hpp>
-#include <boost/make_shared.hpp>
+#include <IOKit/IOKitLib.h>
 
 #include <osquery/events.h>
 #include <osquery/status.h>
@@ -28,14 +24,9 @@ namespace osquery {
 
 #define kDAAppearanceTime_ "DAAppearanceTime"
 
-const std::string kIOHIDXClassPath_ =
-    "IOService:/IOResources/IOHDIXController/";
-
 struct DiskArbitrationSubscriptionContext : public SubscriptionContext {
   // Limit events for this subscription to virtual disks (DMG files)
-  bool physical_disks;
-
-  DiskArbitrationSubscriptionContext() : physical_disks(false) {}
+  bool physical_disks{false};
 };
 
 struct DiskArbitrationEventContext : public EventContext {
@@ -57,10 +48,10 @@ struct DiskArbitrationEventContext : public EventContext {
   std::string checksum;
 };
 
-typedef std::shared_ptr<DiskArbitrationEventContext>
-    DiskArbitrationEventContextRef;
-typedef std::shared_ptr<DiskArbitrationSubscriptionContext>
-    DiskArbitrationSubscriptionContextRef;
+using DiskArbitrationEventContextRef =
+    std::shared_ptr<DiskArbitrationEventContext>;
+using DiskArbitrationSubscriptionContextRef =
+    std::shared_ptr<DiskArbitrationSubscriptionContext>;
 
 class DiskArbitrationEventPublisher
     : public EventPublisher<DiskArbitrationSubscriptionContext,
@@ -68,27 +59,40 @@ class DiskArbitrationEventPublisher
   DECLARE_PUBLISHER("diskarbitration");
 
  public:
-  void configure() {}
-  void tearDown();
+  void configure() override {}
+
+  void tearDown() override;
 
   bool shouldFire(const DiskArbitrationSubscriptionContextRef &sc,
-                  const DiskArbitrationEventContextRef &ec) const;
-  Status run();
+                  const DiskArbitrationEventContextRef &ec) const override;
+
+  Status run() override;
 
   static void DiskAppearedCallback(DADiskRef disk, void *context);
+
   static void DiskDisappearedCallback(DADiskRef disk, void *context);
 
  private:
-  DASessionRef session_;
-  CFRunLoopRef run_loop_;
-
   void restart();
-  void stop();
+
+  void stop() override;
+
   static std::string getProperty(const CFStringRef &property,
                                  const CFDictionaryRef &dict);
+
   static std::string extractUdifChecksum(const std::string &path);
+
   static void fire(const std::string &action,
                    const DiskArbitrationEventContextRef &ec,
                    const CFDictionaryRef &dict);
+
+ private:
+  /// Disk arbitration session.
+  DASessionRef session_{nullptr};
+
+  /// Publisher's run loop.
+  CFRunLoopRef run_loop_{nullptr};
+
+  mutable Mutex mutex_;
 };
 }

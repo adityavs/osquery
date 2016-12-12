@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant 
+#  LICENSE file in the root directory of this source tree. An additional grant
 #  of patent rights can be found in the PATENTS file in the same directory.
 
 from __future__ import absolute_import
@@ -15,9 +15,10 @@ from __future__ import unicode_literals
 import argparse
 import json
 import os
-import signal
 import ssl
 import sys
+import thread
+import threading
 
 # Create a simple TLS/HTTP server.
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
@@ -26,10 +27,34 @@ from urlparse import parse_qs
 EXAMPLE_CONFIG = {
     "schedule": {
         "tls_proc": {"query": "select * from processes", "interval": 0},
+    },
+    "node_invalid": False,
+}
+
+# A 'node' variation of the TLS API uses a GET for config.
+EXAMPLE_NODE_CONFIG = EXAMPLE_CONFIG
+EXAMPLE_NODE_CONFIG["node"] = True
+
+EXAMPLE_DISTRIBUTED = {
+    "queries": {
+        "info": "select * from osquery_info",
+        "flags": "select * from osquery_flags",
     }
 }
 
-TEST_RESPONSE = {
+EXAMPLE_DISTRIBUTED_ACCELERATE = {
+    "queries": {
+        "info": "select * from osquery_info",
+    },
+    "accelerate" : "60"
+}
+
+TEST_GET_RESPONSE = {
+    "foo": "baz",
+    "config": "baz",
+}
+
+TEST_POST_RESPONSE = {
     "foo": "bar",
 }
 
@@ -46,24 +71,35 @@ ENROLL_RESPONSE = {
     "node_key": "this_is_a_node_secret"
 }
 
+RECEIVED_REQUESTS = []
+
 def debug(response):
     print("-- [DEBUG] %s" % str(response))
+
+
+ENROLL_RESET = {
+    "count": 1,
+    "max": 3,
+}
 
 class RealSimpleHandler(BaseHTTPRequestHandler):
     def _set_headers(self):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
- 
+
     def do_GET(self):
         debug("RealSimpleHandler::get %s" % self.path)
         self._set_headers()
-        self._reply(TEST_RESPONSE)
- 
+        if self.path == '/config':
+            self.config(request, node=True)
+        else:
+            self._reply(TEST_GET_RESPONSE)
+
     def do_HEAD(self):
         debug("RealSimpleHandler::head %s" % self.path)
         self._set_headers()
-        
+
     def do_POST(self):
         debug("RealSimpleHandler::post %s" % self.path)
         self._set_headers()
@@ -77,8 +113,14 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
             self.config(request)
         elif self.path == '/log':
             self.log(request)
+        elif self.path == '/distributed_read':
+            self.distributed_read(request)
+        elif self.path == '/distributed_write':
+            self.distributed_write(request)
+        elif self.path == '/test_read_requests':
+            self.test_read_requests()
         else:
-            self._reply(TEST_RESPONSE)
+            self._reply(TEST_POST_RESPONSE)
 
     def enroll(self, request):
         '''A basic enrollment endpoint'''
@@ -90,12 +132,13 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
         # Alternatively, each client could authenticate with a TLS client cert.
         # Then, access to the enrollment endpoint implies the required auth.
         # A generated node_key is still supplied for identification.
+        self._push_request('enroll', request)
         if ARGS.use_enroll_secret and ENROLL_SECRET != request["enroll_secret"]:
             self._reply(FAILED_ENROLL_RESPONSE)
             return
         self._reply(ENROLL_RESPONSE)
 
-    def config(self, request):
+    def config(self, request, node=False):
         '''A basic config endpoint'''
 
         # This endpoint responds with a JSON body that is the entire config
@@ -109,22 +152,58 @@ class RealSimpleHandler(BaseHTTPRequestHandler):
 
         # The osquery TLS config plugin calls the TLS enroll plugin to retrieve
         # a node_key, then submits that key alongside config/logger requests.
+        self._push_request('config', request)
         if "node_key" not in request or request["node_key"] not in NODE_KEYS:
             self._reply(FAILED_ENROLL_RESPONSE)
             return
+
+        # This endpoint will also invalidate the node secret key (node_key)
+        # after several attempts to test re-enrollment.
+        ENROLL_RESET["count"] += 1
+        if ENROLL_RESET["count"] % ENROLL_RESET["max"] == 0:
+            ENROLL_RESET["first"] = 0
+            self._reply(FAILED_ENROLL_RESPONSE)
+            return
+        if node:
+            self._reply(EXAMPLE_NODE_CONFIG)
+            return
         self._reply(EXAMPLE_CONFIG)
+
+    def distributed_read(self, request):
+        '''A basic distributed read endpoint'''
+        if "node_key" not in request or request["node_key"] not in NODE_KEYS:
+            self._reply(FAILED_ENROLL_RESPONSE)
+            return
+        self._reply(EXAMPLE_DISTRIBUTED)
+
+    def distributed_write(self, request):
+        '''A basic distributed write endpoint'''
+        self._reply({})
 
     def log(self, request):
         self._reply({})
 
+    def test_read_requests(self):
+        # call made by unit tests to retrieve the entire history of requests 
+        # made by code under test. Used by unit tests to verify that the code
+        # under test made the expected calls to the TLS backend
+        self._reply(RECEIVED_REQUESTS)
+
+    def _push_request(self, command, request):
+        # Archive the http command and the request body so that unit tests
+        # can retrieve it later for verification purposes
+        request['command'] = command
+        RECEIVED_REQUESTS.append(request)
+        
     def _reply(self, response):
         debug("Replying: %s" % (str(response)))
         self.wfile.write(json.dumps(response))
 
-def handler(signum, frame):
+
+def handler():
     print("[DEBUG] Shutting down HTTP server via timeout (%d) seconds."
-        % (ARGS.timeout))
-    sys.exit(0)
+          % (ARGS.timeout))
+    thread.interrupt_main()
 
 if __name__ == '__main__':
     SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -141,7 +220,7 @@ if __name__ == '__main__':
         help="Wrap the HTTP server socket in TLS."
     )
     parser.add_argument(
-        "--timeout", default=5, type=int,
+        "--timeout", default=10, type=int,
         help="If not persisting, exit after a number of seconds"
     )
 
@@ -189,8 +268,8 @@ if __name__ == '__main__':
             exit(1)
 
     if not ARGS.persist:
-        signal.signal(signal.SIGALRM, handler)
-        signal.alarm(ARGS.timeout)
+        timer = threading.Timer(ARGS.timeout, handler)
+        timer.start()
 
     httpd = HTTPServer(('localhost', ARGS.port), RealSimpleHandler)
     if ARGS.tls:
@@ -198,16 +277,20 @@ if __name__ == '__main__':
             ctx = ssl.SSLContext(ssl.PROTOCOL_SSLv23)
             ctx.load_cert_chain(ARGS.cert, keyfile=ARGS.key)
             ctx.load_verify_locations(capath=ARGS.ca)
-            ctx.options ^=  ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3
+            ctx.options ^= ssl.OP_NO_SSLv2 | ssl.OP_NO_SSLv3
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         else:
             httpd.socket = ssl.wrap_socket(httpd.socket,
-                ca_certs=ARGS.ca,
-                ssl_version=ssl.PROTOCOL_SSLv23,
-                certfile=ARGS.cert,
-                keyfile=ARGS.key,
-                server_side=True)
+                                           ca_certs=ARGS.ca,
+                                           ssl_version=ssl.PROTOCOL_SSLv23,
+                                           certfile=ARGS.cert,
+                                           keyfile=ARGS.key,
+                                           server_side=True)
         debug("Starting TLS/HTTPS server on TCP port: %d" % ARGS.port)
     else:
         debug("Starting HTTP server on TCP port: %d" % ARGS.port)
-    httpd.serve_forever()
+
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        sys.exit(0)

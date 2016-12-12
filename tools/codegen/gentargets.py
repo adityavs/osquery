@@ -11,14 +11,17 @@ logging.basicConfig(level=logging.INFO, format=logging_format)
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 REPO_ROOT_DIR = os.path.realpath(os.path.join(SCRIPT_DIR, "../.."))
 
+
 def get_files_to_compile(json_data):
     files_to_compile = []
     for element in json_data:
         filename = element["file"]
-        if not filename.endswith("_tests.cpp") and \
+        if not filename.endswith("tests.cpp") and \
+                not filename.endswith("benchmarks.cpp") and \
                 "third-party" not in filename and \
                 "example" not in filename and \
-                "generated/gen" not in filename:
+                "generated/gen" not in filename and \
+                "test_util" not in filename:
             base = filename.rfind("osquery/")
             filename = filename[base + len("osquery/"):]
             base_generated = filename.rfind("generated/")
@@ -44,11 +47,12 @@ thrift_library(
 
 cpp_library(
   name="osquery_sdk",
+  link_whole=True,
   srcs=["""
 
 TARGETS_POSTSCRIPT = """  ],
   deps=[
-    "@/thrift/lib/cpp/concurrency",
+    "@/thrift/lib/cpp/concurrency:concurrency",
     ":if-cpp",
   ],
   external_deps=[
@@ -57,7 +61,7 @@ TARGETS_POSTSCRIPT = """  ],
     "gflags",
     "gtest",
     "rocksdb",
-    "libuuid",
+    ("e2fsprogs", None, "uuid"),
   ],
   compiler_flags=[
     "-Wno-unused-function",

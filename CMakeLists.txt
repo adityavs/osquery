@@ -8,54 +8,85 @@ macro(LOG MESSAGE)
   message("-- ${MESSAGE}")
 endmacro(LOG)
 
+# Set expected directory for within-build dependencies
+if(DEFINED ENV{OSQUERY_DEPS})
+  set(BUILD_DEPS "$ENV{OSQUERY_DEPS}")
+else()
+  set(BUILD_DEPS "/usr/local/osquery")
+endif()
+
+if(WIN32)
+  set(WINDOWS_DEP_DIR "$ENV{ChocolateyInstall}/lib")
+  string(REGEX REPLACE "\\\\" "/" WINDOWS_DEP_DIR ${WINDOWS_DEP_DIR})
+  list(APPEND WINDOWS_DEP_LIST ${WINDOWS_DEP_DIR})
+
+  list(APPEND CMAKE_PROGRAM_PATH "${WINDOWS_DEP_DIR}/*/tools")
+endif()
+
 # If no explicit compiler override and clang++ exists, prefer clang.
-find_file(CLANGXX_EXISTS "clang++")
+find_program(CLANGXX_EXECUTABLE "clang++" ENV PATH)
 if(DEFINED ENV{CC})
   set(CMAKE_C_COMPILER "$ENV{CC}")
   LOG("Overriding C compiler from clang to $ENV{CC}")
-elseif(CLANGXX_EXISTS)
+elseif(CLANGXX_EXECUTABLE)
   set(CMAKE_C_COMPILER "clang")
 endif()
 if(DEFINED ENV{CXX})
   set(CMAKE_CXX_COMPILER "$ENV{CXX}")
   LOG("Overriding CXX compiler from clang++ to $ENV{CXX}")
-elseif(CLANGXX_EXISTS)
+elseif(CLANGXX_EXECUTABLE)
   set(CMAKE_CXX_COMPILER "clang++")
 endif()
 
-add_compile_options(
-  -Wall
-  -Wextra
-  -Wstrict-aliasing
-  -Wno-unused-parameter
-  -Wno-unused-result
-  -Wno-missing-field-initializers
-  -Wno-sign-compare
-  -Wnon-virtual-dtor
-  -Wchar-subscripts
-  -Wpointer-arith
-  -Woverloaded-virtual
-  -Wformat
-  -Wformat-security
-  -Werror=format-security
-  -fstack-protector-all
-  -fPIE
-  -fpie
-  -fPIC
-  -fpic
-  -pipe
-)
+find_program(CCACHE_EXECUTABLE ccache ENV PATH)
+if(CCACHE_EXECUTABLE)
+  if(NOT DEFINED CCACHE_FOUND_LOG)
+    set(CCACHE_FOUND_LOG TRUE CACHE BOOL "Write log line for ccache.")
+    LOG("Found ccache ${CCACHE_EXECUTABLE}")
+    LOG("Using ccache to speed up compilation")
+  endif()
+  set(ENV{CCACHE_CPP2} "yes")
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${CCACHE_EXECUTABLE}")
+  set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "${CCACHE_EXECUTABLE}")
+endif()
+
+if(NOT WIN32)
+  add_compile_options(
+    -Qunused-arguments
+    -Wstrict-aliasing
+    -Wno-missing-field-initializers
+    -Wno-unused-local-typedef
+    -Wno-deprecated-register
+    -Wno-unknown-warning-option
+    -Wnon-virtual-dtor
+    -Wchar-subscripts
+    -Wpointer-arith
+    -Woverloaded-virtual
+    -Wformat
+    -Wformat-security
+    -Werror=format-security
+    -Wabi-tag
+    -fpermissive
+    -fstack-protector-all
+    -pipe
+    -fdata-sections
+    -ffunction-sections
+  )
+endif()
 
 # osquery additional compiler flags added by CMake.
 set(C_COMPILE_FLAGS "")
 set(CXX_COMPILE_FLAGS "")
 
+find_program(PYTHON_EXECUTABLE "python" ENV PATH)
+find_program(THRIFT_COMPILER "thrift" ENV PATH)
+
 # Use osquery language to set platform/os
 if(DEFINED ENV{OSQUERY_PLATFORM})
-  set(PLATFORM ENV{OSQUERY_PLATFORM})
+  set(PLATFORM "$ENV{OSQUERY_PLATFORM}")
 else()
   execute_process(
-    COMMAND "${CMAKE_SOURCE_DIR}/tools/provision.sh" get_platform
+    COMMAND "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/get_platform.py"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
     OUTPUT_VARIABLE PLATFORM
     OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -63,8 +94,8 @@ else()
 endif()
 
 if(PLATFORM STREQUAL "")
-  WARNING_LOG("Unable to detect osquery platform: ./tools/provision.sh failed")
-  message(FATAL "Cannot proceed without knowing the build platform")
+  WARNING_LOG("Unable to detect osquery platform: ./tools/get_platform.py failed")
+  message(FATAL_ERROR "Cannot proceed without knowing the build platform")
 endif()
 list(GET PLATFORM 0 OSQUERY_BUILD_PLATFORM)
 list(GET PLATFORM 1 OSQUERY_BUILD_DISTRO)
@@ -77,14 +108,27 @@ list(GET PLATFORM 1 OSQUERY_BUILD_DISTRO_DEFINE)
 # osquery needs ALL symbols in the libraries it includes for relaxed ctors
 # late-loading modules and SQLite introspection utilities.
 if(APPLE)
-  set(APPLE_MIN_ABI "10.9")
+  if(DEFINED ENV{OSX_VERSION_MIN})
+    set(OSX_VERSION_MIN "$ENV{OSX_VERSION_MIN}")
+  else()
+    set(OSX_VERSION_MIN "${OSQUERY_BUILD_DISTRO}")
+  endif()
+  add_compile_options(
+    -mmacosx-version-min=${OSX_VERSION_MIN}
+  )
+
   set(CXX_COMPILE_FLAGS "${CXX_COMPILE_FLAGS} -std=c++11 -stdlib=libc++")
-  set(CXX_COMPILE_FLAGS "${CXX_COMPILE_FLAGS} -mmacosx-version-min=${APPLE_MIN_ABI}")
   set(OS_WHOLELINK_PRE "-Wl,-force_load")
   set(OS_WHOLELINK_POST "")
   # Special compile flags for Objective-C++
   set(OBJCXX_COMPILE_FLAGS
-    "-x objective-c++ -fobjc-arc -Wno-c++11-extensions -mmacosx-version-min=${APPLE_MIN_ABI}")
+    "-x objective-c++ -fobjc-arc -Wno-c++11-extensions")
+elseif(WIN32)
+  # Windows
+  # C++11 features should be on by default in 2012 and beyond.
+  set(OS_WHOLELINK_PRE "-WHOLEARCHIVE:")
+  set(OS_WHOLELINK_POST "")
+  set(WINDOWS TRUE)
 else()
   set(CXX_COMPILE_FLAGS "${CXX_COMPILE_FLAGS} -std=c++11")
   set(OS_WHOLELINK_PRE "-Wl,-whole-archive")
@@ -93,73 +137,103 @@ else()
   # component-specific globbing is needed.
   if(${OSQUERY_BUILD_PLATFORM} STREQUAL "freebsd")
     set(FREEBSD TRUE)
-    set(LINUX FALSE)
   else()
     set(LINUX TRUE)
-    set(FREEBSD FALSE)
   endif()
 endif()
-
-# RHEL6 uses a different gcc 4.9 runtime
-if(${OSQUERY_BUILD_DISTRO} STREQUAL "rhel6")
-  set(GCC_RUNTIME "/opt/rh/devtoolset-3/root/usr/")
-  WARNING_LOG("Setting RHEL6 GCC runtime: ${GCC_RUNTIME}")
-  set(CMAKE_C_COMPILER "${CMAKE_C_COMPILER}" "--gcc-toolchain=${GCC_RUNTIME}")
-  set(CMAKE_CXX_COMPILER "${CMAKE_CXX_COMPILER}" "--gcc-toolchain=${GCC_RUNTIME}")
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --gcc-toolchain=${GCC_RUNTIME}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --gcc-toolchain=${GCC_RUNTIME}")
-  set(C_COMPILE_FLAGS "${C_COMPILE_FLAGS} --gcc-toolchain=${GCC_RUNTIME}")
-  set(CXX_COMPILE_FLAGS "${CXX_COMPILE_FLAGS} --gcc-toolchain=${GCC_RUNTIME}")
-endif()
-
-# Provisioning installs non-default C++11 runtimes on build hosts.
-# List those distros that include a non-system-default runtime.
-set(OSQUERY_REQUIRE_RUNTIMES
-  "lucid"
-  "precise"
-  "centos6"
-  "rhel6"
-  "oracle6"
-)
 
 # make debug (environment variable from Makefile)
 if(DEFINED ENV{DEBUG})
   set(DEBUG TRUE)
   set(CMAKE_BUILD_TYPE "Debug")
-  add_compile_options(-g -O0)
+  if(WINDOWS)
+    # TODO(#1985): Is there a MSVC flag congruent to -fstandalone-debug?
+    add_compile_options(
+      /Zi
+      /Od
+    )
+  else()
+    add_compile_options(
+      -g
+      -O0
+      -fstandalone-debug
+    )
+  endif()
   add_definitions(-DDEBUG)
   WARNING_LOG("Setting DEBUG build")
 elseif(DEFINED ENV{SANITIZE})
   # make sanitize (cannot make debug sanitize)
-  add_compile_options(-g -O0 -fno-omit-frame-pointer)
-  add_definitions(-DNDEBUG)
-  if(DEFINED ENV{SANITIZE_THREAD})
+  set(SANITIZE_BLACKLIST "${CMAKE_SOURCE_DIR}/tools/analysis/sanitize_blacklist.txt")
+  add_compile_options(
+    -g
+    -fstandalone-debug
+    -fno-omit-frame-pointer
+    -fno-optimize-sibling-calls
+    -fsanitize-blacklist=${SANITIZE_BLACKLIST}
+  )
+  if (DEFINED ENV{SANITIZE_THREAD})
     add_compile_options(-fsanitize=thread)
   else()
-    add_compile_options(-fsanitize=leak -fsanitize=address)
+    add_compile_options(-fsanitize=address)
+    if(LINUX)
+      # LSAN is not available on OS X 10.12.
+      add_compile_options(-fsanitize=leak)
+    endif()
   endif()
-  set(SANITIZE_BLACKLIST "${CMAKE_SOURCE_DIR}/tools/tests/sanitize_blacklist.txt")
-  add_compile_options(-fsanitize-blacklist=${SANITIZE_BLACKLIST})
 else()
   set(DEBUG FALSE)
-  add_compile_options(-Os)
+  if(WINDOWS)
+    add_compile_options(/Ot)
+  else()
+    add_compile_options(-Os)
+  endif()
   add_definitions(-DNDEBUG)
   # Do not enable fortify with clang: http://llvm.org/bugs/show_bug.cgi?id=16821
   #set(C_COMPILE_FLAGS "${C_COMPILE_FLAGS} -D_FORTIFY_SOURCE=2")
+
+  # Visual Studio does not support generation of PIC code
+  if(NOT WINDOWS)
+    # TSAN and MSAN do not like PIE/PIC on Linux 4.1.
+    # To be safe, only include them when building 'release' outputs.
+    add_compile_options(
+      -fPIE
+      -fpie
+      -fPIC
+      -fpic
+    )
+  endif()
 endif()
+# Generate a compile_commands.json for static analyzer input.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT DEFINED ENV{OPTIMIZED})
-  add_compile_options(-march=x86-64 -mtune=generic)
+  if(WINDOWS)
+    # It is unclear if AVX must be managed on Windows.
+    add_compile_options(/favor:AMD64)
+  else()
+    add_compile_options(-march=x86-64 -mno-avx)
+  endif()
 endif()
 
 # make analyze (environment variable from Makefile)
 if(DEFINED ENV{ANALYZE})
-  set(CMAKE_CXX_COMPILER "${CMAKE_SOURCE_DIR}/tools/analysis/clang-analyze.sh")
+  # TODO(#1985): clang-analyze on Windows
+  if(WINDOWS)
+    message(FATAL_ERROR "Cannot analyze on Windows right now." )
+  else()
+    set(CMAKE_CXX_COMPILER "${CMAKE_SOURCE_DIR}/tools/analysis/clang-analyze.sh")
+  endif()
 endif()
 
 # make sdk (tests building SDK-based extensions)
 if(DEFINED ENV{SDK})
   set(OSQUERY_BUILD_SDK_ONLY TRUE)
+else()
+  set(OSQUERY_BUILD_SDK_ONLY FALSE)
+endif()
+
+if(DEFINED ENV{FAST})
+  set(ENV{OSQUERY_BUILD_SHARED} TRUE)
 endif()
 
 # make packages will set release to true and blacklist development features,
@@ -176,8 +250,27 @@ set(CMAKE_SKIP_INSTALL_ALL_DEPENDENCY TRUE)
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake" "${CMAKE_MODULE_PATH}")
 include(CMakeLibs)
 
+if(WINDOWS)
+  foreach(flag_var
+          CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE
+          CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE
+          CMAKE_CXX_FLAGS_MINSIZEREL CMAKE_CXX_FLAGS_RELWITHDEBINFO
+          CMAKE_C_FLAGS_MINSIZEREL CMAKE_C_FLAGS_RELWITHDEBINFO)
+    if(${flag_var} MATCHES "/MD")
+      string(REGEX REPLACE "/MD" "/MT" ${flag_var} "${${flag_var}}")
+    endif(${flag_var} MATCHES "/MD")
+
+    # Ignore unused parameter messages for C-based projects (e.g. sqlite3)
+    if (flag_var MATCHES "^CMAKE_C_FLAGS*")
+      set(${flag_var} "${${flag_var}} /wd4101")
+    endif(flag_var MATCHES "^CMAKE_C_FLAGS*")
+  endforeach(flag_var)
+
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LTCG")
+endif()
+
 if(NOT IS_DIRECTORY ${CMAKE_SOURCE_DIR}/third-party/sqlite3)
-  WARNING_LOG("Cannot find git submodule third-party/sqlite3 directory.")
+  WARNING_LOG("Cannot find git submodule third-party/sqlite3 directory")
   WARNING_LOG("Please run: make deps or git submodule update --init")
   message(FATAL_ERROR "No sqlite3 directory")
 endif()
@@ -229,127 +322,218 @@ add_definitions(
   -D${OSQUERY_BUILD_PLATFORM_DEFINE}_${OSQUERY_BUILD_DISTRO_DEFINE}
   -DSTRIP_FLAG_HELP=1
   -DBOOST_NETWORK_ENABLE_HTTPS
-  # There are platform incompatibilities on OS X with lite and construction.
-  #-DROCKSDB_LITE=1
+  -DBOOST_NO_CXX11_VARIADIC_TEMPLATES
 )
+
+if(DEFINED ENV{SQLITE_DEBUG})
+  add_definitions(
+    -DSQLITE_DEBUG=1
+    -DSQLITE_ENABLE_WHERETRACE=1
+  )
+endif()
 
 if(APPLE)
   LOG_PLATFORM("OS X")
+elseif(OSQUERY_BUILD_PLATFORM STREQUAL "debian")
+  set(DEBIAN_BASED TRUE)
+  LOG_PLATFORM("Debian")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "ubuntu")
   set(DEBIAN_BASED TRUE)
-  set(UBUNTU TRUE)
   LOG_PLATFORM("Ubuntu")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "centos")
   set(REDHAT_BASED TRUE)
-  set(CENTOS TRUE)
   LOG_PLATFORM("CentOS")
+elseif(OSQUERY_BUILD_PLATFORM STREQUAL "scientific")
+  set(REDHAT_BASED TRUE)
+  LOG_PLATFORM("Scientific Linux")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "rhel")
   set(REDHAT_BASED TRUE)
-  set(RHEL TRUE)
   LOG_PLATFORM("RHEL")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "amazon")
   set(REDHAT_BASED TRUE)
-  set(AMAZON TRUE)
   LOG_PLATFORM("Amazon Linux")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "oracle")
   set(REDHAT_BASED TRUE)
-  set(ORACLE TRUE)
   LOG_PLATFORM("Oracle Linux")
+elseif(OSQUERY_BUILD_PLATFORM STREQUAL "gentoo")
+  set(GENTOO_BASED TRUE)
+  LOG_PLATFORM("Gentoo Linux")
+elseif(OSQUERY_BUILD_PLATFORM STREQUAL "funtoo")
+  set(GENTOO_BASED TRUE)
+  LOG_PLATFORM("Funtoo Linux")
 elseif(OSQUERY_BUILD_PLATFORM STREQUAL "freebsd")
-  set(FREEBSD TRUE)
   LOG_PLATFORM("FreeBSD")
+elseif(OSQUERY_BUILD_PLATFORM STREQUAL "windows")
+  LOG_PLATFORM("Windows")
+endif()
+
+if("${OSQUERY_BUILD_DISTRO}" MATCHES "^(centos|rhel|scientific|oracle)7$")
+  # Useful for libudev version detection.
+  set(SYSTEMD TRUE)
 endif()
 
 if(REDHAT_BASED)
   add_definitions(-DREDHAT_BASED=1)
 elseif(DEBIAN_BASED)
   add_definitions(-DDEBIAN_BASED=1)
+elseif(GENTOO_BASED)
+  add_definitions(-DGENTOO_BASED=1)
+endif()
+
+# Add sysroot overrides for each platform/distro.
+# These should be prioritized over all other includes.
+if(APPLE)
+  include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/sysroots/darwin")
+elseif(LINUX)
+  include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/sysroots/linux")
+endif()
+
+if(NOT WINDOWS)
+  include_directories(SYSTEM "${BUILD_DEPS}/legacy/include")
+  include_directories(SYSTEM "${BUILD_DEPS}/include")
+  include_directories("${BUILD_DEPS}/include/openssl")
+endif()
+
+include_directories("${CMAKE_SOURCE_DIR}/third-party/sqlite3")
+include_directories("${CMAKE_SOURCE_DIR}/include")
+include_directories("${CMAKE_SOURCE_DIR}")
+
+set(MKDIR_OPTS "")
+if(WINDOWS)
+  set(PROCESS_FAMILY "windows")
+
+  # Win64 specific gflags
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static gtest/gmock library" FORCE)
+
+  file(GLOB INCLUDE_DIRS LIST_DIRECTORIES true "${WINDOWS_DEP_DIR}/*/*/include")
+  include_directories(${INCLUDE_DIRS})
+  include_directories("${WINDOWS_DEP_DIR}/boost-msvc14/local")
+
+  ## TODO(FIXME): temporary for now
+  include_directories("${WINDOWS_DEP_DIR}/linenoise-ng/local/include/linenoise")
+  include_directories("${WINDOWS_DEP_DIR}/snappy-msvc/tools/snappy-windows-1.1.1.8/include")
+else()
+  set(PROCESS_FAMILY "posix")
+  set(MKDIR_OPTS "-p")
+endif()
+
+if(WINDOWS)
+  foreach(DEP_DIR ${WINDOWS_DEP_LIST})
+    file(GLOB_RECURSE WINDOWS_LOCAL_LIB_DIRS LIST_DIRECTORIES false "${DEP_DIR}/*.lib")
+    foreach(LIB_FILE ${WINDOWS_LOCAL_LIB_DIRS})
+      get_filename_component(LIB_DIR ${LIB_FILE} DIRECTORY)
+      list(APPEND OS_LIB_DIRS ${LIB_DIR})
+    endforeach()
+  endforeach()
+  list(REMOVE_DUPLICATES OS_LIB_DIRS)
+  link_directories(${OS_LIB_DIRS})
+else()
+  set(OS_LIB_DIRS
+    "/lib"
+    "/lib64"
+    "/usr/lib"
+    "/usr/lib64"
+    "/usr/lib/x86_64-linux-gnu/"
+    )
 endif()
 
 # Make sure the generated paths exist
-execute_process(COMMAND mkdir -p "${CMAKE_BINARY_DIR}/generated")
+execute_process(COMMAND mkdir ${MKDIR_OPTS} "${CMAKE_BINARY_DIR}/generated")
 
 # We need to link some packages as dynamic/dependent.
-set(CMAKE_FIND_LIBRARY_SUFFIXES .dylib .so)
-find_package(OpenSSL REQUIRED)
-find_package(BZip2 REQUIRED)
-find_package(Dl REQUIRED)
-find_package(Readline REQUIRED)
-
-# Make sure the OpenSSL/ssl library has a TLS client method.
-# Prefer the highest version of TLS, but accept 1.2, 1.1, or 1.0.
-include(CheckLibraryExists)
-CHECK_LIBRARY_EXISTS(${OPENSSL_SSL_LIBRARY} "TLSv1_2_client_method" "" OPENSSL_TLSV12)
-CHECK_LIBRARY_EXISTS(${OPENSSL_SSL_LIBRARY} "TLSv1_1_client_method" "" OPENSSL_TLSV11)
-CHECK_LIBRARY_EXISTS(${OPENSSL_SSL_LIBRARY} "TLSv1_client_method" "" OPENSSL_TLSV10)
-
-# Add a define based on the highest TLS version found. Fatal if no TLS client.
-if(OPENSSL_TLSV12)
-  add_definitions(-DSSL_TXT_TLSV1_2)
-elseif(OPENSSL_TLSV11)
-  add_definitions(-DSSL_TXT_TLSV1_1)
-elseif(OPENSSL_TLSV10)
-  add_definitions(-DSSL_TXT_TLSV1)
-else()
-  message(FATAL "Cannot find any TLS client methods")
-endif()
+set(CMAKE_FIND_LIBRARY_SUFFIXES .lib .dylib .so .a)
 
 # Most dependent packages/libs we want static.
-if(NOT DEFINED $ENV{BUILD_LINK_SHARED})
-  set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dylib .so)
+if(DEFINED ENV{BUILD_LINK_SHARED})
+  set(ENV{OSQUERY_BUILD_LINK_SHARED} TRUE)
 endif()
-find_package(CppNetlib 0.11.0 REQUIRED)
-find_package(Glog REQUIRED)
-find_package(Gflags REQUIRED)
-find_package(Gtest REQUIRED)
-find_package(RocksDB REQUIRED)
-find_package(Snappy REQUIRED)
-find_package(Sqlite3 REQUIRED)
-find_package(Thrift 0.9.1 REQUIRED)
-
-# Python is used for table spec generation and formating.
-if(PYTHON_VERSION_MAJOR STREQUAL "2" AND PYTHON_VERSION_MINOR STREQUAL "4")
-  WARNING_LOG("Found python 2.4, overriding to /usr/bin/python2.6")
-  set(PYTHON_EXECUTABLE "/usr/bin/python2.6")
+if(NOT DEFINED ENV{OSQUERY_BUILD_LINK_SHARED})
+  set(CMAKE_FIND_LIBRARY_SUFFIXES .lib .a .dylib .so)
 endif()
 
+# Previously, this would find_package for Gtest.
+# We can supply the known include paths within each test as compile flags.
 enable_testing()
+set(CTEST_TEST_TIMEOUT 600)
 
-include(Packages)
+# Detect TR1 usage.
+include(CheckIncludeFileCXX)
+if(WINDOWS)
+  check_include_file_cxx("tuple" HAVE_TR1_TUPLE)
+else()
+  check_include_file_cxx("tr1/tuple" HAVE_TR1_TUPLE)
+endif()
+
+if("${HAVE_TR1_TUPLE}" STREQUAL "")
+  set(GTEST_FLAGS "-DGTEST_USE_OWN_TR1_TUPLE=1")
+else()
+  set(GTEST_FLAGS "-DGTEST_USE_OWN_TR1_TUPLE=0")
+endif()
+
+set(GTEST_FLAGS
+  ${GTEST_FLAGS}
+  "-I${CMAKE_SOURCE_DIR}/third-party/gtest-1.7.0/include"
+  "-I${CMAKE_SOURCE_DIR}/third-party/gmock-1.7.0/include"
+  "-I${CMAKE_SOURCE_DIR}/third-party/gmock-1.7.0/gtest/include"
+)
+join("${GTEST_FLAGS}" " " GTEST_FLAGS)
+
 include(Thrift)
 
-include_directories("${GLOG_INCLUDE_DIRS}")
-include_directories("${CMAKE_SOURCE_DIR}/include")
-include_directories("${CMAKE_SOURCE_DIR}")
-include_directories("/usr/local/include")
-link_directories("/usr/local/lib")
-
-# Add sysroot overrides for each platform/distro.
-if(LINUX)
-  include_directories("${CMAKE_SOURCE_DIR}/sysroots/linux")
-endif()
+add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/sqlite3")
+add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/gmock-1.7.0")
 
 add_subdirectory(osquery)
 add_subdirectory(tools/tests)
+add_subdirectory(external)
+
+# Include the kernel building targets/macros
+if(NOT ${OSQUERY_BUILD_SDK_ONLY})
+  add_subdirectory(kernel)
+endif()
+
+# Packages must be included after all other CMake includes.
+if(NOT ${OSQUERY_BUILD_SDK_ONLY})
+  include(Packages)
+endif()
 
 # make docs
-find_package(Doxygen)
-if(DOXYGEN_FOUND)
-  add_custom_target(
-    docs
-    echo "PROJECT_NUMBER=${OSQUERY_BUILD_VERSION}" |
-      cat ${CMAKE_SOURCE_DIR}/Doxyfile - |
-      "${DOXYGEN_EXECUTABLE}" -;
+add_custom_target(
+  docs
+  COMMAND "${PYTHON_EXECUTABLE}"
+    "${CMAKE_SOURCE_DIR}/tools/codegen/genapi.py" "${CMAKE_SOURCE_DIR}"
+    "--output" "--directory" "${CMAKE_SOURCE_DIR}/build/docs"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  COMMENT "Generating API documentation with Doxygen/mkdocs" VERBATIM
+)
+
+find_program(DOXYGEN_EXECUTABLE doxygen ENV PATH)
+if(DOXYGEN_EXECUTABLE)
+  add_custom_command(TARGET docs POST_BUILD
+    COMMAND echo "PROJECT_NUMBER=${OSQUERY_BUILD_VERSION}" |
+      cat ${CMAKE_SOURCE_DIR}/Doxyfile - | "${DOXYGEN_EXECUTABLE}" -;
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    COMMENT "Generating API documentation with Doxygen" VERBATIM
   )
-endif(DOXYGEN_FOUND)
+else(DEFINED ENV{DOCS})
+  WARNING_LOG("Cannot find Doxygen executable in path")
+endif()
+
+find_program(MKDOCS_EXECUTABLE mkdocs ENV PATH)
+if(MKDOCS_EXECUTABLE)
+  add_custom_command(TARGET docs POST_BUILD
+    COMMAND "${MKDOCS_EXECUTABLE}" build --clean -s
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  )
+elseif(DEFINED ENV{DOCS})
+  WARNING_LOG("Cannot find mkdocs executable in path")
+endif()
 
 # make format-all
+find_program(CLANGFORMAT_EXECUTABLE "clang-format" ENV PATH)
 add_custom_target(
   format-all
   find osquery include tools \( -name "*.h" -o -name "*.cpp" -o -name "*.mm" \)
-    -exec clang-format -i {} +
+    -exec "${CLANGFORMAT_EXECUTABLE}" -i {} +
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "Formatting all osquery code with clang-format" VERBATIM
 )
@@ -357,7 +541,7 @@ add_custom_target(
 # make format
 add_custom_target(
   format
-  ${PYTHON_EXECUTABLE} "${CMAKE_SOURCE_DIR}/tools/formatting/git-clang-format.py"
+  "${PYTHON_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tools/formatting/git-clang-format.py" "-f"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   COMMENT "Formatting code staged code changes with clang-format" VERBATIM
 )

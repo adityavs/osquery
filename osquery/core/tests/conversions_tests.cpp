@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,9 +13,17 @@
 
 #include <gtest/gtest.h>
 
+#include <osquery/core.h>
+#include <osquery/flags.h>
+#include <osquery/system.h>
+
 #include "osquery/core/conversions.h"
 
+#include "osquery/tests/test_util.h"
+
 namespace osquery {
+
+DECLARE_bool(utc);
 
 class ConversionsTests : public testing::Test {};
 
@@ -34,7 +42,7 @@ TEST_F(ConversionsTests, test_conversion) {
 TEST_F(ConversionsTests, test_base64) {
   std::string unencoded = "HELLO";
   auto encoded = base64Encode(unencoded);
-  EXPECT_NE(encoded.size(), 0);
+  EXPECT_NE(encoded.size(), 0U);
 
   auto unencoded2 = base64Decode(encoded);
   EXPECT_EQ(unencoded, unencoded2);
@@ -50,5 +58,40 @@ TEST_F(ConversionsTests, test_ascii_false) {
   std::string unencoded = "こんにちは";
   auto result = isPrintable(unencoded);
   EXPECT_FALSE(result);
+}
+
+TEST_F(ConversionsTests, test_unicode_unescape) {
+  std::vector<std::pair<std::string, std::string>> conversions = {
+      std::make_pair("\\u0025hi", "%hi"),
+      std::make_pair("hi\\u0025", "hi%"),
+      std::make_pair("\\uFFFFhi", "\\uFFFFhi"),
+      std::make_pair("0000\\u", "0000\\u"),
+      std::make_pair("hi", "hi"),
+  };
+
+  for (const auto& test : conversions) {
+    EXPECT_EQ(unescapeUnicode(test.first), test.second);
+  }
+}
+
+TEST_F(ConversionsTests, test_split) {
+  for (const auto& i : generateSplitStringTestData()) {
+    EXPECT_EQ(split(i.test_string), i.test_vector);
+  }
+}
+
+TEST_F(ConversionsTests, test_join) {
+  std::vector<std::string> content = {
+      "one", "two", "three",
+  };
+  EXPECT_EQ(join(content, ", "), "one, two, three");
+}
+
+TEST_F(ConversionsTests, test_split_occurences) {
+  std::string content = "T: 'S:S'";
+  std::vector<std::string> expected = {
+      "T", "'S:S'",
+  };
+  EXPECT_EQ(split(content, ":", 1), expected);
 }
 }

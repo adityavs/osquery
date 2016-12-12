@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,214 +10,179 @@
 
 #include <iostream>
 
-#include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
+
 #include <gtest/gtest.h>
 
 #include <osquery/core.h>
+#include <osquery/distributed.h>
+#include <osquery/enroll.h>
 #include <osquery/sql.h>
 
-#include "osquery/distributed/distributed.h"
+#include "osquery/core/json.h"
 #include "osquery/sql/sqlite_util.h"
+#include "osquery/tests/test_additional_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace pt = boost::property_tree;
 
+DECLARE_string(distributed_tls_read_endpoint);
+DECLARE_string(distributed_tls_write_endpoint);
+
 namespace osquery {
 
-// Distributed tests expect an SQL implementation for queries.
-REGISTER_INTERNAL(SQLiteSQLPlugin, "sql", "sql");
+class DistributedTests : public testing::Test {
+ protected:
+  void SetUp() {
+    TLSServerRunner::start();
+    TLSServerRunner::setClientConfig();
+    clearNodeKey();
 
-class DistributedTests : public testing::Test {};
+    distributed_tls_read_endpoint_ =
+        Flag::getValue("distributed_tls_read_endpoint");
+    Flag::updateValue("distributed_tls_read_endpoint", "/distributed_read");
 
-TEST_F(DistributedTests, test_test_distributed_provider) {
-  MockDistributedProvider p;
-  std::string query_string = "['foo']";
-  std::string result_string = "['bar']";
+    distributed_tls_write_endpoint_ =
+        Flag::getValue("distributed_tls_write_endpoint");
+    Flag::updateValue("distributed_tls_write_endpoint", "/distributed_write");
 
-  p.queriesJSON_ = query_string;
-  std::string query_json;
-  Status s = p.getQueriesJSON(query_json);
-  ASSERT_EQ(Status(), s);
-  EXPECT_EQ(query_string, query_json);
+    Registry::setActive("distributed", "tls");
+  }
 
-  s = p.writeResultsJSON(result_string);
+  void TearDown() {
+    TLSServerRunner::stop();
+    TLSServerRunner::unsetClientConfig();
+    clearNodeKey();
+
+    Flag::updateValue("distributed_tls_read_endpoint",
+                      distributed_tls_read_endpoint_);
+    Flag::updateValue("distributed_tls_write_endpoint",
+                      distributed_tls_write_endpoint_);
+  }
+
+ protected:
+  std::string distributed_tls_read_endpoint_;
+  std::string distributed_tls_write_endpoint_;
+};
+
+TEST_F(DistributedTests, test_serialize_distributed_query_request) {
+  DistributedQueryRequest r;
+  r.query = "foo";
+  r.id = "bar";
+
+  pt::ptree tree;
+  auto s = serializeDistributedQueryRequest(r, tree);
   EXPECT_TRUE(s.ok());
-  EXPECT_EQ(result_string, p.resultsJSON_);
+  EXPECT_EQ(tree.get<std::string>("query"), "foo");
+  EXPECT_EQ(tree.get<std::string>("id"), "bar");
 }
 
-TEST_F(DistributedTests, test_parse_query_json) {
-  std::string request_json = "[{\"query\": \"foo\", \"id\": \"bar\"}]";
-  std::vector<DistributedQueryRequest> requests;
-  Status s = DistributedQueryHandler::parseQueriesJSON(request_json, requests);
-  ASSERT_EQ(Status(), s);
-  EXPECT_EQ(1, requests.size());
-  EXPECT_EQ("foo", requests[0].query);
-  EXPECT_EQ("bar", requests[0].id);
-
-  std::string bad_json =
-      "[{\"query\": \"foo\", \"id\": \"bar\"}, {\"query\": \"b\"}]";
-  requests.clear();
-  s = DistributedQueryHandler::parseQueriesJSON(bad_json, requests);
-  ASSERT_FALSE(s.ok());
-  EXPECT_EQ(0, requests.size());
-}
-
-TEST_F(DistributedTests, test_handle_query) {
-  // Access to the internal SQL implementation is only available in core.
-  SQL query = DistributedQueryHandler::handleQuery("SELECT hour from time");
-  ASSERT_TRUE(query.ok());
-  QueryData rows = query.rows();
-  ASSERT_EQ(1, rows.size());
-  EXPECT_EQ(rows[0]["_source_host"], getHostname());
-
-  query = DistributedQueryHandler::handleQuery("bad query");
-  ASSERT_FALSE(query.ok());
-  rows = query.rows();
-  ASSERT_EQ(0, rows.size());
-}
-
-TEST_F(DistributedTests, test_serialize_results_empty) {
-  DistributedQueryRequest r0("foo", "foo_id");
-  MockSQL q0 = MockSQL();
+TEST_F(DistributedTests, test_deserialize_distributed_query_request) {
   pt::ptree tree;
+  tree.put<std::string>("query", "foo");
+  tree.put<std::string>("id", "bar");
 
-  DistributedQueryHandler::serializeResults({{r0, q0}}, tree);
-
-  EXPECT_EQ(0, tree.get<int>("results.foo_id.status"));
-  EXPECT_TRUE(tree.get_child("results.foo_id.rows").empty());
+  DistributedQueryRequest r;
+  auto s = deserializeDistributedQueryRequest(tree, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.query, "foo");
+  EXPECT_EQ(r.id, "bar");
 }
 
-TEST_F(DistributedTests, test_serialize_results_basic) {
-  DistributedQueryRequest r0("foo", "foo_id");
-  QueryData rows0 = {
-      {{"foo0", "foo0_val"}, {"bar0", "bar0_val"}},
-      {{"foo1", "foo1_val"}, {"bar1", "bar1_val"}},
-  };
-  MockSQL q0 = MockSQL(rows0);
-  pt::ptree tree;
+TEST_F(DistributedTests, test_deserialize_distributed_query_request_json) {
+  auto json =
+      "{"
+      "  \"query\": \"foo\","
+      "  \"id\": \"bar\""
+      "}";
 
-  DistributedQueryHandler::serializeResults({{r0, q0}}, tree);
-
-  EXPECT_EQ(0, tree.get<int>("results.foo_id.status"));
-
-  const pt::ptree& tree_rows = tree.get_child("results.foo_id.rows");
-  EXPECT_EQ(2, tree_rows.size());
-
-  auto row = tree_rows.begin();
-  EXPECT_EQ("foo0_val", row->second.get<std::string>("foo0"));
-  EXPECT_EQ("bar0_val", row->second.get<std::string>("bar0"));
-  ++row;
-  EXPECT_EQ("foo1_val", row->second.get<std::string>("foo1"));
-  EXPECT_EQ("bar1_val", row->second.get<std::string>("bar1"));
+  DistributedQueryRequest r;
+  auto s = deserializeDistributedQueryRequestJSON(json, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.query, "foo");
+  EXPECT_EQ(r.id, "bar");
 }
 
-TEST_F(DistributedTests, test_serialize_results_multiple) {
-  DistributedQueryRequest r0("foo", "foo_id");
-  QueryData rows0 = {
-      {{"foo0", "foo0_val"}, {"bar0", "bar0_val"}},
-      {{"foo1", "foo1_val"}, {"bar1", "bar1_val"}},
-  };
-  MockSQL q0 = MockSQL(rows0);
+TEST_F(DistributedTests, test_serialize_distributed_query_result) {
+  DistributedQueryResult r;
+  r.request.query = "foo";
+  r.request.id = "bar";
 
-  DistributedQueryRequest r1("bar", "bar_id");
-  MockSQL q1 = MockSQL({}, Status(1, "Fail"));
+  Row r1;
+  r1["foo"] = "bar";
+  r.results = {r1};
 
   pt::ptree tree;
-
-  DistributedQueryHandler::serializeResults({{r0, q0}, {r1, q1}}, tree);
-
-  EXPECT_EQ(0, tree.get<int>("results.foo_id.status"));
-  const pt::ptree& tree_rows = tree.get_child("results.foo_id.rows");
-  EXPECT_EQ(2, tree_rows.size());
-  auto row = tree_rows.begin();
-  EXPECT_EQ("foo0_val", row->second.get<std::string>("foo0"));
-  EXPECT_EQ("bar0_val", row->second.get<std::string>("bar0"));
-  ++row;
-  EXPECT_EQ("foo1_val", row->second.get<std::string>("foo1"));
-  EXPECT_EQ("bar1_val", row->second.get<std::string>("bar1"));
-
-  EXPECT_EQ(1, tree.get<int>("results.bar_id.status"));
-  const pt::ptree& fail_rows = tree.get_child("results.bar_id.rows");
-  EXPECT_EQ(0, fail_rows.size());
-}
-
-TEST_F(DistributedTests, test_do_queries) {
-  // Access to the internal SQL implementation is only available in core.
-  auto provider_raw = new MockDistributedProvider();
-  provider_raw->queriesJSON_ =
-      "[ \
-      {\"query\": \"SELECT hour FROM time\", \"id\": \"hour\"},\
-      {\"query\": \"bad\", \"id\": \"bad\"},\
-      {\"query\": \"SELECT minutes FROM time\", \"id\": \"minutes\"}\
-    ]";
-  std::unique_ptr<MockDistributedProvider>
-    provider(provider_raw);
-  DistributedQueryHandler handler(std::move(provider));
-
-  Status s = handler.doQueries();
-  ASSERT_EQ(Status(), s);
-
-  pt::ptree tree;
-  std::istringstream json_stream(provider_raw->resultsJSON_);
-  ASSERT_NO_THROW(pt::read_json(json_stream, tree));
-
-  {
-    EXPECT_EQ(0, tree.get<int>("results.hour.status"));
-    const pt::ptree& tree_rows = tree.get_child("results.hour.rows");
-    EXPECT_EQ(1, tree_rows.size());
-    auto row = tree_rows.begin();
-    EXPECT_GE(row->second.get<int>("hour"), 0);
-    EXPECT_LE(row->second.get<int>("hour"), 24);
-    EXPECT_EQ(getHostname(), row->second.get<std::string>("_source_host"));
-  }
-
-  {
-    // this query should have failed
-    EXPECT_EQ(1, tree.get<int>("results.bad.status"));
-    const pt::ptree& tree_rows = tree.get_child("results.bad.rows");
-    EXPECT_EQ(0, tree_rows.size());
-  }
-
-  {
-    EXPECT_EQ(0, tree.get<int>("results.minutes.status"));
-    const pt::ptree& tree_rows = tree.get_child("results.minutes.rows");
-    EXPECT_EQ(1, tree_rows.size());
-    auto row = tree_rows.begin();
-    EXPECT_GE(row->second.get<int>("minutes"), 0);
-    EXPECT_LE(row->second.get<int>("minutes"), 60);
-    EXPECT_EQ(getHostname(), row->second.get<std::string>("_source_host"));
+  auto s = serializeDistributedQueryResult(r, tree);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(tree.get<std::string>("request.query"), "foo");
+  EXPECT_EQ(tree.get<std::string>("request.id"), "bar");
+  auto& results = tree.get_child("results");
+  for (const auto& q : results) {
+    for (const auto& row : q.second) {
+      EXPECT_EQ(row.first, "foo");
+      EXPECT_EQ(q.second.get<std::string>(row.first), "bar");
+    }
   }
 }
 
-TEST_F(DistributedTests, test_duplicate_request) {
-  // Access to the internal SQL implementation is only available in core.
-  auto provider_raw = new MockDistributedProvider();
-  provider_raw->queriesJSON_ =
-      "[{\"query\": \"SELECT hour FROM time\", \"id\": \"hour\"}]";
-  std::unique_ptr<MockDistributedProvider>
-    provider(provider_raw);
-  DistributedQueryHandler handler(std::move(provider));
+TEST_F(DistributedTests, test_deserialize_distributed_query_result) {
+  pt::ptree request;
+  request.put<std::string>("id", "foo");
+  request.put<std::string>("query", "bar");
 
-  Status s = handler.doQueries();
-  ASSERT_EQ(Status(), s);
+  pt::ptree row;
+  row.put<std::string>("foo", "bar");
+  pt::ptree results;
+  results.push_back(std::make_pair("", row));
 
-  pt::ptree tree;
-  std::istringstream json_stream(provider_raw->resultsJSON_);
-  ASSERT_NO_THROW(pt::read_json(json_stream, tree));
+  pt::ptree query_result;
+  query_result.put_child("request", request);
+  query_result.put_child("results", results);
 
-  EXPECT_EQ(0, tree.get<int>("results.hour.status"));
-  const pt::ptree& tree_rows = tree.get_child("results.hour.rows");
-  EXPECT_EQ(1, tree_rows.size());
-  auto row = tree_rows.begin();
-  EXPECT_GE(row->second.get<int>("hour"), 0);
-  EXPECT_LE(row->second.get<int>("hour"), 24);
-  EXPECT_EQ(getHostname(), row->second.get<std::string>("_source_host"));
+  DistributedQueryResult r;
+  auto s = deserializeDistributedQueryResult(query_result, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.request.id, "foo");
+  EXPECT_EQ(r.request.query, "bar");
+  EXPECT_EQ(r.results[0]["foo"], "bar");
+}
 
-  // The second time, 'hour' should not be executed again
-  s = handler.doQueries();
-  ASSERT_EQ(Status(), s);
-  json_stream.str(provider_raw->resultsJSON_);
-  ASSERT_NO_THROW(pt::read_json(json_stream, tree));
-  EXPECT_EQ(0, tree.get_child("results").size());
+TEST_F(DistributedTests, test_deserialize_distributed_query_result_json) {
+  auto json =
+      "{"
+      "  \"request\": {"
+      "    \"id\": \"foo\","
+      "    \"query\": \"bar\""
+      "  },"
+      "  \"results\": ["
+      "    {"
+      "      \"foo\": \"bar\""
+      "    }"
+      "  ]"
+      "}";
+
+  DistributedQueryResult r;
+  auto s = deserializeDistributedQueryResultJSON(json, r);
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(r.request.id, "foo");
+  EXPECT_EQ(r.request.query, "bar");
+  EXPECT_EQ(r.results[0]["foo"], "bar");
+}
+
+TEST_F(DistributedTests, test_workflow) {
+  auto dist = Distributed();
+  auto s = dist.pullUpdates();
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(s.toString(), "OK");
+
+  EXPECT_EQ(dist.getPendingQueryCount(), 2U);
+  EXPECT_EQ(dist.results_.size(), 0U);
+  s = dist.runQueries();
+  EXPECT_TRUE(s.ok());
+  EXPECT_EQ(s.toString(), "OK");
+
+  EXPECT_EQ(dist.getPendingQueryCount(), 0U);
+  EXPECT_EQ(dist.results_.size(), 0U);
 }
 }

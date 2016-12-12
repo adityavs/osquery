@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -16,7 +16,7 @@
 #include <osquery/logger.h>
 
 #include "osquery/core/conversions.h"
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace fs = boost::filesystem;
 namespace pt = boost::property_tree;
@@ -66,6 +66,13 @@ TEST_F(PlistTests, test_parse_plist_from_file) {
 
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(s.toString(), "OK");
+
+  // The tree has a key with ".", the plist level delimiter.
+  EXPECT_EQ(tree.size(), 8U);
+  EXPECT_EQ(tree.count("com"), 0U);
+
+  // Make sure "." iteration still works.
+  EXPECT_EQ(tree.get("inetdCompatibility.Wait", ""), "0");
 }
 
 TEST_F(PlistTests, test_parse_plist_array) {

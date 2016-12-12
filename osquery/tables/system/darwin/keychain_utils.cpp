@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,6 +15,7 @@
 
 #include <osquery/filesystem.h>
 #include <osquery/hash.h>
+#include <osquery/core.h>
 
 #include "osquery/tables/system/darwin/keychain.h"
 
@@ -72,151 +73,203 @@ std::string getKeychainPath(const SecKeychainItemRef& item) {
   return path;
 }
 
-std::string genKIDProperty(const CFDataRef& kid) {
-  CFDataRef kid_data = nullptr;
-  CFDictionaryRef kid_dict = nullptr;
-
-  // Find the key identifier data within the property mess.
-  for (CFIndex i = 0; i < CFArrayGetCount((CFArrayRef)kid); i++) {
-    kid_dict = (CFDictionaryRef)CFArrayGetValueAtIndex((CFArrayRef)kid, i);
-    auto kid_value =
-        (const char*)CFDictionaryGetValue(kid_dict, kSecPropertyKeyValue);
-
-    if (CFGetTypeID(kid_value) == CFDataGetTypeID()) {
-      kid_data = (CFDataRef)kid_value;
-      break;
-    }
+std::string genKIDProperty(const unsigned char* data, int len) {
+  std::stringstream key_id;
+  for (int i = 0; i < len; i++) {
+    key_id << std::setw(2) << std::hex << std::setfill('0') << (int)data[i];
   }
-
-  if (kid_data == nullptr) {
-    // No key identifier found.
-    return "";
-  }
-
-  // Provide an ASCII-representation of the KID, similar to keychain.
-  std::stringstream ascii_kid;
-  for (CFIndex i = 0; i < CFDataGetLength(kid_data); i++) {
-    int kid_byte = (uint8_t)CFDataGetBytePtr(kid_data)[i];
-    ascii_kid << std::setfill('0') << std::setw(2) << std::hex << kid_byte;
-    // Then make it easy to read.
-    if (i < CFDataGetLength(kid_data) - 1) {
-      ascii_kid << "";
-    }
-  }
-
-  return ascii_kid.str();
+  return key_id.str();
 }
 
-std::string genCommonNameProperty(const CFDataRef& ca) {
-  CFDataRef ca_data = nullptr;
-  CFStringRef ca_string = nullptr;
+void genAlgorithmProperties(X509* cert,
+                            std::string& key,
+                            std::string& sig,
+                            std::string& size) {
+  int nid = 0;
+  OSX_OPENSSL(nid = OBJ_obj2nid(cert->cert_info->key->algor->algorithm));
+  if (nid != NID_undef) {
+    OSX_OPENSSL(key = std::string(OBJ_nid2ln(nid)));
 
-  // Find the key identifier data within the property mess.
-  for (CFIndex i = 0; i < CFArrayGetCount((CFArrayRef)ca); i++) {
-    ca_data = (CFDataRef)CFArrayGetValueAtIndex((CFArrayRef)ca, i);
-    if (CFGetTypeID(ca_data) == CFStringGetTypeID()) {
-      ca_string = (CFStringRef)ca_data;
-      break;
+    // Get EVP public key, to determine public key size.
+    EVP_PKEY* pkey = nullptr;
+    OSX_OPENSSL(pkey = X509_get_pubkey(cert));
+    if (pkey != nullptr) {
+      if (nid == NID_rsaEncryption || nid == NID_dsa) {
+        size_t key_size = 0;
+        OSX_OPENSSL(key_size = EVP_PKEY_size(pkey));
+        size = std::to_string(key_size * 8);
+      }
+
+      // The EVP_size for EC keys returns the maximum buffer for storing the
+      // key data, it does not indicate the size/strength of the curve.
+      if (nid == NID_X9_62_id_ecPublicKey) {
+        const EC_KEY* ec_pkey = pkey->pkey.ec;
+        const EC_GROUP* ec_pkey_group = nullptr;
+        OSX_OPENSSL(ec_pkey_group = EC_KEY_get0_group(ec_pkey));
+        int curve_nid = 0;
+        OSX_OPENSSL(curve_nid = EC_GROUP_get_curve_name(ec_pkey_group));
+        if (curve_nid != NID_undef) {
+          OSX_OPENSSL(size = std::string(OBJ_nid2ln(curve_nid)));
+        }
+      }
     }
   }
 
-  if (ca_string == nullptr) {
-    // Could not find a CFString reference within the common name array.
-    return "";
+  OSX_OPENSSL(nid = OBJ_obj2nid(cert->cert_info->signature->algorithm));
+  if (nid != NID_undef) {
+    OSX_OPENSSL(sig = std::string(OBJ_nid2ln(nid)));
   }
-
-  // Access, then convert the CFString. CFStringGetCStringPtr is less-safe.
-  return stringFromCFString(ca_string);
 }
 
-std::string genAlgProperty(const CFDataRef& alg) {
-  std::string expected_label = "Algorithm";
-  CFStringRef label, value;
-  CFDictionaryRef alg_item;
+std::string genSHA1ForCertificate(X509* cert) {
+  const EVP_MD* fprint_type = EVP_sha1();
+  unsigned char fprint[EVP_MAX_MD_SIZE] = {0};
+  unsigned int fprint_size = 0;
 
-  // Find the key identifier data within the property mess.
-  for (CFIndex i = 0; i < CFArrayGetCount((CFArrayRef)alg); i++) {
-    alg_item = (CFDictionaryRef)CFArrayGetValueAtIndex((CFArrayRef)alg, i);
-    label = (CFStringRef)CFDictionaryGetValue(alg_item, kSecPropertyKeyLabel);
-    value = (CFStringRef)CFDictionaryGetValue(alg_item, kSecPropertyKeyValue);
-
-    if (expected_label.compare(stringFromCFString(label)) == 0) {
-      return stringFromCFString(value);
-    }
+  if (X509_digest(cert, fprint_type, fprint, &fprint_size)) {
+    return genKIDProperty(fprint, fprint_size);
   }
-
-  // Unknown algorithm OID.
   return "";
 }
 
-std::string genSHA1ForCertificate(const SecCertificateRef& ca) {
-  CFDataRef ca_data;
-
-  // Access raw data, hash and release.
-  ca_data = SecCertificateCopyData(ca);
-  auto digest = hashFromBuffer(
-      HASH_TYPE_SHA1, CFDataGetBytePtr(ca_data), CFDataGetLength(ca_data));
-  CFRelease(ca_data);
-  return digest;
+bool CertificateIsCA(X509* cert) {
+  int ca = 0;
+  OSX_OPENSSL(ca = X509_check_ca(cert));
+  return (ca > 0);
 }
 
-CFNumberRef CFNumberCreateCopy(const CFNumberRef& number) {
-  // Easy way to get allow releasing numbers existing in arrays/dicts.
-  // This follows Apple's guidance for "Create" APIs, caller controls memory.
-  CFNumberRef copy;
-  unsigned int value;
-
-  if (!CFNumberGetValue(number, kCFNumberIntType, &value)) {
-    return nullptr;
-  }
-
-  copy = CFNumberCreate(nullptr, kCFNumberIntType, &value);
-  return copy;
+bool CertificateIsSelfSigned(X509* cert) {
+  bool self_signed = false;
+  OSX_OPENSSL(self_signed = (X509_check_issued(cert, cert) == X509_V_OK));
+  return self_signed;
 }
 
-CFDataRef CreatePropertyFromCertificate(const SecCertificateRef& cert,
-                                        const CFTypeRef& oid) {
-  // Set the list of attributes.
-  auto keys = CFArrayCreateMutable(nullptr, 0, &kCFTypeArrayCallBacks);
-  CFArrayAppendValue(keys, oid); // SecCertificateOIDs.h
-
-  // Request dictionary of dictionaries (one for each attribute).
-  auto certificate_values = SecCertificateCopyValues(cert, keys, nullptr);
-  CFRelease(keys);
-  if (certificate_values == nullptr) {
-    return nullptr;
+void genCommonName(X509* cert,
+                   std::string& subject,
+                   std::string& common_name,
+                   std::string& issuer) {
+  if (cert == nullptr) {
+    return;
   }
 
-  if (!CFDictionaryContainsKey(certificate_values, oid)) {
-    // Certificate does not have the requested property.
-    CFRelease(certificate_values);
-    return nullptr;
+  {
+    X509_NAME* issuerName = nullptr;
+    OSX_OPENSSL(issuerName = X509_get_issuer_name(cert));
+    if (issuerName != nullptr) {
+      // Generate the string representation of the issuer.
+      char* issuerBytes = nullptr;
+      OSX_OPENSSL(issuerBytes = X509_NAME_oneline(issuerName, nullptr, 0));
+      if (issuerBytes != nullptr) {
+        issuer = std::string(issuerBytes);
+        OSX_OPENSSL(OPENSSL_free(issuerBytes));
+      }
+    }
   }
 
-  auto values = (CFDictionaryRef)CFDictionaryGetValue(certificate_values, oid);
-  if (values == nullptr) {
-    CFRelease(certificate_values);
-    return nullptr;
-  }
-  if (!CFDictionaryContainsKey(values, kSecPropertyKeyValue)) {
-    // Odd, there was not value in the property result.
-    CFRelease(certificate_values);
-    return nullptr;
+  X509_NAME* subjectName = nullptr;
+  OSX_OPENSSL(subjectName = X509_get_subject_name(cert));
+  if (subjectName == nullptr) {
+    return;
   }
 
-  // Create copy of the property value, which is an index to owned dict.
-  auto property = (CFDataRef)CFDictionaryGetValue(values, kSecPropertyKeyValue);
-  if (CFGetTypeID(property) == CFArrayGetTypeID()) {
-    property = (CFDataRef)CFArrayCreateCopy(nullptr, (CFArrayRef)property);
-  } else if (CFGetTypeID(property) == CFNumberGetTypeID()) {
-    property = (CFDataRef)CFNumberCreateCopy((CFNumberRef)property);
-  } else {
-    property = nullptr;
+  {
+    // Generate the string representation of the subject.
+    char* subjectBytes = nullptr;
+    OSX_OPENSSL(subjectBytes = X509_NAME_oneline(subjectName, nullptr, 0));
+    if (subjectBytes != nullptr) {
+      subject = std::string(subjectBytes);
+      OSX_OPENSSL(OPENSSL_free(subjectBytes));
+    }
   }
 
-  // Release and give the caller control of the property.
-  CFRelease(certificate_values);
-  return property;
+  int nid = 0;
+  OSX_OPENSSL(nid = OBJ_txt2nid("CN"));
+
+  int index = 0;
+  OSX_OPENSSL(index = X509_NAME_get_index_by_NID(subjectName, nid, -1));
+  if (index == -1) {
+    return;
+  }
+
+  X509_NAME_ENTRY* commonNameEntry = nullptr;
+  OSX_OPENSSL(commonNameEntry = X509_NAME_get_entry(subjectName, index));
+  if (commonNameEntry == nullptr) {
+    return;
+  }
+
+  ASN1_STRING* commonNameData = nullptr;
+  OSX_OPENSSL(commonNameData = X509_NAME_ENTRY_get_data(commonNameEntry));
+
+  unsigned char* data = nullptr;
+  OSX_OPENSSL(data = ASN1_STRING_data(commonNameData));
+  common_name = std::string(reinterpret_cast<char*>(data));
+}
+
+std::string genHumanReadableDateTime(ASN1_TIME* time) {
+  BIO* bio_stream = nullptr;
+  OSX_OPENSSL(bio_stream = BIO_new(BIO_s_mem()));
+  if (bio_stream == nullptr) {
+    return "";
+  }
+
+  // ANS1_TIME_print's format is: Mon DD HH:MM:SS YYYY GMT
+  // e.g. Jan 1 00:00:00 1970 GMT (always GMT)
+  auto buffer_size = 32;
+  char buffer[32] = {0};
+  OSX_OPENSSL(if (!ASN1_TIME_print(bio_stream, time)) {
+    BIO_free(bio_stream);
+    return "";
+  });
+
+  // BIO_gets() returns amount of data successfully read or written
+  // (if the return value is positive) or that no data was successfully
+  // read or written if the result is 0 or -1.
+  OSX_OPENSSL(if (BIO_gets(bio_stream, buffer, buffer_size) <= 0) {
+    BIO_free(bio_stream);
+    return "";
+  });
+
+  OSX_OPENSSL(BIO_free(bio_stream));
+  return std::string(buffer);
+}
+
+time_t genEpoch(ASN1_TIME* time) {
+  auto datetime = genHumanReadableDateTime(time);
+  if (datetime.empty()) {
+    return -1;
+  }
+
+  time_t epoch;
+  struct tm tm;
+  // b := abbr month, e := day with leading space instead of leading zero
+  if (strptime(datetime.c_str(), "%b %e %H:%M:%S %Y %Z", &tm) == nullptr) {
+    return -1;
+  }
+
+  // Don't set DST, since strptime() doesn't.
+  // Let mktime() determine whether DST in effect
+  tm.tm_isdst = -1;
+  epoch = mktime(&tm);
+  if (epoch == -1) {
+    return -1;
+  }
+  return epoch;
+}
+
+// Key Usages (i.e. Digital Signature, CRL Sign etc) in ASN1/OpenSSL
+// are represented as flags. These are then set by doing bitwise OR ops.
+// genKeyUsage() reverses this to figure out which key usages are set.
+std::string genKeyUsage(unsigned long flag) {
+  if (flag == 0) {
+    return "";
+  }
+  std::vector<std::string> results;
+  for (const auto& key : kKeyUsageFlags) {
+    if (flag & key.first) {
+      results.push_back(key.second);
+    }
+  }
+  return osquery::join(results, ", ");
 }
 
 CFArrayRef CreateKeychainItems(const std::set<std::string>& paths,
@@ -251,33 +304,6 @@ CFArrayRef CreateKeychainItems(const std::set<std::string>& paths,
   CFRelease(keychains);
 
   return keychain_certs;
-}
-
-std::string genCAProperty(const CFDataRef& constraints) {
-  // Must return an array of constraints.
-  if (CFGetTypeID(constraints) != CFArrayGetTypeID()) {
-    return "-1";
-  }
-
-  std::string expected_label = "Certificate Authority";
-  std::string expected_value = "Yes";
-
-  CFStringRef label, value;
-  CFDictionaryRef constraint;
-  // Find the expected value/label combination constraint.
-  for (CFIndex i = 0; i < CFArrayGetCount((CFArrayRef)constraints); i++) {
-    constraint =
-        (CFDictionaryRef)CFArrayGetValueAtIndex((CFArrayRef)constraints, i);
-    label = (CFStringRef)CFDictionaryGetValue(constraint, kSecPropertyKeyLabel);
-    value = (CFStringRef)CFDictionaryGetValue(constraint, kSecPropertyKeyValue);
-
-    if (expected_label.compare(stringFromCFString(label)) == 0 &&
-        expected_value.compare(stringFromCFString(value)) == 0) {
-      return "1";
-    }
-  }
-
-  return "0";
 }
 
 std::set<std::string> getKeychainPaths() {

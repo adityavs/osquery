@@ -6,5 +6,8 @@ schema([
     Column("alias", TEXT, "Protocol alias"),
     Column("comment", TEXT, "Comment with protocol description"),
 ])
+attributes(cacheable=True)
 implementation("etc_protocols@genEtcProtocols")
-
+fuzz_paths([
+    "/etc/protocols",
+])

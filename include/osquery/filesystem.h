@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -23,43 +23,77 @@
 namespace osquery {
 
 /// Globbing directory traversal function recursive limit.
-const unsigned int kMaxDirectoryTraversalDepth = 40;
-typedef unsigned short GlobLimits;
-
-enum {
+enum GlobLimits : size_t {
   GLOB_FILES = 0x1,
   GLOB_FOLDERS = 0x2,
   GLOB_ALL = GLOB_FILES | GLOB_FOLDERS,
+  GLOB_NO_CANON = 0x4,
 };
 
+inline GlobLimits operator|(GlobLimits a, GlobLimits b) {
+  return static_cast<GlobLimits>(static_cast<size_t>(a) |
+                                 static_cast<size_t>(b));
+}
+
 /// Globbing wildcard character.
-const std::string kWildcardCharacter = "%";
+const std::string kSQLGlobWildcard{"%"};
 /// Globbing wildcard recursive character (double wildcard).
-const std::string kWildcardCharacterRecursive =
-    kWildcardCharacter + kWildcardCharacter;
+const std::string kSQLGlobRecursive{kSQLGlobWildcard + kSQLGlobWildcard};
 
 /**
  * @brief Read a file from disk.
  *
- * @param path the path of the file that you would like to read
+ * @param path the path of the file that you would like to read.
+ * @param size Number of bytes to read from file.
  * @param content a reference to a string which will be populated with the
- * contents of the path indicated by the path parameter
+ * contents of the path indicated by the path parameter.
+ * @param dry_run do not actually read the file content.
+ * @param preserve_time Attempt to preserve file mtime and atime.
+ * @param blocking Request a blocking read.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure.
  */
-Status readFile(const boost::filesystem::path& path, std::string& content);
+Status readFile(const boost::filesystem::path& path,
+                std::string& content,
+                size_t size = 0,
+                bool dry_run = false,
+                bool preserve_time = false,
+                bool blocking = false);
+
+/// Read a file and preserve the atime and mtime.
+Status forensicReadFile(const boost::filesystem::path& path,
+                        std::string& content,
+                        bool blocking = false);
+
+/**
+ * @brief Return the status of an attempted file read.
+ *
+ * @param path the path of the file that you would like to read.
+ * @param blocking Request a blocking read.
+ *
+ * @return success iff the file would have been read. On success the status
+ * message is the complete/absolute path.
+ */
+Status readFile(const boost::filesystem::path& path, bool blocking = false);
+
+/// Internal representation for predicate-based chunk reading.
+Status readFile(const boost::filesystem::path& path,
+                size_t size,
+                size_t block_size,
+                bool dry_run,
+                bool preserve_time,
+                std::function<void(std::string& buffer, size_t size)> predicate,
+                bool blocking = false);
 
 /**
  * @brief Write text to disk.
  *
- * @param path the path of the file that you would like to write
- * @param content the text that should be written exactly to disk
- * @param permissions the filesystem permissions to request when opening
- * @param force_permissions always chmod the path after opening
+ * @param path the path of the file that you would like to write.
+ * @param content the text that should be written exactly to disk.
+ * @param permissions the filesystem permissions to request when opening.
+ * @param force_permissions always `chmod` the path after opening.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure.
  */
 Status writeTextFile(const boost::filesystem::path& path,
                      const std::string& content,
@@ -68,54 +102,54 @@ Status writeTextFile(const boost::filesystem::path& path,
 
 /// Check if a path is writable.
 Status isWritable(const boost::filesystem::path& path);
+
 /// Check if a path is readable.
 Status isReadable(const boost::filesystem::path& path);
 
 /**
  * @brief A helper to check if a path exists on disk or not.
  *
- * @param path the path on disk which you would like to check the existence of
+ * @param path Target path.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation. Specifically, the code of the Status instance
- * will be -1 if no input was supplied, assuming the caller is not aware of how
- * to check path-getter results. The code will be 0 if the path does not exist
- * on disk and 1 if the path does exist on disk.
+ * @return The code of the Status instance will be -1 if no input was supplied,
+ * assuming the caller is not aware of how to check path-getter results.
+ * The code will be 0 if the path does not exist on disk and 1 if the path
+ * does exist on disk.
  */
 Status pathExists(const boost::filesystem::path& path);
 
 /**
- * @brief List all of the files in a specific directory, non-recursively.
+ * @brief List all of the files in a specific directory.
  *
  * @param path the path which you would like to list.
  * @param results a non-const reference to a vector which will be populated
  * with the directory listing of the path param, assuming that all operations
  * completed successfully.
+ * @param recursive should the listing descend recursively into the directory.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure.
  */
 Status listFilesInDirectory(const boost::filesystem::path& path,
                             std::vector<std::string>& results,
-                            bool ignore_error = 1);
+                            bool recursive = false);
 
 /**
  * @brief List all of the directories in a specific directory, non-recursively.
  *
- * @param path the path which you would like to list.
+ * @param path the path which you would like to list
  * @param results a non-const reference to a vector which will be populated
  * with the directory listing of the path param, assuming that all operations
  * completed successfully.
+ * @param recursive should the listing descend recursively into the directory.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure.
  */
 Status listDirectoriesInDirectory(const boost::filesystem::path& path,
                                   std::vector<std::string>& results,
-                                  bool ignore_error = 1);
+                                  bool recursive = false);
 
 /**
- * @brief Given a wildcard filesystem patten, resolve all possible paths
+ * @brief Given a filesystem globbing patten, resolve all matching paths.
  *
  * @code{.cpp}
  *   std::vector<std::string> results;
@@ -127,87 +161,88 @@ Status listDirectoriesInDirectory(const boost::filesystem::path& path,
  *   }
  * @endcode
  *
- * @param fs_path The filesystem pattern
- * @param results The vector in which all results will be returned
+ * @param pattern filesystem globbing pattern.
+ * @param results output vector of matching paths.
  *
- * @return An instance of osquery::Status which indicates the success or
- * failure of the operation
+ * @return an instance of Status, indicating success or failure.
  */
-Status resolveFilePattern(const boost::filesystem::path& fs_path,
+Status resolveFilePattern(const boost::filesystem::path& pattern,
                           std::vector<std::string>& results);
 
 /**
- * @brief Given a wildcard filesystem patten, resolve all possible paths
+ * @brief Given a filesystem globbing patten, resolve all matching paths.
  *
- * @code{.cpp}
- *   std::vector<std::string> results;
- *   auto s = resolveFilePattern("/Users/marpaia/Downloads/%", results);
- *   if (s.ok()) {
- *     for (const auto& result : results) {
- *       LOG(INFO) << result;
- *     }
- *   }
- * @endcode
+ * See resolveFilePattern, but supply a limitation to request only directories
+ * or files that match the path.
  *
- * @param fs_path The filesystem pattern
- * @param results The vector in which all results will be returned
- * @param setting Do you want files returned, folders or both?
+ * @param pattern filesystem globbing pattern.
+ * @param results output vector of matching paths.
+ * @param setting a bit list of match types, e.g., files, folders.
  *
- * @return An instance of osquery::Status which indicates the success or
- * failure of the operation
+ * @return an instance of Status, indicating success or failure.
  */
-Status resolveFilePattern(const boost::filesystem::path& fs_path,
+Status resolveFilePattern(const boost::filesystem::path& pattern,
                           std::vector<std::string>& results,
                           GlobLimits setting);
 
 /**
- * @brief Get directory portion of a path.
+ * @brief Transform a path with SQL wildcards to globbing wildcard.
  *
- * @param path The input path, either a filename or directory.
- * @param dirpath a non-const reference to a resultant directory portion.
+ * SQL uses '%' as a wildcard matching token, and filesystem globbing uses '*'.
+ * In osquery-internal methods the filesystem character is used. This helper
+ * method will perform the correct preg/escape and replace.
  *
- * @return If the input path was a directory this will indicate failure. One
- * should use `isDirectory` before.
+ * This has a side effect of canonicalizing paths up to the first wildcard.
+ * For example: /tmp/% becomes /private/tmp/% on OS X systems. And /tmp/%.
+ *
+ * @param pattern the input and output filesystem glob pattern.
+ * @param limits osquery::GlobLimits to apply (currently only recognizes
+ * osquery::GLOB_NO_CANON)
  */
-Status getDirectory(const boost::filesystem::path& path,
-                    boost::filesystem::path& dirpath);
+void replaceGlobWildcards(std::string& pattern, GlobLimits limits = GLOB_ALL);
 
+/// Attempt to remove a directory path.
 Status remove(const boost::filesystem::path& path);
 
 /**
  * @brief Check if an input path is a directory.
  *
- * @param path The input path, either a filename or directory.
+ * @param path input path, either a filename or directory.
  *
  * @return If the input path was a directory.
  */
 Status isDirectory(const boost::filesystem::path& path);
 
 /**
- * @brief Return a vector of all home directories on the system
+ * @brief Return a vector of all home directories on the system.
  *
- * @return a vector of strings representing the path of all home directories
+ * @return a vector of string paths containing all home directories.
  */
 std::set<boost::filesystem::path> getHomeDirectories();
 
 /**
- * @brief Check the permissions of a file and it's directory.
+ * @brief Check the permissions of a file and its directory.
  *
  * 'Safe' implies the directory is not a /tmp-like directory in that users
  * cannot control super-user-owner files. The file should be owned by the
  * process's UID or the file should be owned by root.
  *
- * @param dir the directory to check /tmp mode
- * @param path a path to a file to check
- * @param executable the file must also be executable
+ * @param dir the directory to check `/tmp` mode.
+ * @param path a path to a file to check.
+ * @param executable true if the file must also be executable.
  *
- * @return true if the file is 'safe' else false
+ * @return true if the file is 'safe' else false.
  */
 bool safePermissions(const std::string& dir,
                      const std::string& path,
                      bool executable = false);
 
-/// The shell tooling may store local resources in an "osquery" home.
+/**
+ * @brief osquery may use local storage in a user-protected "home".
+ *
+ * Return a standard path to an "osquery" home directory. This path may store
+ * a protected extensions socket, backing storage database, and debug logs.
+ */
 const std::string& osqueryHomeDirectory();
 
 /// Return bit-mask-style permissions.
@@ -216,10 +251,10 @@ std::string lsperms(int mode);
 /**
  * @brief Parse a JSON file on disk into a property tree.
  *
- * @param path the path of the JSON file
- * @param tree output property tree
+ * @param path the path of the JSON file.
+ * @param tree output property tree.
  *
- * @return an instance of Status, indicating the success or failure
+ * @return an instance of Status, indicating success or failure if malformed.
  */
 Status parseJSON(const boost::filesystem::path& path,
                  boost::property_tree::ptree& tree);
@@ -227,10 +262,10 @@ Status parseJSON(const boost::filesystem::path& path,
 /**
  * @brief Parse JSON content into a property tree.
  *
- * @param path JSON string data
- * @param tree output property tree
+ * @param content JSON string data.
+ * @param tree output property tree.
  *
- * @return an instance of Status, indicating the success or failure
+ * @return an instance of Status, indicating success or failure if malformed.
  */
 Status parseJSONContent(const std::string& content,
                         boost::property_tree::ptree& tree);
@@ -239,11 +274,10 @@ Status parseJSONContent(const std::string& content,
 /**
  * @brief Parse a property list on disk into a property tree.
  *
- * @param path the input path to a property list
- * @param tree the output reference to a Boost property tree
+ * @param path the input path to a property list.
+ * @param tree the output property tree.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure if malformed.
  */
 Status parsePlist(const boost::filesystem::path& path,
                   boost::property_tree::ptree& tree);
@@ -251,11 +285,10 @@ Status parsePlist(const boost::filesystem::path& path,
 /**
  * @brief Parse property list content into a property tree.
  *
- * @param content the input string-content of a property list
- * @param tree the output reference to a Boost property tree
+ * @param content the input string-content of a property list.
+ * @param tree the output property tree.
  *
- * @return an instance of Status, indicating the success or failure
- * of the operation.
+ * @return an instance of Status, indicating success or failure if malformed.
  */
 Status parsePlistContent(const std::string& content,
                          boost::property_tree::ptree& tree);
@@ -263,16 +296,16 @@ Status parsePlistContent(const std::string& content,
 
 #ifdef __linux__
 /**
- * @brief Iterate over proc process, returns a list of pids.
+ * @brief Iterate over `/proc` process, returns a list of pids.
  *
  * @param processes output list of process pids as strings (int paths in proc).
  *
- * @return status of iteration.
+ * @return an instance of Status, indicating success or failure.
  */
 Status procProcesses(std::set<std::string>& processes);
 
 /**
- * @brief Iterate over a proc process's descriptors, return a list of fds.
+ * @brief Iterate over a `/proc` process's descriptors, return a list of fds.
  *
  * @param process a string pid from proc.
  * @param descriptors output list of descriptor numbers as strings.

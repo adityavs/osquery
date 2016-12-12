@@ -1,0 +1,35 @@
+table_name("process_events")
+description("Track time/action process executions.")
+schema([
+    Column("pid", BIGINT, "Process (or thread) ID"),
+    Column("path", TEXT, "Path of executed file"),
+    Column("mode", BIGINT, "File mode permissions"),
+    Column("cmdline", TEXT, "Command line arguments (argv)"),
+    Column("cmdline_size", BIGINT, "Actual size (bytes) of command line arguments"),
+    Column("env", TEXT, "Environment variables delimited by spaces",
+        aliases=["environment"]),
+    Column("env_count", BIGINT, "Number of environment variables",
+        aliases=["environment_count"]),
+    Column("env_size", BIGINT, "Actual size (bytes) of environment list",
+        aliases=["environment_size"]),
+    Column("uid", BIGINT, "User ID at process start"),
+    Column("euid", BIGINT, "Effective user ID at process start"),
+    Column("gid", BIGINT, "Group ID at process start"),
+    Column("egid", BIGINT, "Effective group ID at process start"),
+    Column("owner_uid", BIGINT, "File owner user ID"),
+    Column("owner_gid", BIGINT, "File owner group ID"),
+    Column("atime", BIGINT, "File last access in UNIX time",
+        aliases=["access_time"]),
+    Column("mtime", BIGINT, "File modification in UNIX time",
+        aliases=["modify_time"]),
+    Column("ctime", BIGINT, "File last metadata change in UNIX time",
+        aliases=["change_time"]),
+    Column("btime", BIGINT, "File creation in UNIX time",
+        aliases=["create_time"]),
+    Column("overflows", TEXT, "List of structures that overflowed"),
+    Column("parent", BIGINT, "Process parent's PID"),
+    Column("time", BIGINT, "Time of execution in UNIX time"),
+    Column("uptime", BIGINT, "Time of execution in system uptime"),
+])
+attributes(event_subscriber=True)
+implementation("process_events@process_events::genTable")

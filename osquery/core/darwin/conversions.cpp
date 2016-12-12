@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -46,10 +46,9 @@ std::string stringFromCFData(const CFDataRef& cf_data) {
   memset(buffer, 0, range.length + 1);
 
   std::stringstream result;
-  uint8_t byte;
   CFDataGetBytes(cf_data, range, (UInt8*)buffer);
   for (CFIndex i = 0; i < range.length; ++i) {
-    byte = buffer[i];
+    uint8_t byte = buffer[i];
     if (isprint(byte)) {
       result << byte;
     } else if (buffer[i] == 0) {

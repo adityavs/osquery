@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -17,6 +17,12 @@
 // Package BOM structure headers
 #include "osquery/tables/system/darwin/packages.h"
 
+namespace fs = boost::filesystem;
+namespace pt = boost::property_tree;
+
+namespace osquery {
+namespace tables {
+
 const std::vector<std::string> kPkgReceiptPaths = {
     "/private/var/db/receipts/", "/Library/Receipts/",
 };
@@ -24,6 +30,9 @@ const std::vector<std::string> kPkgReceiptPaths = {
 const std::vector<std::string> kPkgReceiptUserPaths = {
     "/Library/Receipts/",
 };
+
+const std::string kPkgInstallHistoryPath =
+    "/Library/Receipts/InstallHistory.plist";
 
 const std::map<std::string, std::string> kPkgReceiptKeys = {
     {"PackageIdentifier", "package_id"},
@@ -34,10 +43,13 @@ const std::map<std::string, std::string> kPkgReceiptKeys = {
     {"InstallProcessName", "installer_name"},
 };
 
-namespace fs = boost::filesystem;
-
-namespace osquery {
-namespace tables {
+const std::map<std::string, std::string> kPkgInstallHistoryKeys = {
+    {"date", "time"},
+    {"displayName", "name"},
+    {"displayVersion", "version"},
+    {"processName", "source"},
+    {"contentType", "content_type"},
+};
 
 BOM::BOM(const char* data, size_t size)
     : data_(data), size_(size), valid_(false) {
@@ -79,7 +91,7 @@ BOM::BOM(const char* data, size_t size)
 }
 
 /// Lookup a BOM pointer and optionally, it's size.
-const char* BOM::getPointer(int index, size_t* length) const {
+const char* BOM::getPointer(int index, size_t* _length) const {
   if (ntohl(index) >= ntohl(Table->count)) {
     // Requested pointer is out of range.
     return nullptr;
@@ -87,13 +99,14 @@ const char* BOM::getPointer(int index, size_t* length) const {
 
   const BOMPointer* pointer = Table->blockPointers + ntohl(index);
   uint32_t addr = ntohl(pointer->address);
-  if (size_ < addr + ntohl(pointer->length)) {
+  uint32_t length = ntohl(pointer->length);
+  if (addr > UINT32_MAX - length || size_ < addr + length) {
     // Address value is out of range.
     return nullptr;
   }
 
-  if (length != nullptr) {
-    *length = ntohl(pointer->length);
+  if (_length != nullptr) {
+    *_length = length;
   }
   return data_ + addr;
 }
@@ -201,7 +214,7 @@ void genBOMPaths(const std::string& path,
 void genPackageBOM(const std::string& path, QueryData& results) {
   std::string content;
   // Read entire BOM file.
-  if (!readFile(path, content).ok()) {
+  if (!forensicReadFile(path, content).ok()) {
     return;
   }
 
@@ -221,7 +234,8 @@ void genPackageBOM(const std::string& path, QueryData& results) {
 
     size_t var_size;
     const char* var_data = bom.getPointer(var->index, &var_size);
-    if (var_data == nullptr || var_size < sizeof(BOMTree) || var_size < var->length) {
+    if (var_data == nullptr || var_size < sizeof(BOMTree) ||
+        var_size < var->length) {
       break;
     }
 
@@ -272,7 +286,7 @@ void genPackageReceipt(const std::string& path, QueryData& results) {
       r[kPkgReceiptKeys.at(row.at("key"))] = row.at("value");
     }
   }
-  results.push_back(r);
+  results.push_back(std::move(r));
 }
 
 QueryData genPackageReceipts(QueryContext& context) {
@@ -282,6 +296,18 @@ QueryData genPackageReceipts(QueryContext& context) {
     auto paths = context.constraints["path"].getAll(EQUALS);
     for (const auto& path : paths) {
       genPackageReceipt(path, results);
+    }
+    return results;
+  } else if (context.constraints["package_filename"].exists(EQUALS)) {
+    auto files = context.constraints["package_filename"].getAll(EQUALS);
+    for (const auto& file : files) {
+      // Assume the filename can be within any of the system or user paths.
+      for (const auto& search_path : kPkgReceiptPaths) {
+        genPackageReceipt((fs::path(search_path) / file).string(), results);
+      }
+      for (const auto& search_path : kPkgReceiptUserPaths) {
+        genPackageReceipt((fs::path(search_path) / file).string(), results);
+      }
     }
     return results;
   }
@@ -308,6 +334,39 @@ QueryData genPackageReceipts(QueryContext& context) {
           genPackageReceipt(receipt, results);
         }
       }
+    }
+  }
+
+  return results;
+}
+
+void genPkgInstallHistoryEntry(const pt::ptree& entry, QueryData& results) {
+  Row r;
+  for (const auto& it : kPkgInstallHistoryKeys) {
+    r[it.second] = entry.get(it.first, "");
+  }
+
+  for (const auto& package_identifier : entry.get_child("packageIdentifiers")) {
+    r["package_id"] = package_identifier.second.get<std::string>("");
+    results.push_back(r);
+  }
+}
+
+QueryData genPackageInstallHistory(QueryContext& context) {
+  QueryData results;
+  pt::ptree tree;
+
+  // The osquery::parsePlist method will reset/clear a property tree.
+  // Keeping the data structure in a larger scope preserves allocations
+  // between similar-sized trees.
+  if (!osquery::parsePlist(kPkgInstallHistoryPath, tree).ok()) {
+    TLOG << "Error parsing install history plist: " << kPkgInstallHistoryPath;
+    return results;
+  }
+
+  if (tree.count("root") != 0) {
+    for (const auto& it : tree.get_child("root")) {
+      genPkgInstallHistoryEntry(it.second, results);
     }
   }
 

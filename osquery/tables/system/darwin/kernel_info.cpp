@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -16,7 +16,7 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/tables/system/darwin/iokit_utils.h"
+#include "osquery/events/darwin/iokit.h"
 #include "osquery/tables/system/efi_misc.h"
 
 namespace osquery {
@@ -33,7 +33,7 @@ std::string getCanonicalEfiDevicePath(const CFDataRef& data) {
 
   // Iterate through the EFI_DEVICE_PATH_PROTOCOL stacked structs.
   auto bytes = CFDataGetBytePtr((CFDataRef)data);
-  auto length = CFDataGetLength((CFDataRef)data);
+  size_t length = CFDataGetLength((CFDataRef)data);
   size_t search_offset = 0;
 
   while ((search_offset + sizeof(EFI_DEVICE_PATH_PROTOCOL)) < length) {
@@ -51,13 +51,14 @@ std::string getCanonicalEfiDevicePath(const CFDataRef& data) {
     // Only support paths and hard drive partitions.
     if (EfiDevicePathType(node) == MEDIA_DEVICE_PATH) {
       if (node->SubType == MEDIA_FILEPATH_DP) {
-        for (size_t i = 0; i < EfiDevicePathNodeLength(node); i += 2) {
+        for (int i = 0; i < EfiDevicePathNodeLength(node); i += 2) {
           // Strip UTF16 characters to UTF8.
           path += (((char*)(node)) + sizeof(EFI_DEVICE_PATH_PROTOCOL))[i];
         }
       } else if (node->SubType == MEDIA_HARDDRIVE_DP) {
         // Extract the device UUID to later join with block devices.
         auto uuid = ((const HARDDRIVE_DEVICE_PATH*)node)->Signature;
+        // clang-format off
         boost::uuids::uuid hdd_signature = {{
           uuid[3], uuid[2], uuid[1], uuid[0],
           uuid[5], uuid[4],
@@ -65,6 +66,8 @@ std::string getCanonicalEfiDevicePath(const CFDataRef& data) {
           uuid[8], uuid[9],
           uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15],
         }};
+        // clang-format on
+
         path += boost::to_upper_copy(boost::uuids::to_string(hdd_signature));
       }
     }
@@ -118,7 +121,11 @@ QueryData genKernelInfo(QueryContext& context) {
   if (CFDictionaryGetValueIfPresent(
           properties, CFSTR("boot-file"), &property)) {
     r["path"] = stringFromCFData((CFDataRef)property);
+    std::replace(r["path"].begin(), r["path"].end(), '\\', '/');
     boost::trim(r["path"]);
+    if (!r["path"].empty() && r["path"][0] != '/') {
+      r["path"] = "/" + r["path"];
+    }
   }
   // No longer need chosen properties.
   CFRelease(properties);
@@ -136,12 +143,6 @@ QueryData genKernelInfo(QueryContext& context) {
 
       r["version"] = signature.substr(22, signature.find(":") - 22);
     }
-  }
-
-  // With the path and device, try to locate the on-disk kernel
-  if (r.count("path") > 0) {
-    // This does not use the device path, potential invalidation.
-    r["md5"] = hashFromFile(HASH_TYPE_MD5, "/" + r["path"]);
   }
 
   results.push_back(r);

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,46 +8,71 @@
  *
  */
 
-#include <boost/date_time/posix_time/posix_time.hpp>
+#include <chrono>
 
+#include <osquery/dispatcher.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 
 #include "osquery/core/conversions.h"
-#include "osquery/dispatcher/dispatcher.h"
-
-using namespace apache::thrift::concurrency;
+#include "osquery/core/process.h"
 
 namespace osquery {
 
 /// The worker_threads define the default thread pool size.
 FLAG(int32, worker_threads, 4, "Number of work dispatch threads");
 
-void interruptableSleep(size_t milli) {
-  boost::this_thread::sleep(boost::posix_time::milliseconds(milli));
+/// Cancel the pause request.
+void RunnerInterruptPoint::cancel() {
+  WriteLock lock(mutex_);
+  stop_ = true;
+  condition_.notify_all();
 }
 
-Dispatcher::Dispatcher() {
-  thread_manager_ = InternalThreadManager::newSimpleThreadManager(
-          (size_t)FLAGS_worker_threads, 0);
-  auto thread_factory = ThriftThreadFactory(new PosixThreadFactory());
-  thread_manager_->threadFactory(thread_factory);
-  thread_manager_->start();
-}
-
-Dispatcher::~Dispatcher() { join(); }
-
-Status Dispatcher::add(ThriftInternalRunnableRef task) {
-  auto& self = instance();
-  try {
-    if (self.state() != InternalThreadManager::STARTED) {
-      self.thread_manager_->start();
-    }
-    instance().thread_manager_->add(task, 0, 0);
-  } catch (std::exception& e) {
-    return Status(1, e.what());
+/// Pause until the requested millisecond delay has elapsed or a cancel.
+void RunnerInterruptPoint::pause(std::chrono::milliseconds milli) {
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (stop_ || condition_.wait_for(lock, milli) == std::cv_status::no_timeout) {
+    stop_ = false;
+    throw RunnerInterruptError();
   }
-  return Status(0, "OK");
+}
+
+void InterruptableRunnable::interrupt() {
+  WriteLock lock(stopping_);
+  // Set the service as interrupted.
+  interrupted_ = true;
+  // Tear down the service's resources such that exiting the expected run
+  // loop within ::start does not need to.
+  stop();
+  // Cancel the run loop's pause request.
+  point_.cancel();
+}
+
+bool InterruptableRunnable::interrupted() {
+  WriteLock lock(stopping_);
+  // A small conditional to force-skip an interruption check, used in testing.
+  if (bypass_check_ && !checked_) {
+    checked_ = true;
+    return false;
+  }
+  return interrupted_;
+}
+
+void InterruptableRunnable::pauseMilli(std::chrono::milliseconds milli) {
+  try {
+    point_.pause(milli);
+  } catch (const RunnerInterruptError&) {
+    // The pause request was canceled.
+  }
+}
+
+void InternalRunnable::run() {
+  run_ = true;
+  start();
+
+  // The service is complete.
+  Dispatcher::removeService(this);
 }
 
 Status Dispatcher::addService(InternalRunnableRef service) {
@@ -56,84 +81,78 @@ Status Dispatcher::addService(InternalRunnableRef service) {
   }
 
   auto& self = instance();
-  auto thread = std::make_shared<boost::thread>(
-      boost::bind(&InternalRunnable::run, &*service));
+  if (self.stopping_) {
+    // Cannot add a service while the dispatcher is stopping and no joins
+    // have been requested.
+    return Status(1, "Cannot add service, dispatcher is stopping");
+  }
+
+  auto thread = std::make_shared<std::thread>(
+      std::bind(&InternalRunnable::run, &*service));
+  WriteLock lock(self.mutex_);
+  DLOG(INFO) << "Adding new service: " << service.get()
+             << " to thread: " << thread.get();
   self.service_threads_.push_back(thread);
   self.services_.push_back(std::move(service));
   return Status(0, "OK");
 }
 
-InternalThreadManagerRef Dispatcher::getThreadManager() const {
-  return instance().thread_manager_;
+void Dispatcher::removeService(const InternalRunnable* service) {
+  auto& self = Dispatcher::instance();
+  WriteLock lock(self.mutex_);
+
+  // Remove the service.
+  self.services_.erase(
+      std::remove_if(self.services_.begin(),
+                     self.services_.end(),
+                     [service](const InternalRunnableRef& target) {
+                       return (target.get() == service);
+                     }),
+      self.services_.end());
 }
 
-void Dispatcher::join() {
-  if (instance().thread_manager_ != nullptr) {
-    instance().thread_manager_->stop();
-    instance().thread_manager_->join();
+inline static void assureRun(const InternalRunnableRef& service) {
+  while (true) {
+    // Wait for each thread's entry point (start) meaning the thread context
+    // was allocated and (run) was called by std::thread started.
+    if (service->hasRun()) {
+      break;
+    }
+    // We only need to check if std::terminate is called very quickly after
+    // the std::thread is created.
+    sleepFor(20);
   }
 }
 
 void Dispatcher::joinServices() {
-  for (auto& thread : instance().service_threads_) {
+  auto& self = instance();
+  DLOG(INFO) << "Thread: " << std::this_thread::get_id()
+             << " requesting a join";
+  WriteLock join_lock(self.join_mutex_);
+
+  for (auto& thread : self.service_threads_) {
     thread->join();
+    DLOG(INFO) << "Service thread: " << thread.get() << " has joined";
   }
+
+  WriteLock lock(self.mutex_);
+  self.services_.clear();
+  self.service_threads_.clear();
+  self.stopping_ = false;
+  DLOG(INFO) << "Services and threads have been cleared";
 }
 
 void Dispatcher::stopServices() {
   auto& self = instance();
+  self.stopping_ = true;
+
+  WriteLock lock(self.mutex_);
+  DLOG(INFO) << "Thread: " << std::this_thread::get_id()
+             << " requesting a stop";
   for (const auto& service : self.services_) {
-    while (true) {
-      // Wait for each thread's entry point (start) meaning the thread context
-      // was allocated and (run) was called by boost::thread started.
-      if (service->hasRun()) {
-        break;
-      }
-      // We only need to check if std::terminate is called very quickly after
-      // the boost::thread is created.
-      ::usleep(200);
-    }
-    service->stop();
+    assureRun(service);
+    service->interrupt();
+    DLOG(INFO) << "Service: " << service.get() << " has been interrupted";
   }
-
-  for (auto& thread : self.service_threads_) {
-    thread->interrupt();
-  }
-}
-
-InternalThreadManager::STATE Dispatcher::state() const {
-  return instance().thread_manager_->state();
-}
-
-void Dispatcher::addWorker(size_t value) {
-  instance().thread_manager_->addWorker(value);
-}
-
-void Dispatcher::removeWorker(size_t value) {
-  instance().thread_manager_->removeWorker(value);
-}
-
-size_t Dispatcher::idleWorkerCount() const {
-  return instance().thread_manager_->idleWorkerCount();
-}
-
-size_t Dispatcher::workerCount() const {
-  return instance().thread_manager_->workerCount();
-}
-
-size_t Dispatcher::pendingTaskCount() const {
-  return instance().thread_manager_->pendingTaskCount();
-}
-
-size_t Dispatcher::totalTaskCount() const {
-  return instance().thread_manager_->totalTaskCount();
-}
-
-size_t Dispatcher::pendingTaskCountMax() const {
-  return instance().thread_manager_->pendingTaskCountMax();
-}
-
-size_t Dispatcher::expiredTaskCount() const {
-  return instance().thread_manager_->expiredTaskCount();
 }
 }

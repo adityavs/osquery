@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,12 +10,22 @@
 
 #include <boost/algorithm/string/trim.hpp>
 
+#include <osquery/core.h>
 #include <osquery/database.h>
 #include <osquery/enroll.h>
 #include <osquery/flags.h>
 #include <osquery/filesystem.h>
+#include <osquery/system.h>
+
+#include "osquery/core/process.h"
 
 namespace osquery {
+
+/// At startup, always do a new enrollment instead of using a cached one
+CLI_FLAG(bool,
+         enroll_always,
+         false,
+         "On startup, send a new enrollment request");
 
 /// Allow users to disable enrollment features.
 CLI_FLAG(bool,
@@ -29,7 +39,23 @@ CLI_FLAG(string,
          "",
          "Path to an optional client enrollment-auth secret");
 
-std::string getNodeKey(const std::string& enroll_plugin, bool force) {
+/// Name of optional environment variable holding enrollment secret data.
+CLI_FLAG(string,
+         enroll_secret_env,
+         "",
+         "Name of environment variable holding enrollment-auth secret");
+
+/// Allow users to disable reenrollment if a config/logger endpoint fails.
+CLI_FLAG(bool,
+         disable_reenrollment,
+         false,
+         "Disable re-enrollment attempts if related plugins return invalid");
+
+Status clearNodeKey() {
+  return deleteDatabaseValue(kPersistentSettings, "nodeKey");
+}
+
+std::string getNodeKey(const std::string& enroll_plugin) {
   std::string node_key;
   getDatabaseValue(kPersistentSettings, "nodeKey", node_key);
   if (node_key.size() > 0) {
@@ -37,28 +63,34 @@ std::string getNodeKey(const std::string& enroll_plugin, bool force) {
     return node_key;
   }
 
-  // Request the enroll plugin's node secret.
-  PluginRequest request = {{"action", "enroll"}};
-  if (force) {
-    request["force"] = "1";
-  }
+  // The node key request time is recorded before the enroll request occurs.
+  auto request_time = std::to_string(getUnixTime());
 
+  // Request the enroll plugin's node secret.
   PluginResponse response;
-  auto request_time = std::to_string(::time(nullptr));
-  Registry::call("enroll", enroll_plugin, request, response);
+  Registry::call("enroll", enroll_plugin, {{"action", "enroll"}}, response);
   if (response.size() > 0 && response[0].count("node_key") != 0) {
     node_key = response[0].at("node_key");
     setDatabaseValue(kPersistentSettings, "nodeKey", node_key);
-    // Set the last time a nodeKey was retrieved from an enrollment endpoint.
+    // Set the last time a nodeKey was requested from an enrollment endpoint.
     setDatabaseValue(kPersistentSettings, "nodeKeyTime", request_time);
   }
   return node_key;
 }
 
-std::string getEnrollSecret() {
+const std::string getEnrollSecret() {
   std::string enrollment_secret;
-  osquery::readFile(FLAGS_enroll_secret_path, enrollment_secret);
-  boost::trim(enrollment_secret);
+
+  if (FLAGS_enroll_secret_path != "") {
+    osquery::readFile(FLAGS_enroll_secret_path, enrollment_secret);
+    boost::trim(enrollment_secret);
+  } else {
+    auto env_secret = getEnvVar(FLAGS_enroll_secret_env);
+    if (env_secret.is_initialized()) {
+      enrollment_secret = *env_secret;
+    }
+  }
+
   return enrollment_secret;
 }
 
@@ -73,14 +105,8 @@ Status EnrollPlugin::call(const PluginRequest& request,
     return Status(1, "Enroll plugins require an action");
   }
 
-  // The caller may ask the enroll action to force getKey.
-  bool force_enroll = false;
-  if (request.count("force") > 0 && request.at("force") == "1") {
-    force_enroll = true;
-  }
-
   // The 'enroll' API should return a string and implement caching.
-  auto node_key = this->enroll(force_enroll);
+  auto node_key = this->enroll();
   response.push_back({{"node_key", node_key}});
   if (node_key.size() == 0) {
     return Status(1, "No enrollment key found/retrieved");

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,23 +10,24 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 
+#ifndef WIN32
 #include <unistd.h>
+#endif
 
 #include <boost/noncopyable.hpp>
-#include <boost/thread/mutex.hpp>
 
+#include <osquery/database.h>
+#include <osquery/dispatcher.h>
 #include <osquery/flags.h>
 
-#include "osquery/dispatcher/dispatcher.h"
-
-/// Define a special debug/testing watchdog level.
-#define WATCHDOG_LEVEL_DEBUG 3
-/// Define the default watchdog level, level below are considered permissive.
-#define WATCHDOG_LEVEL_DEFAULT 1
+#include "osquery/core/process.h"
 
 namespace osquery {
+
+using ExtensionMap = std::map<std::string, std::shared_ptr<PlatformProcess>>;
 
 DECLARE_bool(disable_watchdog);
 DECLARE_int32(watchdog_level);
@@ -41,7 +42,7 @@ class WatcherRunner;
  * here, and organized into levels. Such that a caller may enforce rigor or
  * relax the performance expectations of a osquery daemon.
  */
-enum WatchdogLimitType {
+enum class WatchdogLimitType {
   MEMORY_LIMIT,
   UTILIZATION_LIMIT,
   RESPAWN_LIMIT,
@@ -108,18 +109,22 @@ class Watcher : private boost::noncopyable {
                                      size_t respawn_time);
 
   /// Lock access to extensions.
-  static void lock() { instance().lock_.lock(); }
+  static void lock() {
+    instance().lock_.lock();
+  }
 
   /// Unlock access to extensions.
-  static void unlock() { instance().lock_.unlock(); }
+  static void unlock() {
+    instance().lock_.unlock();
+  }
 
   /// Accessor for autoloadable extension paths.
-  static const std::map<std::string, pid_t>& extensions() {
+  static const ExtensionMap& extensions() {
     return instance().extensions_;
   }
 
   /// Lookup extension path from pid.
-  static std::string getExtensionPath(pid_t child);
+  static std::string getExtensionPath(const PlatformProcess& child);
 
   /// Remove an autoloadable extension path.
   static void removeExtensionPath(const std::string& extension);
@@ -128,23 +133,40 @@ class Watcher : private boost::noncopyable {
   static void addExtensionPath(const std::string& path);
 
   /// Get state information for a worker or extension child.
-  static PerformanceState& getState(pid_t child);
+  static PerformanceState& getState(const PlatformProcess& child);
   static PerformanceState& getState(const std::string& extension);
 
   /// Accessor for the worker process.
-  static pid_t getWorker() { return instance().worker_; }
+  static PlatformProcess& getWorker() {
+    return *instance().worker_;
+  }
 
   /// Setter for worker process.
-  static void setWorker(pid_t child) { instance().worker_ = child; }
+  static void setWorker(const std::shared_ptr<PlatformProcess>& child) {
+    instance().worker_ = child;
+  }
 
   /// Setter for an extension process.
-  static void setExtension(const std::string& extension, pid_t child);
+  static void setExtension(const std::string& extension,
+                           const std::shared_ptr<PlatformProcess>& child);
 
   /// Reset pid and performance counters for a worker or extension process.
-  static void reset(pid_t child);
+  static void reset(const PlatformProcess& child);
 
   /// Count the number of worker restarts.
-  static size_t workerRestartCount() { return instance().worker_restarts_; }
+  static size_t workerRestartCount() {
+    return instance().worker_restarts_;
+  }
+
+  /// Become responsible for the worker's fate, but do not guarantee its safety.
+  static void bindFates() {
+    instance().restart_worker_ = false;
+  }
+
+  /// Check if the worker and watcher's fates are bound.
+  static bool fatesBound() {
+    return !instance().restart_worker_;
+  }
 
   /**
    * @brief Return the state of autoloadable extensions.
@@ -155,39 +177,60 @@ class Watcher : private boost::noncopyable {
    */
   static bool hasManagedExtensions();
 
+  /// Check the status of the last worker.
+  static int getWorkerStatus() {
+    return instance().worker_status_;
+  }
+
  private:
   /// Do not request the lock until extensions are used.
   Watcher()
-      : worker_(-1), worker_restarts_(0), lock_(mutex_, boost::defer_lock) {}
+      : worker_(std::make_shared<PlatformProcess>()),
+        worker_restarts_(0),
+        lock_(mutex_, std::defer_lock) {}
   Watcher(Watcher const&);
+
   void operator=(Watcher const&);
   virtual ~Watcher() {}
 
  private:
   /// Inform the watcher that the worker restarted without cause.
-  static void workerRestarted() { instance().worker_restarts_++; }
+  static void workerRestarted() {
+    instance().worker_restarts_++;
+  }
 
  private:
   /// Performance state for the worker process.
   PerformanceState state_;
+
   /// Performance states for each autoloadable extension binary.
   std::map<std::string, PerformanceState> extension_states_;
 
  private:
   /// Keep the single worker process/thread ID for inspection.
-  pid_t worker_;
+  std::shared_ptr<PlatformProcess> worker_;
+
   /// Number of worker restarts NOT induced by a watchdog process.
-  size_t worker_restarts_;
+  size_t worker_restarts_{0};
+
   /// Keep a list of resolved extension paths and their managed pids.
-  std::map<std::string, pid_t> extensions_;
+  ExtensionMap extensions_;
+
   /// Paths to autoload extensions.
   std::vector<std::string> extensions_paths_;
 
+  /// Bind the fate of the watcher to the worker.
+  bool restart_worker_{true};
+
+  /// Record the exit status of the most recent worker.
+  std::atomic<int> worker_status_{-1};
+
  private:
   /// Mutex and lock around extensions access.
-  boost::mutex mutex_;
+  Mutex mutex_;
+
   /// Mutex and lock around extensions access.
-  boost::unique_lock<boost::mutex> lock_;
+  std::unique_lock<Mutex> lock_;
 
  private:
   friend class WatcherRunner;
@@ -203,9 +246,14 @@ class Watcher : private boost::noncopyable {
 class WatcherLocker {
  public:
   /// Construct and gain watcher lock.
-  WatcherLocker() { Watcher::lock(); }
+  WatcherLocker() {
+    Watcher::lock();
+  }
+
   /// Destruct and release watcher lock.
-  ~WatcherLocker() { Watcher::unlock(); }
+  ~WatcherLocker() {
+    Watcher::unlock();
+  }
 };
 
 /**
@@ -232,43 +280,78 @@ class WatcherRunner : public InternalRunnable {
  private:
   /// Dispatcher (this service thread's) entry point.
   void start();
+
   /// Boilerplate function to sleep for some configured latency
   bool ok();
+
   /// Begin the worker-watcher process.
-  bool watch(pid_t child);
+  virtual bool watch(const PlatformProcess& child) const;
+
   /// Inspect into the memory, CPU, and other worker/extension process states.
-  bool isChildSane(pid_t child);
+  virtual Status isChildSane(const PlatformProcess& child) const;
+
+  /// Inspect into the memory and CPU of the watcher process.
+  virtual Status isWatcherHealthy(const PlatformProcess& watcher,
+                                  PerformanceState& watcher_state) const;
+
+  /// Get row data from the processes table for a given pid.
+  virtual QueryData getProcessRow(pid_t pid) const;
 
  private:
   /// Fork and execute a worker process.
-  void createWorker();
+  virtual void createWorker();
+
   /// Fork an extension process.
-  bool createExtension(const std::string& extension);
+  virtual bool createExtension(const std::string& extension);
+
   /// If a worker/extension has otherwise gone insane, stop it.
-  void stopChild(pid_t child);
+  virtual void stopChild(const PlatformProcess& child) const;
+
+ private:
+  /// For testing only, ask the WatcherRunner to run a start loop once.
+  void runOnce() {
+    run_once_ = true;
+  }
 
  private:
   /// Keep the invocation daemon's argc to iterate through argv.
-  int argc_;
+  int argc_{0};
+
   /// When a worker child is spawned the argv will be scrubbed.
-  char** argv_;
+  char** argv_{nullptr};
+
   /// Spawn/monitor a worker process.
-  bool use_worker_;
+  bool use_worker_{false};
+
+  /// If set, the ::start method will run once and return.
+  bool run_once_{false};
+
+  /// Similarly to the uncontrolled worker restarted, count each extension.
+  std::map<std::string, size_t> extension_restarts_;
+
+ private:
+  FRIEND_TEST(WatcherTests, test_watcherrunner_watch);
+  FRIEND_TEST(WatcherTests, test_watcherrunner_stop);
+  FRIEND_TEST(WatcherTests, test_watcherrunner_loop);
+  FRIEND_TEST(WatcherTests, test_watcherrunner_loop_failure);
+  FRIEND_TEST(WatcherTests, test_watcherrunner_loop_disabled);
+  FRIEND_TEST(WatcherTests, test_watcherrunner_watcherhealth);
 };
 
 /// The WatcherWatcher is spawned within the worker and watches the watcher.
 class WatcherWatcherRunner : public InternalRunnable {
  public:
-  explicit WatcherWatcherRunner(pid_t watcher) : watcher_(watcher) {}
+  explicit WatcherWatcherRunner(const std::shared_ptr<PlatformProcess>& watcher)
+      : watcher_(watcher) {}
 
   /// Runnable thread's entry point.
   void start();
 
  private:
   /// Parent, or watchdog, process ID.
-  pid_t watcher_;
+  std::shared_ptr<PlatformProcess> watcher_;
 };
 
 /// Get a performance limit by name and optional level.
-size_t getWorkerLimit(WatchdogLimitType limit, int level = -1);
+size_t getWorkerLimit(WatchdogLimitType limit);
 }

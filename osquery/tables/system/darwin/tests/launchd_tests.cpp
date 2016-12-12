@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,7 +13,7 @@
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
 
 namespace fs = boost::filesystem;
 namespace pt = boost::property_tree;
@@ -38,7 +38,7 @@ TEST_F(LaunchdTests, test_parse_launchd_item) {
   // Parse the contents into a launchd table row.
   QueryData results;
   genLaunchdItem(tree, launchd_path, results);
-  ASSERT_EQ(results.size(), 1);
+  ASSERT_EQ(results.size(), 1U);
 
   Row expected = {
       {"path", kTestDataPath + "test_launchd.plist"},

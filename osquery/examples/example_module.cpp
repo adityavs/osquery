@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -14,11 +14,15 @@ using namespace osquery;
 
 class ExampleTable : public TablePlugin {
  private:
-  TableColumns columns() const {
-    return {{"example_text", "TEXT"}, {"example_integer", "INTEGER"}};
+  TableColumns columns() const override {
+    return {
+        std::make_tuple("example_text", TEXT_TYPE, ColumnOptions::DEFAULT),
+        std::make_tuple(
+            "example_integer", INTEGER_TYPE, ColumnOptions::DEFAULT),
+    };
   }
 
-  QueryData generate(QueryContext& request) {
+  QueryData generate(QueryContext& request) override {
     QueryData results;
 
     Row r;

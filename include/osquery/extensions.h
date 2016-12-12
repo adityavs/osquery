@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -16,14 +16,13 @@
 
 namespace osquery {
 
-DECLARE_int32(worker_threads);
 DECLARE_string(extensions_socket);
 DECLARE_string(extensions_autoload);
 DECLARE_string(extensions_timeout);
 DECLARE_bool(disable_extensions);
 
 /// A millisecond internal applied to extension initialization.
-extern const size_t kExtensionInitializeLatencyUS;
+extern const size_t kExtensionInitializeLatency;
 
 /**
  * @brief Helper struct for managing extenion metadata.
@@ -41,11 +40,7 @@ typedef std::map<RouteUUID, ExtensionInfo> ExtensionList;
 
 inline std::string getExtensionSocket(
     RouteUUID uuid, const std::string& path = FLAGS_extensions_socket) {
-  if (uuid == 0) {
-    return path;
-  } else {
-    return path + "." + std::to_string(uuid);
-  }
+  return (uuid == 0) ? path : path + "." + std::to_string(uuid);
 }
 
 /// External (extensions) SQL implementation of the osquery query API.
@@ -57,11 +52,12 @@ Status getQueryColumnsExternal(const std::string& q, TableColumns& columns);
 /// External (extensions) SQL implementation plugin provider for "sql" registry.
 class ExternalSQLPlugin : SQLPlugin {
  public:
-  Status query(const std::string& q, QueryData& results) const {
+  Status query(const std::string& q, QueryData& results) const override {
     return queryExternal(q, results);
   }
 
-  Status getQueryColumns(const std::string& q, TableColumns& columns) const {
+  Status getQueryColumns(const std::string& q,
+                         TableColumns& columns) const override {
     return getQueryColumnsExternal(q, columns);
   }
 };
@@ -77,6 +73,18 @@ Status getExtensions(const std::string& manager_path,
 Status pingExtension(const std::string& path);
 
 /**
+ * @brief Perform an action while waiting for an the extension timeout.
+ *
+ * We define a 'global' extension timeout using CLI flags.
+ * There are several locations where code may act assuming an extension has
+ * loaded or broadcasted a registry.
+ *
+ * @param predicate return true or set stop to end the timeout loop.
+ * @return the last status from the predicate.
+ */
+Status applyExtensionDelay(std::function<Status(bool& stop)> predicate);
+
+/**
  * @brief Request the extensions API to autoload any appropriate extensions.
  *
  * Extensions may be 'autoloaded' using the `extensions_autoload` command line
@@ -84,7 +92,7 @@ Status pingExtension(const std::string& path);
  * is used. This allows appropriate extensions to expose plugin requirements.
  *
  * An 'appropriate' extension is one within the `extensions_autoload` search
- * path with file ownership equivilent or greater (root) than the osquery
+ * path with file ownership equivalent or greater (root) than the osquery
  * process requesting autoload.
  */
 void loadExtensions();
@@ -92,7 +100,7 @@ void loadExtensions();
 /**
  * @brief Load extensions from a delimited search path string.
  *
- * @param paths A colon-delimited path variable, e.g: '/path1:/path2'.
+ * @param loadfile Path to file containing newline delimited file paths
  */
 Status loadExtensions(const std::string& loadfile);
 
@@ -107,7 +115,7 @@ void loadModules();
 /**
  * @brief Load extenion modules from a delimited search path string.
  *
- * @param paths A colon-delimited path variable, e.g: '/path1:/path2'.
+ * @param loadfile Path to file containing newline delimited file paths
  */
 Status loadModules(const std::string& loadfile);
 

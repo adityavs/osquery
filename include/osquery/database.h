@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <string>
 #include <vector>
@@ -19,9 +20,19 @@
 #include <osquery/registry.h>
 #include <osquery/status.h>
 
-namespace pt = boost::property_tree;
-
 namespace osquery {
+
+/**
+ * @brief A list of supported backing storage categories: called domains.
+ *
+ * RocksDB has a concept of "column families" which are kind of like tables
+ * in other databases. kDomainds is populated with a list of all column
+ * families. If a string exists in kDomains, it's a column family in the
+ * database.
+ *
+ * For SQLite-backed storage these are tables using a keyed index.
+ */
+extern const std::vector<std::string> kDomains;
 
 /**
  * @brief A backing storage domain name, used for key/value based storage.
@@ -48,14 +59,10 @@ extern const std::string kEvents;
  */
 extern const std::string kLogs;
 
-/////////////////////////////////////////////////////////////////////////////
-// Row
-/////////////////////////////////////////////////////////////////////////////
-
 /**
  * @brief A variant type for the SQLite type affinities.
  */
-typedef std::string RowData;
+using RowData = std::string;
 
 /**
  * @brief A single row from a database query
@@ -63,7 +70,7 @@ typedef std::string RowData;
  * Row is a simple map where individual column names are keys, which map to
  * the Row's respective value
  */
-typedef std::map<std::string, RowData> Row;
+using Row = std::map<std::string, RowData>;
 
 /**
  * @brief Serialize a Row into a property tree
@@ -73,7 +80,7 @@ typedef std::map<std::string, RowData> Row;
  *
  * @return Status indicating the success or failure of the operation
  */
-Status serializeRow(const Row& r, pt::ptree& tree);
+Status serializeRow(const Row& r, boost::property_tree::ptree& tree);
 
 /**
  * @brief Serialize a Row object into a JSON string
@@ -93,7 +100,7 @@ Status serializeRowJSON(const Row& r, std::string& json);
  *
  * @return Status indicating the success or failure of the operation
  */
-Status deserializeRow(const pt::ptree& tree, Row& r);
+Status deserializeRow(const boost::property_tree::ptree& tree, Row& r);
 
 /**
  * @brief Deserialize a Row object from a JSON string
@@ -105,17 +112,13 @@ Status deserializeRow(const pt::ptree& tree, Row& r);
  */
 Status deserializeRowJSON(const std::string& json, Row& r);
 
-/////////////////////////////////////////////////////////////////////////////
-// QueryData
-/////////////////////////////////////////////////////////////////////////////
-
 /**
  * @brief The result set returned from a osquery SQL query
  *
  * QueryData is the canonical way to represent the results of SQL queries in
  * osquery. It's just a vector of Row's.
  */
-typedef std::vector<Row> QueryData;
+using QueryData = std::vector<Row>;
 
 /**
  * @brief Serialize a QueryData object into a property tree
@@ -125,7 +128,8 @@ typedef std::vector<Row> QueryData;
  *
  * @return Status indicating the success or failure of the operation
  */
-Status serializeQueryData(const QueryData& q, pt::ptree& tree);
+Status serializeQueryData(const QueryData& q,
+                          boost::property_tree::ptree& tree);
 
 /**
  * @brief Serialize a QueryData object into a JSON string
@@ -138,14 +142,11 @@ Status serializeQueryData(const QueryData& q, pt::ptree& tree);
 Status serializeQueryDataJSON(const QueryData& q, std::string& json);
 
 /// Inverse of serializeQueryData, convert property tree to QueryData.
-Status deserializeQueryData(const pt::ptree& tree, QueryData& qd);
+Status deserializeQueryData(const boost::property_tree::ptree& tree,
+                            QueryData& qd);
 
 /// Inverse of serializeQueryDataJSON, convert a JSON string to QueryData.
 Status deserializeQueryDataJSON(const std::string& json, QueryData& qd);
-
-/////////////////////////////////////////////////////////////////////////////
-// DiffResults
-/////////////////////////////////////////////////////////////////////////////
 
 /**
  * @brief Data structure representing the difference between the results of
@@ -168,7 +169,9 @@ struct DiffResults {
   }
 
   /// not equals operator
-  bool operator!=(const DiffResults& comp) const { return !(*this == comp); }
+  bool operator!=(const DiffResults& comp) const {
+    return !(*this == comp);
+  }
 };
 
 /**
@@ -179,7 +182,8 @@ struct DiffResults {
  *
  * @return Status indicating the success or failure of the operation
  */
-Status serializeDiffResults(const DiffResults& d, pt::ptree& tree);
+Status serializeDiffResults(const DiffResults& d,
+                            boost::property_tree::ptree& tree);
 
 /**
  * @brief Serialize a DiffResults object into a JSON string
@@ -222,7 +226,7 @@ bool addUniqueRowToQueryData(QueryData& q, const Row& r);
 
 /**
  * @brief Construct a new QueryData from an existing one, replacing all
- * non-ASCII characters with their \u encoding.
+ * non-ASCII characters with their \\u encoding.
  *
  * This function is intended as a workaround for
  * https://svn.boost.org/trac/boost/ticket/8883,
@@ -235,7 +239,42 @@ bool addUniqueRowToQueryData(QueryData& q, const Row& r);
 void escapeQueryData(const QueryData& oldData, QueryData& newData);
 
 /**
- * @brief represents the relevant parameters of a scheduled query.
+ * @brief performance statistics about a query
+ */
+struct QueryPerformance {
+  /// Number of executions.
+  size_t executions;
+
+  /// Last UNIX time in seconds the query was executed successfully.
+  size_t last_executed;
+
+  /// Total wall time taken
+  unsigned long long int wall_time;
+
+  /// Total user time (cycles)
+  unsigned long long int user_time;
+
+  /// Total system time (cycles)
+  unsigned long long int system_time;
+
+  /// Average memory differentials. This should be near 0.
+  unsigned long long int average_memory;
+
+  /// Total characters, bytes, generated by query.
+  unsigned long long int output_size;
+
+  QueryPerformance()
+      : executions(0),
+        last_executed(0),
+        wall_time(0),
+        user_time(0),
+        system_time(0),
+        average_memory(0),
+        output_size(0) {}
+};
+
+/**
+ * @brief Represents the relevant parameters of a scheduled query.
  *
  * Within the context of osqueryd, a scheduled query may have many relevant
  * attributes. Those attributes are represented in this data structure.
@@ -250,36 +289,10 @@ struct ScheduledQuery {
   /// A temporary splayed internal.
   size_t splayed_interval;
 
-  /// Number of executions.
-  size_t executions;
-
-  /// Total wall time taken
-  unsigned long long int wall_time;
-
-  /// Total user time (cycles)
-  unsigned long long int user_time;
-
-  /// Total system time (cycles)
-  unsigned long long int system_time;
-
-  /// Average memory differentials. This should be near 0.
-  unsigned long long int memory;
-
-  /// Total characters, bytes, generated by query.
-  unsigned long long int output_size;
-
   /// Set of query options.
   std::map<std::string, bool> options;
 
-  ScheduledQuery()
-      : interval(0),
-        splayed_interval(0),
-        executions(0),
-        wall_time(0),
-        user_time(0),
-        system_time(0),
-        memory(0),
-        output_size(0) {}
+  ScheduledQuery() : interval(0), splayed_interval(0) {}
 
   /// equals operator
   bool operator==(const ScheduledQuery& comp) const {
@@ -287,12 +300,10 @@ struct ScheduledQuery {
   }
 
   /// not equals operator
-  bool operator!=(const ScheduledQuery& comp) const { return !(*this == comp); }
+  bool operator!=(const ScheduledQuery& comp) const {
+    return !(*this == comp);
+  }
 };
-
-/////////////////////////////////////////////////////////////////////////////
-// QueryLogItem
-/////////////////////////////////////////////////////////////////////////////
 
 /**
  * @brief Query results from a schedule, snapshot, or ad-hoc execution.
@@ -315,10 +326,13 @@ struct QueryLogItem {
   std::string identifier;
 
   /// The time that the query was executed, seconds as UNIX time.
-  int time;
+  size_t time{0};
 
   /// The time that the query was executed, an ASCII string.
   std::string calendar_time;
+
+  /// A set of additional fields to emit with the log line.
+  std::map<std::string, std::string> decorations;
 
   /// equals operator
   bool operator==(const QueryLogItem& comp) const {
@@ -326,7 +340,9 @@ struct QueryLogItem {
   }
 
   /// not equals operator
-  bool operator!=(const QueryLogItem& comp) const { return !(*this == comp); }
+  bool operator!=(const QueryLogItem& comp) const {
+    return !(*this == comp);
+  }
 };
 
 /**
@@ -337,7 +353,8 @@ struct QueryLogItem {
  *
  * @return Status indicating the success or failure of the operation
  */
-Status serializeQueryLogItem(const QueryLogItem& item, pt::ptree& tree);
+Status serializeQueryLogItem(const QueryLogItem& item,
+                             boost::property_tree::ptree& tree);
 
 /**
  * @brief Serialize a QueryLogItem object into a JSON string
@@ -350,7 +367,8 @@ Status serializeQueryLogItem(const QueryLogItem& item, pt::ptree& tree);
 Status serializeQueryLogItemJSON(const QueryLogItem& item, std::string& json);
 
 /// Inverse of serializeQueryLogItem, convert property tree to QueryLogItem.
-Status deserializeQueryLogItem(const pt::ptree& tree, QueryLogItem& item);
+Status deserializeQueryLogItem(const boost::property_tree::ptree& tree,
+                               QueryLogItem& item);
 
 /// Inverse of serializeQueryLogItem, convert a JSON string to QueryLogItem.
 Status deserializeQueryLogItemJSON(const std::string& json, QueryLogItem& item);
@@ -364,19 +382,20 @@ Status deserializeQueryLogItemJSON(const std::string& json, QueryLogItem& item);
  *
  * @return Status indicating the success or failure of the operation
  */
-Status serializeQueryLogItemAsEvents(const QueryLogItem& item, pt::ptree& tree);
+Status serializeQueryLogItemAsEvents(const QueryLogItem& item,
+                                     boost::property_tree::ptree& tree);
 
 /**
  * @brief Serialize a QueryLogItem object into a JSON string of events,
  * a list of actions.
  *
  * @param i the QueryLogItem to serialize
- * @param json the output JSON string
+ * @param items vector of JSON output strings
  *
  * @return Status indicating the success or failure of the operation
  */
 Status serializeQueryLogItemAsEventsJSON(const QueryLogItem& i,
-                                         std::string& json);
+                                         std::vector<std::string>& items);
 
 /**
  * @brief An osquery backing storage (database) type that persists executions.
@@ -391,7 +410,7 @@ Status serializeQueryLogItemAsEventsJSON(const QueryLogItem& i,
  * to removing RocksDB as a dependency for the osquery SDK.
  */
 class DatabasePlugin : public Plugin {
- protected:
+ public:
   /**
    * @brief Perform a domain and key lookup from the backing store.
    *
@@ -428,14 +447,80 @@ class DatabasePlugin : public Plugin {
   /// Data removal method.
   virtual Status remove(const std::string& domain, const std::string& k) = 0;
 
-  /// Key/index lookup method.
   virtual Status scan(const std::string& domain,
-                      std::vector<std::string>& results) const {
+                      std::vector<std::string>& results,
+                      const std::string& prefix,
+                      size_t max = 0) const {
     return Status(0, "Not used");
   }
 
+  /**
+   * @brief Shutdown the database and release initialization resources.
+   *
+   * Assume that a plugin may override #tearDown and choose to close resources
+   * when the registry is stopping. Most plugins will implement a mutex around
+   * initialization and destruction and assume #setUp and #tearDown will
+   * dictate the flow in most situations.
+   */
+  virtual ~DatabasePlugin() {}
+
+  /**
+   * @brief Support the registry calling API for extensions.
+   *
+   * The database plugin "fast-calls" directly to local plugins.
+   * Extensions cannot use an extension-local backing store so their requests
+   * are routed like all other plugins.
+   */
+  Status call(const PluginRequest& request, PluginResponse& response) override;
+
  public:
-  Status call(const PluginRequest& request, PluginResponse& response);
+  /// Database-specific workflow: reset the originally request instance.
+  virtual Status reset() final;
+
+  /// Database-specific workflow: perform an initialize, then reset.
+  bool checkDB();
+
+  /// Require all DBHandle accesses to open a read and write handle.
+  static void setRequireWrite(bool rw) {
+    kDBHandleOptionRequireWrite = rw;
+  }
+
+  /// Allow DBHandle creations.
+  static void setAllowOpen(bool ao) {
+    kDBHandleOptionAllowOpen = ao;
+  }
+
+ public:
+  /// Control availability of the RocksDB handle (default false).
+  static bool kDBHandleOptionAllowOpen;
+
+  /// The database must be opened in a R/W mode (default false).
+  static bool kDBHandleOptionRequireWrite;
+
+  /// A queryable mutex around database sanity checking.
+  static std::atomic<bool> kCheckingDB;
+
+ public:
+  /**
+   * @brief Allow the initializer to check the active database plugin.
+   *
+   * Unlink the initializer's Initializer::initActivePlugin helper method, the
+   * database plugin should always be within the core. There is no need to
+   * discover the active plugin via the registry or extensions API.
+   *
+   * The database should setUp in preparation for accesses.
+   */
+  static bool initPlugin();
+
+  /// Allow shutdown before exit.
+  static void shutdown();
+
+ protected:
+  /// The database was opened in a ReadOnly mode.
+  bool read_only_{false};
+
+  /// Original requested path on disk.
+  std::string path_;
 };
 
 /**
@@ -475,8 +560,15 @@ Status deleteDatabaseValue(const std::string& domain, const std::string& key);
 
 /// Get a list of keys for a given domain.
 Status scanDatabaseKeys(const std::string& domain,
-                        std::vector<std::string>& keys);
+                        std::vector<std::string>& keys,
+                        size_t max = 0);
 
-/// Generate a specific-use registry for database access abstraction.
-CREATE_REGISTRY(DatabasePlugin, "database");
+/// Get a list of keys for a given domain.
+Status scanDatabaseKeys(const std::string& domain,
+                        std::vector<std::string>& keys,
+                        const std::string& prefix,
+                        size_t max = 0);
+
+/// Allow callers to scan each column family and print each value.
+void dumpDatabase();
 }

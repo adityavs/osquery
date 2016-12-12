@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -17,7 +17,7 @@
 /// The file change event publishers are slightly different in OS X and Linux.
 #ifdef __APPLE__
 #include "osquery/events/darwin/fsevents.h"
-#else
+#elif __linux__
 #include "osquery/events/linux/inotify.h"
 #endif
 
@@ -33,15 +33,18 @@ namespace tables {
 
 /// The file change event publishers are slightly different in OS X and Linux.
 #ifdef __APPLE__
-typedef EventSubscriber<FSEventsEventPublisher> FileEventSubscriber;
-typedef FSEventsEventContextRef FileEventContextRef;
-#define FILE_CHANGE_MASK \
-  kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemModified
-#else
-typedef EventSubscriber<INotifyEventPublisher> FileEventSubscriber;
-typedef INotifyEventContextRef FileEventContextRef;
-#define FILE_CHANGE_MASK \
-  IN_CREATE | IN_CLOSE_WRITE | IN_MODIFY
+using FileEventSubscriber = EventSubscriber<FSEventsEventPublisher>;
+using FileEventContextRef = FSEventsEventContextRef;
+using FileSubscriptionContextRef = FSEventsSubscriptionContextRef;
+#define FILE_CHANGE_MASK                                                       \
+  kFSEventStreamEventFlagItemCreated | kFSEventStreamEventFlagItemModified |   \
+      kFSEventStreamEventFlagItemRenamed
+#elif __linux__
+using FileEventSubscriber = EventSubscriber<INotifyEventPublisher>;
+using FileEventContextRef = INotifyEventContextRef;
+using FileSubscriptionContextRef = INotifySubscriptionContextRef;
+#define FILE_CHANGE_MASK                                                       \
+  ((IN_CREATE) | (IN_CLOSE_WRITE) | (IN_MODIFY) | (IN_MOVED_TO))
 #endif
 
 /**
@@ -49,7 +52,12 @@ typedef INotifyEventContextRef FileEventContextRef;
  */
 class YARAEventSubscriber : public FileEventSubscriber {
  public:
-  Status init();
+  Status init() override {
+    configure();
+    return Status(0);
+  }
+
+  void configure() override;
 
  private:
   /**
@@ -60,7 +68,8 @@ class YARAEventSubscriber : public FileEventSubscriber {
    *
    * @return Status
    */
-  Status Callback(const FileEventContextRef& ec, const void* user_data);
+  Status Callback(const FileEventContextRef& ec,
+                  const FileSubscriptionContextRef& sc);
 };
 
 /**
@@ -72,49 +81,63 @@ class YARAEventSubscriber : public FileEventSubscriber {
  */
 REGISTER(YARAEventSubscriber, "event_subscriber", "yara_events");
 
-Status YARAEventSubscriber::init() {
-  Status status;
+void YARAEventSubscriber::configure() {
+  removeSubscriptions();
 
-  ConfigDataInstance config;
-  const auto& yara_config = config.getParsedData("yara");
-  if (yara_config.count("file_paths") == 0)
-    return Status(0, "OK");
+  // There is a special yara parser that tracks the related top-level keys.
+  auto plugin = Config::getParser("yara");
+  if (plugin == nullptr || plugin.get() == nullptr) {
+    return;
+  }
+
+  // Bail if there is no configured set of opt-in paths for yara.
+  const auto& yara_config = plugin->getData();
+  if (yara_config.count("file_paths") == 0) {
+    return;
+  }
+
+  // Collect the set of paths, we are mostly concerned with the categories.
+  // But the subscriber must duplicate the set of subscriptions such that the
+  // publisher's 'fire'-matching logic routes related events to our callback.
+  std::map<std::string, std::vector<std::string>> file_map;
+  Config::getInstance().files([&file_map](
+      const std::string& category, const std::vector<std::string>& files) {
+    file_map[category] = files;
+  });
+
+  // For each category within yara's file_paths, add a subscription to the
+  // corresponding set of paths.
   const auto& yara_paths = yara_config.get_child("file_paths");
-  const auto& file_map = config.files();
   for (const auto& yara_path_element : yara_paths) {
     // Subscribe to each file for the given key (category).
     if (file_map.count(yara_path_element.first) == 0) {
-      LOG(WARNING) << "Key in yara.file_paths not found in file_paths: " <<
-        yara_path_element.first;
+      VLOG(1) << "Key in yara::file_paths not found in file_paths: "
+              << yara_path_element.first;
       continue;
     }
 
     for (const auto& file : file_map.at(yara_path_element.first)) {
       VLOG(1) << "Added YARA listener to: " << file;
-      auto mc = createSubscriptionContext();
-      mc->path = file;
-      mc->mask = FILE_CHANGE_MASK;
-      mc->recursive = true;
-      subscribe(&YARAEventSubscriber::Callback,
-                mc,
-                (void*)(&yara_path_element.first));
+      auto sc = createSubscriptionContext();
+      sc->recursive = 0;
+      sc->path = file;
+      sc->mask = FILE_CHANGE_MASK;
+      sc->category = yara_path_element.first;
+      subscribe(&YARAEventSubscriber::Callback, sc);
     }
   }
-
-  return Status(0, "OK");
 }
 
 Status YARAEventSubscriber::Callback(const FileEventContextRef& ec,
-                                     const void* user_data) {
-  if (user_data == nullptr) {
-    return Status(1, "No YARA category string provided");
+                                     const FileSubscriptionContextRef& sc) {
+  if (ec->action != "UPDATED" && ec->action != "CREATED") {
+    return Status(1, "Invalid action");
   }
 
   Row r;
   r["action"] = ec->action;
-  r["time"] = ec->time_string;
   r["target_path"] = ec->path;
-  r["category"] = *(std::string*)user_data;
+  r["category"] = sc->category;
 
   // Only FSEvents transactions updates (inotify is a no-op).
   r["transaction_id"] = INTEGER(ec->transaction_id);
@@ -122,18 +145,30 @@ Status YARAEventSubscriber::Callback(const FileEventContextRef& ec,
   // These are default values, to be updated in YARACallback.
   r["count"] = INTEGER(0);
   r["matches"] = std::string("");
+  r["strings"] = std::string("");
+  r["tags"] = std::string("");
 
-  ConfigDataInstance config;
-  const auto& parser = config.getParser("yara");
-  if (parser == nullptr)
+  auto parser = Config::getParser("yara");
+  if (parser == nullptr || parser.get() == nullptr) {
     return Status(1, "ConfigParser unknown.");
-  const auto& yaraParser = std::static_pointer_cast<YARAConfigParserPlugin>(parser);
+  }
+
+  std::shared_ptr<YARAConfigParserPlugin> yaraParser;
+  try {
+    yaraParser = std::dynamic_pointer_cast<YARAConfigParserPlugin>(parser);
+  } catch (const std::bad_cast& e) {
+    return Status(1, "Error casting yara config parser plugin");
+  }
+  if (yaraParser == nullptr || yaraParser.get() == nullptr) {
+    return Status(1, "Yara parser unknown.");
+  }
+
   auto rules = yaraParser->rules();
 
   // Use the category as a lookup into the yara file_paths. The value will be
   // a list of signature groups to scan with.
   auto category = r.at("category");
-  const auto& yara_config = config.getParsedData("yara");
+  const auto& yara_config = parser->getData();
   const auto& yara_paths = yara_config.get_child("file_paths");
   const auto& sig_groups = yara_paths.find(category);
   for (const auto& rule : sig_groups->second) {
@@ -150,8 +185,8 @@ Status YARAEventSubscriber::Callback(const FileEventContextRef& ec,
     }
   }
 
-  if (ec->action != "") {
-    add(r, ec->time);
+  if (ec->action != "" && r.at("matches").size() > 0) {
+    add(r);
   }
 
   return Status(0, "OK");

@@ -4,7 +4,7 @@ This guide provides an overview and tutorial for assuring performance of the osq
 
 ## Testing query performance
 
-The osquery tooling provides a full-featured profiling script. The script can evaluate table, query, and scheduled query performance on a system. Before scheduling a set of queries on your enterprise hosts, it is best practice to measure the expected performance impact:
+The osquery tooling provides a full-featured profiling script. The script can evaluate table, query, and scheduled query performance on a system. Before scheduling a set of queries on your enterprise hosts, it is best practice to measure the expected performance impact.
 
 Consider the following `osquery.conf`:
 
@@ -41,10 +41,10 @@ Consider the following `osquery.conf`:
 
 Each query provides useful information and will run every minute. But what sort of impact will this have on the client machines?
 
-For this we can use `./tools/profile.py` to profile the queries by running them for a configured number of rounds and reporting the pre-defined performance category of each. A higher category result means higher impact. High impact queries should be avoided, but if the information is valuable consider running them less-often.
+For this we can use `./tools/analysis/profile.py` to profile the queries by running them for a configured number of rounds and reporting the pre-defined performance category of each. A higher category result means higher impact. High impact queries should be avoided, but if the information is valuable, consider running them less-often.
 
 ```
-$ sudo -E python ./tools/profile.py --config osquery.conf
+$ sudo -E python ./tools/analysis/profile.py --config osquery.conf
 Profiling query: select * from kernel_extensions where name not like 'com.apple.%' and name != '__kernel__';
  D:0  C:0  M:0  F:0  U:1  non_apple_kexts (1/1): duration: 0.519426107407 cpu_time: 0.096729864 memory: 6447104 fds: 5 utilization: 9.5
 Profiling query: select name, path, bundle_version, minimum_system_version, applescript_enabled, bundle_executable from apps;
@@ -63,6 +63,8 @@ The results (utilization=2) suggest running `processes_binding_to_ports` less of
 
 To estimate how often these should run you should evaluate what a differential in the information means from your visibility requirement's perspective (how meaningful is a change vs. how often you check for the change). Then weigh that value against the performance impact of running the query.
 
+Queries that fail to execute (for example, due to a non-existent table) will return the highest category result '3' and the value '-1' for all statistics. 
+
 ## Continuous Build
 
 The continuous integration for osquery is currently under development. The previous CI solution was unreliably failing builds due to network and memory issues.
@@ -70,16 +72,16 @@ The continuous integration for osquery is currently under development. The previ
 The build will run each of the support operating system platform/versions and include the following phases:
 
 * Build and run `make test`
-* Attempt to detect memory leaks using `./tools/profile.py --leaks`
-* Run a performance measurement using `./tools/profile.py`
-* Check performance against the latest release tag and commit to master.
-* Build docs and API spec on release tag or commit to master.
+* Attempt to detect memory leaks using `./tools/analysis/profile.py --leaks`
+* Run a performance measurement using `./tools/analysis/profile.py`
+* Check performance against the latest release tag and commit to master
+* Build docs and API spec on release tag or commit to master
 
 ## Virtual table blacklist
 
-Performance impacting virtual tables are most likely the result of missing features/tooling in osquery. Because of their dependencies on core optimizations there's no hard including the table generation code in master as long as the table is blacklisted when a non-developer builds the tool suite.
+Performance impacting virtual tables are most likely the result of missing features/tooling in osquery. Because of their dependencies on core optimizations, there is no harm including the table generation code in master as long as the table is blacklisted when a non-developer builds the tool suite.
 
-If you are developing latent tables that would be blacklisted please make sure you are relying on a feature with a clear issue and traction. Then add your table name (as it appears in the `.table` spec) to [`specs/blacklist`](https://github.com/facebook/osquery/blob/master/specs/blacklist) and adopt:
+If you are developing latent tables that would be blacklisted, please make sure you are relying on a feature with a clear issue and traction. Then add your table name (as it appears in the `.table` spec) to [`specs/blacklist`](https://github.com/facebook/osquery/blob/master/specs/blacklist) and adopt:
 
 ```
 $ DISABLE_BLACKLIST=1 make
@@ -92,7 +94,7 @@ For your build iteration.
 Before deploying an osquery config use:
 
 ```
-./tools/profile.py --config /path/to/osquery.conf --count 1 --rounds 4
+./tools/analysis/profile.py --config /path/to/osquery.conf --count 1 --rounds 4
 ```
 
 To estimate the amount of CPU/memory load the system will incur for each query.

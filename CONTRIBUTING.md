@@ -58,13 +58,97 @@ Visit https://github.com/facebook/osquery and use the web UI to create a Pull Re
 
 ## Pull Request workflow
 
+In most cases your PR should represent a single body of work. It is fine to change unrelated small-things like nits or code-format issues but make every effort to submit isolated changes. This makes documentation, references, regression tracking and if needed, a revert, easier.
+
+## Updating Pull Requests
+
+Pull requests will often need revision, most likely after the required code review from the friendly core development team. :D
+
+Our preference is to minimize the number of commits in a pull request and represent each body of change as a single, concise, commit. To do this we ask you to [squash](https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History) your git commits before we merge changes. There are two basic workflows for squashing, let's run through examples of each.
+
+**You create a pull request with several commits**
+
+If you open a pull request from a branch with 'stacked commits' the request will ask us to merge the lot of them into our master. That is no fun, and we will promptly ask you to squash! If you have 5 commits in the pull request you can squash these into 1 using:
+
+```
+$ git rebase -i HEAD~5
+```
+
+This tells git to perform an interactive rebase onto the `HEAD-5` commit. The interactive part means your favorite editor will prompt you for actions. To turn 5 commits into 1 we'll `pick` the first, then `squash` the remaining, in this case 4. The 'squashed' 4 will be squashed into the commit we 'pick'. Within the interactive editor, change the last 4 'picks' to an `s`, shorthand for squash.
+
+For example here are my 5 commits while editing this guide:
+
+```
+pick dc849a9 Update contributing with squash instructions
+pick 8b1fa6b Minor change to contributing
+pick 45baf1a Delete whitespace in contributing
+pick bded8d7 Delete more whitespace
+pick ab49a55 Fix small mistake
+```
+
+I can squash these into a single commit by updating and saving:
+
+```
+pick dc849a9 Update contributing with squash instructions
+s 8b1fa6b Minor change to contributing
+s 45baf1a Delete whitespace in contributing
+s bded8d7 Delete more whitespace
+s ab49a55 Fix small mistake
+```
+
+The next prompt allows us to amend the commit message:
+
+```
+# This is a combination of 5 commits.
+# The first commit's message is:
+Update contributing with squash instructions
+# This is the 2nd commit message:
+Minor change to contributing
+# This is the 3rd commit message:
+Delete whitespace in contributing
+# This is the 4th commit message:
+Delete more whitespace
+# This is the 5th commit message:
+Fix small mistake
+```
+
+I will remove everything except for the first line, as that is the thesis for all 5 commits, and save:
+
+```
+# This is a combination of 5 commits.
+# The first commit's message is:
+Update contributing with squash instructions
+```
+
+When you save you can verify your 5 commits are now 1 by inspecting the `git log`. To update your pull request you'll need to force-push since you just rewrote your local history:
+
+```
+$ git push -f
+```
+
+**You make updates to your pull request**
+
+If the pull request needs changes, or you decide to update the content, please 'amend' your previous commit:
+
+```
+$ git commit --amend
+```
+
+Like squashing, this changes the branch history so you'll need to force push the changes to update the pull request:
+
+```
+$ git push -f
+```
+
+In all cases, if the pull request is triggering automatic build/integration tests, the tests will rerun reflecting your changes.
+
 ### Linking issues
 
 Once you submit your pull request, link the GitHub issue which your Pull Request implements. To do this, if the relevant issue is #7, then simply type "#7" somewhere in the Pull Request description or comments. This links the Pull Request with the issue, which makes things easier to track down later on.
 
 ### Adding the appropriate labels
 
-To facilitate development, osquery developers adhere to a particular label workflow.
+To facilitate development, osquery developers adhere to a particular label workflow. The core development team will assign labels as appropriate.
 
 #### "ready for review" vs "in progress"
 
@@ -82,11 +166,11 @@ The pattern here should be pretty obvious. Please put the appropriate effort int
 
 ## Unit Test expectations
 
-All code that you submit to osquery should include automated tests. See the [unit testing guide](https://osquery.readthedocs.org/development/unit-tests/) for instructions on how to create tests.
+All code that you submit to osquery should include automated tests. See the [unit testing guide](https://osquery.readthedocs.org/en/latest/development/unit-tests/) for instructions on how to create tests.
 
 ## Memory leak expectations
 
-osquery runs in the context of long running processes. It's critical that there are no memory leaks in osquery code. All code should be thoroughly tested for leaks. See the [memory leak testing guide](https://osquery.readthedocs.org/deployment/performance-safety/) for more information on how to test your code for memory leaks.
+osquery runs in the context of long running processes. It's critical that there are no memory leaks in osquery code. All code should be thoroughly tested for leaks. See the [memory leak testing guide](https://osquery.readthedocs.org/en/latest/deployment/performance-safety/) for more information on how to test your code for memory leaks.
 
 When you submit a Pull Request, please consider including the output of a valgrind analysis.
 
@@ -97,3 +181,17 @@ If you think that shelling out and executing a bash command is a good idea, it's
 If you want to call a system executable or call system libraries via a tool, use the underlying C/C++ APIs that the tool uses to implement your functionality. Several tables (kextstat, processes, nvram, last, etc) were created by dissecting core systems tools and using the underlying APIs.
 
 It's worth noting that you should exercise caution when copying code of any kind, especially core systems tools. Often times, core utilities developers recognize that their software will only be executed in the context of short-lived processes. For this reason, there are often memory leaks in the default behavior of these utilities. Put care into ensuring that you don't unknowingly introduce memory leaks into osquery.
+
+## Code of Conduct
+
+As contributors and maintainers of this project, we pledge to respect all people who contribute through reporting issues, posting feature requests, updating documentation, submitting pull requests or patches, and other activities.
+
+We are committed to making participation in this project a harassment-free experience for everyone, regardless of level of experience, gender, gender identity and expression, sexual orientation, disability, personal appearance, body size, race, age, or religion.
+
+Examples of unacceptable behavior by participants include the use of sexual language or imagery, derogatory comments or personal attacks, trolling, public or private harassment, insults, or other unprofessional conduct.
+
+Project maintainers have the right and responsibility to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned to this Code of Conduct. Project maintainers who do not follow the Code of Conduct may be removed from the project team.
+
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by opening an issue or contacting one or more of the project maintainers.
+
+This Code of Conduct is adapted from the [Contributor Covenant](http://contributor-covenant.org), version 1.0.0, available at [http://contributor-covenant.org/version/1/0/0/](http://contributor-covenant.org/version/1/0/0/)

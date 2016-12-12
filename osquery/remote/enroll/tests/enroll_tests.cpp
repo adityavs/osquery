@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,10 +13,16 @@
 #include <osquery/core.h>
 #include <osquery/database.h>
 #include <osquery/enroll.h>
+#include <osquery/filesystem.h>
+#include <osquery/flags.h>
 
-#include "osquery/core/test_util.h"
+#include "osquery/tests/test_util.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
+
+DECLARE_string(enroll_secret_path);
 
 class EnrollTests : public testing::Test {
  public:
@@ -27,31 +33,28 @@ class EnrollTests : public testing::Test {
 };
 
 class SimpleEnrollPlugin : public EnrollPlugin {
- public:
-  SimpleEnrollPlugin() : times_forced_(0) {}
-
  protected:
-  std::string enroll(bool force) {
-    if (force) {
-      forced_response_ = std::to_string(times_forced_);
-      times_forced_++;
-      return forced_response_;
-    }
-    return "fetched_a_node_key";
-  }
-
- private:
-  std::string forced_response_;
-  size_t times_forced_;
+  std::string enroll() { return "fetched_a_node_key"; }
 };
 
 // Register our simple enroll plugin.
 REGISTER(SimpleEnrollPlugin, "enroll", "test_simple");
 
+TEST_F(EnrollTests, test_enroll_secret_retrieval) {
+  // Write an example secret (deploy key).
+  FLAGS_enroll_secret_path =
+    (fs::path(kTestWorkingDirectory) / "secret.txt").
+    make_preferred().string();
+  writeTextFile(FLAGS_enroll_secret_path, "test_secret\n", 0600, false);
+  // Make sure the file content was read and trimmed.
+  auto secret = getEnrollSecret();
+  EXPECT_EQ(secret, "test_secret");
+}
+
 TEST_F(EnrollTests, test_enroll_key_retrieval) {
   FLAGS_disable_enrollment = true;
   // Without enrollment, and with an empty nodeKey storage value, no node key
-  // will be fetched or returned from cached.
+  // will be fetched or returned from cache.
   EXPECT_EQ(getNodeKey("test_simple"), "");
 
   // Turn the enrollment features back on and expect a key.

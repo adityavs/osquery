@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,57 +15,35 @@
 #include <osquery/database.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
-#include <osquery/sql.h>
+#include <osquery/system.h>
 
+#include "osquery/config/parsers/decorators.h"
+#include "osquery/core/process.h"
 #include "osquery/database/query.h"
 #include "osquery/dispatcher/scheduler.h"
 
 namespace osquery {
 
-FLAG(string,
-     host_identifier,
-     "hostname",
-     "Field used to identify the host running osquery (hostname, uuid)");
-
-FLAG(bool, enable_monitor, false, "Enable the schedule monitor");
+FLAG(bool, enable_monitor, true, "Enable the schedule monitor");
 
 FLAG(uint64, schedule_timeout, 0, "Limit the schedule, 0 for no limit")
 
-Status getHostIdentifier(std::string& ident) {
-  if (FLAGS_host_identifier != "uuid") {
-    // use the hostname as the default machine identifier
-    ident = osquery::getHostname();
-    return Status(0, "OK");
-  }
+/// Used to bypass (optimize-out) the set-differential of query results.
+DECLARE_bool(events_optimize);
 
-  // Lookup the host identifier (UUID) previously generated and stored.
-  auto status = getDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
-  if (!status.ok()) {
-    // The lookup failed, there is a problem accessing the database.
-    VLOG(1) << "Could not access database; using hostname as host identifier";
-    ident = osquery::getHostname();
-    return Status(0, "OK");
-  }
-
-  if (ident.size() == 0) {
-    // There was no uuid stored in the database, generate one and store it.
-    ident = osquery::generateHostUuid();
-    VLOG(1) << "Using uuid " << ident << " as host identifier";
-    return setDatabaseValue(kPersistentSettings, "hostIdentifier", ident);
-  }
-  return status;
-}
-
-inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
+SQLInternal monitor(const std::string& name, const ScheduledQuery& query) {
   // Snapshot the performance and times for the worker before running.
-  auto pid = std::to_string(getpid());
+  auto pid = std::to_string(PlatformProcess::getCurrentProcess()->pid());
   auto r0 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
-  auto t0 = time(nullptr);
-  auto sql = SQL(query.query);
+  auto t0 = getUnixTime();
+  Config::getInstance().recordQueryStart(name);
+  auto sql = SQLInternal(query.query);
   // Snapshot the performance after, and compare.
-  auto t1 = time(nullptr);
+  auto t1 = getUnixTime();
   auto r1 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
   if (r0.size() > 0 && r1.size() > 0) {
+    // Calculate a size as the expected byte output of results.
+    // This does not dedup result differentials and is not aware of snapshots.
     size_t size = 0;
     for (const auto& row : sql.rows()) {
       for (const auto& column : row) {
@@ -73,28 +51,28 @@ inline SQL monitor(const std::string& name, const ScheduledQuery& query) {
         size += column.second.size();
       }
     }
-    Config::recordQueryPerformance(name, t1 - t0, size, r0[0], r1[0]);
+    // Always called while processes table is working.
+    Config::getInstance().recordQueryPerformance(
+        name, t1 - t0, size, r0[0], r1[0]);
   }
   return sql;
 }
 
-void launchQuery(const std::string& name, const ScheduledQuery& query) {
+inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   // Execute the scheduled query and create a named query object.
-  VLOG(1) << "Executing query: " << query.query;
-  auto sql = (FLAGS_enable_monitor) ? monitor(name, query) : SQL(query.query);
+  LOG(INFO) << "Executing scheduled query: " << name << ": " << query.query;
+  runDecorators(DECORATE_ALWAYS);
+  auto sql =
+      (FLAGS_enable_monitor) ? monitor(name, query) : SQLInternal(query.query);
 
   if (!sql.ok()) {
-    LOG(ERROR) << "Error executing query (" << query.query
-               << "): " << sql.getMessageString();
+    LOG(ERROR) << "Error executing scheduled query: " << name << ": "
+               << sql.getMessageString();
     return;
   }
 
   // Fill in a host identifier fields based on configuration or availability.
-  std::string ident;
-  auto status = getHostIdentifier(ident);
-  if (!status.ok() || ident.empty()) {
-    ident = "<unknown>";
-  }
+  std::string ident = getHostIdentifier();
 
   // A query log item contains an optional set of differential results or
   // a copy of the most-recent execution alongside some query metadata.
@@ -103,6 +81,7 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
   item.identifier = ident;
   item.time = osquery::getUnixTime();
   item.calendar_time = osquery::getAsciiTime();
+  getDecorations(item.decorations);
 
   if (query.options.count("snapshot") && query.options.at("snapshot")) {
     // This is a snapshot query, emit results with a differential or state.
@@ -113,22 +92,34 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
 
   // Create a database-backed set of query results.
   auto dbQuery = Query(name, query);
+  // Comparisons and stores must include escaped data.
+  sql.escapeResults();
+
+  Status status;
   DiffResults diff_results;
   // Add this execution's set of results to the database-tracked named query.
   // We can then ask for a differential from the last time this named query
   // was executed by exact matching each row.
-  status = dbQuery.addNewResults(sql.rows(), diff_results);
-  if (!status.ok()) {
-    LOG(ERROR) << "Error adding new results to database: " << status.what();
-    return;
+  if (!FLAGS_events_optimize || !sql.eventBased()) {
+    status = dbQuery.addNewResults(sql.rows(), diff_results);
+    if (!status.ok()) {
+      std::string line =
+          "Error adding new results to database: " + status.what();
+      LOG(ERROR) << line;
+
+      // If the database is not available then the daemon cannot continue.
+      Initializer::requestShutdown(EXIT_CATASTROPHIC, line);
+    }
+  } else {
+    diff_results.added = std::move(sql.rows());
   }
 
-  if (diff_results.added.size() == 0 && diff_results.removed.size() == 0) {
+  if (diff_results.added.empty() && diff_results.removed.empty()) {
     // No diff results or events to emit.
     return;
   }
 
-  VLOG(1) << "Found results for query (" << name << ") for host: " << ident;
+  VLOG(1) << "Found results for query: " << name;
   item.results = diff_results;
   if (query.options.count("removed") && !query.options.at("removed")) {
     item.results.removed.clear();
@@ -136,39 +127,43 @@ void launchQuery(const std::string& name, const ScheduledQuery& query) {
 
   status = logQueryLogItem(item);
   if (!status.ok()) {
-    LOG(ERROR) << "Error logging the results of query (" << query.query
-               << "): " << status.toString();
+    // If log directory is not available, then the daemon shouldn't continue.
+    std::string error = "Error logging the results of query: " + name + ": " +
+                        status.toString();
+    LOG(ERROR) << error;
+    Initializer::requestShutdown(EXIT_CATASTROPHIC, error);
   }
 }
 
 void SchedulerRunner::start() {
-  time_t t = std::time(nullptr);
-  struct tm* local = std::localtime(&t);
-  unsigned long int i = local->tm_sec;
+  // Start the counter at the second.
+  auto i = osquery::getUnixTime();
   for (; (timeout_ == 0) || (i <= timeout_); ++i) {
-    {
-      ConfigDataInstance config;
-      for (const auto& query : config.schedule()) {
-        if (i % query.second.splayed_interval == 0) {
-          launchQuery(query.first, query.second);
-        }
-      }
+    Config::getInstance().scheduledQueries(
+        ([&i](const std::string& name, const ScheduledQuery& query) {
+          if (query.splayed_interval > 0 && i % query.splayed_interval == 0) {
+            TablePlugin::kCacheInterval = query.splayed_interval;
+            TablePlugin::kCacheStep = i;
+            launchQuery(name, query);
+          }
+        }));
+    // Configuration decorators run on 60 second intervals only.
+    if (i % 60 == 0) {
+      runDecorators(DECORATE_INTERVAL, i);
     }
     // Put the thread into an interruptible sleep without a config instance.
-    osquery::interruptableSleep(interval_ * 1000);
+    pauseMilli(interval_ * 1000);
+    if (interrupted()) {
+      break;
+    }
   }
 }
 
-Status startScheduler() {
-  if (startScheduler(FLAGS_schedule_timeout, 1).ok()) {
-    Dispatcher::joinServices();
-    return Status(0, "OK");
-  }
-  return Status(1, "Could not start scheduler");
+void startScheduler() {
+  startScheduler(static_cast<unsigned long int>(FLAGS_schedule_timeout), 1);
 }
 
-Status startScheduler(unsigned long int timeout, size_t interval) {
+void startScheduler(unsigned long int timeout, size_t interval) {
   Dispatcher::addService(std::make_shared<SchedulerRunner>(timeout, interval));
-  return Status(0, "OK");
 }
 }

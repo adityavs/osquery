@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,80 +10,94 @@
 
 #include <osquery/config.h>
 #include <osquery/core.h>
+#include <osquery/events.h>
 #include <osquery/extensions.h>
+#include <osquery/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/packs.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
+#include <osquery/system.h>
 #include <osquery/tables.h>
-#include <osquery/filesystem.h>
+
+#include "osquery/core/process.h"
 
 namespace osquery {
+
+DECLARE_bool(disable_logging);
+DECLARE_bool(disable_events);
+
 namespace tables {
 
-typedef pt::ptree::value_type tree_node;
+QueryData genOsqueryEvents(QueryContext& context) {
+  QueryData results;
 
-void genQueryPack(const tree_node& pack, QueryData& results) {
-  Row r;
-  // Packs are stored by name and contain configuration data.
-  r["name"] = pack.first;
-  r["path"] = pack.second.get("path", "");
+  auto publishers = EventFactory::publisherTypes();
+  for (const auto& publisher : publishers) {
+    Row r;
+    r["name"] = publisher;
+    r["publisher"] = publisher;
+    r["type"] = "publisher";
 
-  // There are optional restrictions on the set of queries applied pack-wide.
-  auto pack_wide_version = pack.second.get("version", "");
-  auto pack_wide_platform = pack.second.get("platform", "");
-
-  // Iterate through each query in the pack.
-  for (auto const& query : pack.second.get_child("queries")) {
-    r["query_name"] = query.first;
-    r["query"] = query.second.get("query", "");
-    r["interval"] = INTEGER(query.second.get("interval", 0));
-    r["description"] = query.second.get("description", "");
-    r["value"] = query.second.get("value", "");
-
-    // Set the version requirement based on the query-specific or pack-wide.
-    if (query.second.count("version") > 0) {
-      r["version"] = query.second.get("version", "");
+    auto pubref = EventFactory::getEventPublisher(publisher);
+    if (pubref != nullptr) {
+      r["subscriptions"] = INTEGER(pubref->numSubscriptions());
+      r["events"] = INTEGER(pubref->numEvents());
+      r["refreshes"] = INTEGER(pubref->restartCount());
+      r["active"] = (pubref->hasStarted() && !pubref->isEnding()) ? "1" : "0";
     } else {
-      r["version"] = pack_wide_platform;
+      r["subscriptions"] = "0";
+      r["events"] = "0";
+      r["refreshes"] = "0";
+      r["active"] = "-1";
     }
-
-    // Set the platform requirement based on the query-specific or pack-wide.
-    if (query.second.count("platform") > 0) {
-      r["platform"] = query.second.get("platform", "");
-    } else {
-      r["platform"] = pack_wide_platform;
-    }
-
-    // Adding a prefix to the pack queries to differentiate packs from schedule.
-    r["scheduled_name"] = "pack_" + r.at("name") + "_" + r.at("query_name");
-    if (Config::checkScheduledQueryName(r.at("scheduled_name"))) {
-      r["scheduled"] = INTEGER(1);
-    } else {
-      r["scheduled"] = INTEGER(0);
-    }
-
     results.push_back(r);
   }
+
+  auto subscribers = EventFactory::subscriberNames();
+  for (const auto& subscriber : subscribers) {
+    Row r;
+    r["name"] = subscriber;
+    r["type"] = "subscriber";
+    // Subscribers will never 'restart'.
+    r["refreshes"] = "0";
+
+    auto subref = EventFactory::getEventSubscriber(subscriber);
+    if (subref != nullptr) {
+      r["publisher"] = subref->getType();
+      r["subscriptions"] = INTEGER(subref->numSubscriptions());
+      r["events"] = INTEGER(subref->numEvents());
+
+      // Subscribers are always active, even if their publisher is not.
+      r["active"] = (subref->state() == EventState::EVENT_RUNNING) ? "1" : "0";
+    } else {
+      r["subscriptions"] = "0";
+      r["events"] = "0";
+      r["active"] = "-1";
+    }
+    results.push_back(r);
+  }
+
+  return results;
 }
 
 QueryData genOsqueryPacks(QueryContext& context) {
   QueryData results;
 
-  // Get a lock on the config instance.
-  ConfigDataInstance config;
+  Config::getInstance().packs([&results](std::shared_ptr<Pack>& pack) {
+    Row r;
+    r["name"] = pack->getName();
+    r["version"] = pack->getVersion();
+    r["platform"] = pack->getPlatform();
+    r["shard"] = INTEGER(pack->getShard());
+    r["active"] = INTEGER(pack->isActive() ? 1 : 0);
 
-  // Get the loaded data tree from global JSON configuration.
-  const auto& packs_parsed_data = config.getParsedData("packs");
-
-  // Iterate through all the packs to get each configuration and set of queries.
-  for (auto const& pack : packs_parsed_data) {
-    // Make sure the pack data contains queries.
-    if (pack.second.count("queries") == 0) {
-      continue;
-    }
-    genQueryPack(pack, results);
-  }
+    auto stats = pack->getStats();
+    r["discovery_cache_hits"] = INTEGER(stats.hits);
+    r["discovery_executions"] = INTEGER(stats.misses);
+    results.push_back(r);
+  });
 
   return results;
 }
@@ -118,6 +132,20 @@ QueryData genOsqueryFlags(QueryContext& context) {
 QueryData genOsqueryRegistry(QueryContext& context) {
   QueryData results;
 
+  auto isActive = [](const std::string& plugin,
+                     const std::shared_ptr<RegistryHelperCore>& registry) {
+    if (FLAGS_disable_logging && registry->getName() == "logger") {
+      return false;
+    } else if (FLAGS_disable_events &&
+               registry->getName().find("event") != std::string::npos) {
+      return false;
+    }
+
+    const auto& active = registry->getActive();
+    bool none_active = (active.empty());
+    return (none_active || plugin == active);
+  };
+
   const auto& registries = RegistryFactory::all();
   for (const auto& registry : registries) {
     const auto& plugins = registry.second->all();
@@ -127,7 +155,7 @@ QueryData genOsqueryRegistry(QueryContext& context) {
       r["name"] = plugin.first;
       r["owner_uuid"] = "0";
       r["internal"] = (registry.second->isInternal(plugin.first)) ? "1" : "0";
-      r["active"] = "1";
+      r["active"] = (isActive(plugin.first, registry.second)) ? "1" : "0";
       results.push_back(r);
     }
 
@@ -137,7 +165,7 @@ QueryData genOsqueryRegistry(QueryContext& context) {
       r["name"] = route.first;
       r["owner_uuid"] = INTEGER(route.second);
       r["internal"] = "0";
-      r["active"] = "1";
+      r["active"] = (isActive(route.first, registry.second)) ? "1" : "0";
       results.push_back(r);
     }
   }
@@ -150,14 +178,14 @@ QueryData genOsqueryExtensions(QueryContext& context) {
 
   ExtensionList extensions;
   if (getExtensions(extensions).ok()) {
-    for (const auto& extenion : extensions) {
+    for (const auto& extension : extensions) {
       Row r;
-      r["uuid"] = TEXT(extenion.first);
-      r["name"] = extenion.second.name;
-      r["version"] = extenion.second.version;
-      r["sdk_version"] = extenion.second.sdk_version;
-      r["path"] = getExtensionSocket(extenion.first);
-      r["type"] = "extension";
+      r["uuid"] = SQL_TEXT(extension.first);
+      r["name"] = extension.second.name;
+      r["version"] = extension.second.version;
+      r["sdk_version"] = extension.second.sdk_version;
+      r["path"] = getExtensionSocket(extension.first);
+      r["type"] = (extension.first == 0) ? "core" : "extension";
       results.push_back(r);
     }
   }
@@ -165,7 +193,7 @@ QueryData genOsqueryExtensions(QueryContext& context) {
   const auto& modules = RegistryFactory::getModules();
   for (const auto& module : modules) {
     Row r;
-    r["uuid"] = TEXT(module.first);
+    r["uuid"] = SQL_TEXT(module.first);
     r["name"] = module.second.name;
     r["version"] = module.second.version;
     r["sdk_version"] = module.second.sdk_version;
@@ -181,52 +209,61 @@ QueryData genOsqueryInfo(QueryContext& context) {
   QueryData results;
 
   Row r;
-  r["pid"] = INTEGER(getpid());
+  r["pid"] = INTEGER(PlatformProcess::getCurrentProcess()->pid());
   r["version"] = kVersion;
 
   std::string hash_string;
-  auto s = Config::getMD5(hash_string);
-  if (s.ok()) {
-    r["config_md5"] = TEXT(hash_string);
-  } else {
-    r["config_md5"] = "";
-    VLOG(1) << "Could not retrieve config hash: " << s.toString();
-  }
-
-  r["config_path"] = Flag::getValue("config_path");
+  auto s = Config::getInstance().getMD5(hash_string);
+  r["config_hash"] = (s.ok()) ? hash_string : "";
+  r["config_valid"] = Config::getInstance().isValid() ? INTEGER(1) : INTEGER(0);
   r["extensions"] =
       (pingExtension(FLAGS_extensions_socket).ok()) ? "active" : "inactive";
-
   r["build_platform"] = STR(OSQUERY_BUILD_PLATFORM);
   r["build_distro"] = STR(OSQUERY_BUILD_DISTRO);
+  r["start_time"] = INTEGER(Config::getInstance().getStartTime());
+  if (Initializer::isWorker()) {
+    r["watcher"] = INTEGER(PlatformProcess::getLauncherProcess()->pid());
+  } else {
+    r["watcher"] = "-1";
+  }
 
   results.push_back(r);
-
   return results;
 }
 
 QueryData genOsquerySchedule(QueryContext& context) {
   QueryData results;
 
-  ConfigDataInstance config;
-  for (const auto& query : config.schedule()) {
-    Row r;
-    r["name"] = TEXT(query.first);
-    r["query"] = TEXT(query.second.query);
-    r["interval"] = INTEGER(query.second.interval);
+  Config::getInstance().scheduledQueries(
+      [&results](const std::string& name, const ScheduledQuery& query) {
+        Row r;
+        r["name"] = SQL_TEXT(name);
+        r["query"] = SQL_TEXT(query.query);
+        r["interval"] = INTEGER(query.interval);
+        // Set default (0) values for each query if it has not yet executed.
+        r["executions"] = "0";
+        r["output_size"] = "0";
+        r["wall_time"] = "0";
+        r["user_time"] = "0";
+        r["system_time"] = "0";
+        r["average_memory"] = "0";
+        r["last_executed"] = "0";
 
-    // Report optional performance information.
-    r["executions"] = BIGINT(query.second.executions);
-    r["output_size"] = BIGINT(query.second.output_size);
-    r["wall_time"] = BIGINT(query.second.wall_time);
-    r["user_time"] = BIGINT(query.second.user_time);
-    r["system_time"] = BIGINT(query.second.system_time);
-    r["average_memory"] = BIGINT(query.second.memory);
-    results.push_back(r);
-  }
+        // Report optional performance information.
+        Config::getInstance().getPerformanceStats(
+            name, [&r](const QueryPerformance& perf) {
+              r["executions"] = BIGINT(perf.executions);
+              r["last_executed"] = BIGINT(perf.last_executed);
+              r["output_size"] = BIGINT(perf.output_size);
+              r["wall_time"] = BIGINT(perf.wall_time);
+              r["user_time"] = BIGINT(perf.user_time);
+              r["system_time"] = BIGINT(perf.system_time);
+              r["average_memory"] = BIGINT(perf.average_memory);
+            });
 
+        results.push_back(r);
+      });
   return results;
 }
-
 }
 }

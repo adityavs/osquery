@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -13,6 +13,7 @@
 */
 
 #include <osquery/events.h>
+#include <osquery/logger.h>
 #include <osquery/tables.h>
 
 namespace osquery {
@@ -31,25 +32,72 @@ class {{class_name}} {
 
 class {{table_name_cc}}TablePlugin : public TablePlugin {
  private:
-  TableColumns columns() const {
+  TableColumns columns() const override {
     return {
 {% for column in schema %}\
-      {"{{column.name}}", "{{column.type.affinity}}"}\
-{% if not loop.last %}, {% endif %}
+      std::make_tuple("{{column.name}}", {{column.type.affinity}},\
+{% if column.options|length > 0 %} {{column.options_set}}\
+{% else %} ColumnOptions::DEFAULT\
+{% endif %}\
+),
 {% endfor %}\
     };
   }
+{% if aliases|length > 0 %}\
 
-  QueryData generate(QueryContext& request) {
+  std::vector<std::string> aliases() const override {
+    return {
+{% for alias in aliases %}\
+      "{{alias}}",
+{% endfor %}\
+    };
+  }
+{% endif %}\
+
+{% if has_column_aliases %}\
+
+  ColumnAliasSet columnAliases() const override {
+    return {
+{% for column in schema %}\
+{% if column.aliases|length > 0 %}\
+      {"{{column.name}}", {% raw %}{{% endraw %}\
+{% for alias in column.aliases %}"{{alias}}"\
+{% if not loop.last %}, {% endif %}\
+{% endfor %}}},
+{% endif %}\
+{% endfor %}\
+    };
+  }
+{% endif %}\
+
+  TableAttributes attributes() const override {
+    return \
+{% for attribute in attribute_set %}\
+      TableAttributes::{{attribute}} |\
+{% endfor %}\
+      TableAttributes::NONE;
+  }
+
+  QueryData generate(QueryContext& request) override {
 {% if class_name != "" %}\
-    if (EventFactory::exists("{{class_name}}")) {
-      auto subscriber = EventFactory::getEventSubscriber("{{class_name}}");
+    if (EventFactory::exists(getName())) {
+      auto subscriber = EventFactory::getEventSubscriber(getName());
       return subscriber->{{function}}(request);
     } else {
-      throw std::runtime_error("Subscriber table: {{class_name}} missing.");
+      LOG(ERROR) << "Subscriber table missing: " << getName();
+      return QueryData();
     }
 {% else %}\
-    return tables::{{function}}(request);
+{% if attributes.cacheable %}\
+    if (isCached(kCacheStep)) {
+      return getCache();
+    }
+{% endif %}\
+    auto results = tables::{{function}}(request);
+{% if attributes.cacheable %}\
+    setCache(kCacheStep, kCacheInterval, results);
+{% endif %}
+    return results;
 {% endif %}\
   }
 };

@@ -3,15 +3,19 @@ theme: readthedocs
 
 docs_dir: docs/wiki
 site_dir: build/wiki
+extra_css:
+- theme/osquery.css
+
 pages:
 - Introduction:
   - Welcome to osquery: index.md
-  - Features Overview: introduction/overview.md
   - osqueryi (shell): introduction/using-osqueryi.md
   - osqueryd (daemon): introduction/using-osqueryd.md
+  - SQL Introduction: introduction/sql.md
 - Installation:
   - Install on OS X: installation/install-osx.md
   - Install on Linux: installation/install-linux.md
+  - Install on Windows: installation/install-windows.md
   - Install on FreeBSD: installation/install-freebsd.md
   - Command Line Flags: installation/cli-flags.md
   - 'Optional: Custom Packages': installation/custom-packages.md
@@ -19,12 +23,16 @@ pages:
   - Configuration: deployment/configuration.md
   - Logging: deployment/logging.md
   - Aggregating Logs: deployment/log-aggregation.md
+  - AWS Logging: deployment/aws-logging.md
   - Performance Safety: deployment/performance-safety.md
   - Anomaly Detection: deployment/anomaly-detection.md
-  - Extensions: deployment/extensions.md
+  - Using Extensions: deployment/extensions.md
   - File Integrity Monitoring: deployment/file-integrity-monitoring.md
   - YARA Scanning: deployment/yara.md
-  - Remote settings: deployment/remote.md
+  - Process Auditing: deployment/process-auditing.md
+  - Remote Settings: deployment/remote.md
+  - Syslog Consumption: deployment/syslog.md
+  - Debugging: deployment/debugging.md
 - Development:
   - Building osquery: development/building.md
   - Contributing Code: development/contributing-code.md
@@ -36,5 +44,5 @@ pages:
   - Writing Tests: development/unit-tests.md
   - Adding CLI Arguments: development/options-arguments.md
   - Reading/Writing Files: development/reading-files.md
-  - Wildcards and Globbing: development/wildcard-rules.md
-
+  - Windows Provisioning: development/windows-provisioning.md
+  - Kernel: development/kernel.md

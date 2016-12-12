@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -10,35 +10,15 @@
 
 #include <algorithm>
 
+#include <osquery/logger.h>
+
 #include "osquery/database/query.h"
 
 namespace osquery {
 
-/////////////////////////////////////////////////////////////////////////////
-// Getters and setters
-/////////////////////////////////////////////////////////////////////////////
-
-std::string Query::getQuery() { return query_.query; }
-
-std::string Query::getQueryName() { return name_; }
-
-int Query::getInterval() { return query_.interval; }
-
-/////////////////////////////////////////////////////////////////////////////
-// Data access methods
-/////////////////////////////////////////////////////////////////////////////
-
 Status Query::getPreviousQueryResults(QueryData& results) {
-  return getPreviousQueryResults(results, DBHandle::getInstance());
-}
-
-Status Query::getPreviousQueryResults(QueryData& results, DBHandleRef db) {
-  if (!isQueryNameInDatabase()) {
-    return Status(0, "Query name not found in database");
-  }
-
   std::string raw;
-  auto status = db->Get(kQueries, name_, raw);
+  auto status = getDatabaseValue(kQueries, name_, raw);
   if (!status.ok()) {
     return status;
   }
@@ -51,66 +31,80 @@ Status Query::getPreviousQueryResults(QueryData& results, DBHandleRef db) {
 }
 
 std::vector<std::string> Query::getStoredQueryNames() {
-  return getStoredQueryNames(DBHandle::getInstance());
-}
-
-std::vector<std::string> Query::getStoredQueryNames(DBHandleRef db) {
   std::vector<std::string> results;
-  db->Scan(kQueries, results);
+  scanDatabaseKeys(kQueries, results);
   return results;
 }
 
 bool Query::isQueryNameInDatabase() {
-  return isQueryNameInDatabase(DBHandle::getInstance());
-}
-
-bool Query::isQueryNameInDatabase(DBHandleRef db) {
-  auto names = Query::getStoredQueryNames(db);
+  auto names = Query::getStoredQueryNames();
   return std::find(names.begin(), names.end(), name_) != names.end();
 }
 
-Status Query::addNewResults(const osquery::QueryData& qd) {
-  return addNewResults(qd, DBHandle::getInstance());
+static inline void saveQuery(const std::string& name,
+                             const std::string& query) {
+  setDatabaseValue(kQueries, "query." + name, query);
 }
 
-Status Query::addNewResults(const QueryData& qd, DBHandleRef db) {
+bool Query::isNewQuery() {
+  std::string query;
+  getDatabaseValue(kQueries, "query." + name_, query);
+  return (query != query_.query);
+}
+
+Status Query::addNewResults(const QueryData& qd) {
   DiffResults dr;
-  return addNewResults(qd, dr, false, db);
-}
-
-Status Query::addNewResults(const QueryData& qd, DiffResults& dr) {
-  return addNewResults(qd, dr, true, DBHandle::getInstance());
+  return addNewResults(qd, dr, false);
 }
 
 Status Query::addNewResults(const QueryData& current_qd,
                             DiffResults& dr,
-                            bool calculate_diff,
-                            DBHandleRef db) {
-  // Get the rows from the last run of this query name.
-  QueryData previous_qd;
-  auto status = getPreviousQueryResults(previous_qd);
-  if (!status.ok()) {
-    return status;
+                            bool calculate_diff) {
+  // The current results are 'fresh' when not calculating a differential.
+  bool fresh_results = !calculate_diff;
+  if (!isQueryNameInDatabase()) {
+    // This is the first encounter of the scheduled query.
+    fresh_results = true;
+    LOG(INFO) << "Storing initial results for new scheduled query: " << name_;
+    saveQuery(name_, query_.query);
+  } else if (isNewQuery()) {
+    // This query is 'new' in that the previous results may be invalid.
+    LOG(INFO) << "Scheduled query has been updated: " + name_;
+    saveQuery(name_, query_.query);
   }
 
-  // Sanitize all non-ASCII characters from the query data values.
-  QueryData escaped_current_qd;
-  escapeQueryData(current_qd, escaped_current_qd);
-  // Calculate the differential between previous and current query results.
-  if (calculate_diff) {
-    dr = diff(previous_qd, escaped_current_qd);
+  // Use a 'target' avoid copying the query data when serializing and saving.
+  // If a differential is requested and needed the target remains the original
+  // query data, otherwise the content is moved to the differential's added set.
+  const auto* target_gd = &current_qd;
+  if (!fresh_results && calculate_diff) {
+    // Get the rows from the last run of this query name.
+    QueryData previous_qd;
+    auto status = getPreviousQueryResults(previous_qd);
+    if (!status.ok()) {
+      return status;
+    }
+
+    // Calculate the differential between previous and current query results.
+    dr = diff(previous_qd, current_qd);
+    fresh_results = (!dr.added.empty() || !dr.removed.empty());
+  } else {
+    dr.added = std::move(current_qd);
+    target_gd = &dr.added;
   }
 
-  // Replace the "previous" query data with the current.
-  std::string json;
-  status = serializeQueryDataJSON(escaped_current_qd, json);
-  if (!status.ok()) {
-    return status;
-  }
+  if (fresh_results) {
+    // Replace the "previous" query data with the current.
+    std::string json;
+    auto status = serializeQueryDataJSON(*target_gd, json);
+    if (!status.ok()) {
+      return status;
+    }
 
-  status = db->Put(kQueries, name_, json);
-  if (!status.ok()) {
-    return status;
+    status = setDatabaseValue(kQueries, name_, json);
+    if (!status.ok()) {
+      return status;
+    }
   }
   return Status(0, "OK");
 }

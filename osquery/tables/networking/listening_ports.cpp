@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -15,7 +15,7 @@ namespace osquery {
 namespace tables {
 
 typedef std::pair<std::string, std::string> ProtoFamilyPair;
-typedef std::map<std::string, std::vector<ProtoFamilyPair> > PortMap;
+typedef std::map<std::string, std::vector<ProtoFamilyPair>> PortMap;
 
 QueryData genListeningPorts(QueryContext& context) {
   QueryData results;

@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -25,11 +25,10 @@ namespace osquery {
 namespace tables {
 
 #define MAX_NETLINK_SIZE 8192
-#define MAX_NETLINK_LATENCY 2000
+#define MAX_NETLINK_ATTEMPTS 8
 
 std::string getNetlinkIP(int family, const char* buffer) {
-  char dst[INET6_ADDRSTRLEN];
-  memset(dst, 0, INET6_ADDRSTRLEN);
+  char dst[INET6_ADDRSTRLEN] = {0};
 
   inet_ntop(family, buffer, dst, INET6_ADDRSTRLEN);
   std::string address(dst);
@@ -39,21 +38,34 @@ std::string getNetlinkIP(int family, const char* buffer) {
 }
 
 Status readNetlink(int socket_fd, int seq, char* output, size_t* size) {
-  struct nlmsghdr* nl_hdr;
+  struct nlmsghdr* nl_hdr = nullptr;
 
   size_t message_size = 0;
   do {
-    int latency = 0;
-    int bytes = 0;
+    size_t latency = 0;
+    size_t total_bytes = 0;
+    ssize_t bytes = 0;
     while (bytes == 0) {
       bytes = recv(socket_fd, output, MAX_NETLINK_SIZE - message_size, 0);
       if (bytes < 0) {
+        // Unrecoverable NETLINK error, bail.
         return Status(1, "Could not read from NETLINK");
-      } else if (latency >= MAX_NETLINK_LATENCY) {
+      }
+
+      // Bytes were returned by we might need to read more.
+      total_bytes += bytes;
+      if (latency >= MAX_NETLINK_ATTEMPTS) {
+        // Too many attempts to read bytes have occurred.
+        // Prevent the NETLINK socket from handing and bail.
         return Status(1, "Netlink timeout");
       } else if (bytes == 0) {
+        if (total_bytes > 0) {
+          // Bytes were read, but now no more are available, attempt to parse
+          // the received NETLINK message.
+          break;
+        }
         ::usleep(20);
-        latency += 20;
+        latency += 1;
       }
     }
 
@@ -73,7 +85,8 @@ Status readNetlink(int socket_fd, int seq, char* output, size_t* size) {
     if ((nl_hdr->nlmsg_flags & NLM_F_MULTI) == 0) {
       break;
     }
-  } while (nl_hdr->nlmsg_seq != seq || nl_hdr->nlmsg_pid != getpid());
+  } while (static_cast<pid_t>(nl_hdr->nlmsg_seq) != seq ||
+           static_cast<pid_t>(nl_hdr->nlmsg_pid) != getpid());
 
   *size = message_size;
   return Status(0, "OK");
@@ -82,11 +95,11 @@ Status readNetlink(int socket_fd, int seq, char* output, size_t* size) {
 void genNetlinkRoutes(const struct nlmsghdr* netlink_msg, QueryData& results) {
   std::string address;
   int mask = 0;
-  char interface[IF_NAMESIZE];
+  char interface[IF_NAMESIZE] = {0};
 
-  struct rtmsg* message = (struct rtmsg*)NLMSG_DATA(netlink_msg);
-  struct rtattr* attr = (struct rtattr*)RTM_RTA(message);
-  int attr_size = RTM_PAYLOAD(netlink_msg);
+  struct rtmsg* message = static_cast<struct rtmsg*>(NLMSG_DATA(netlink_msg));
+  struct rtattr* attr = static_cast<struct rtattr*>(RTM_RTA(message));
+  uint32_t attr_size = RTM_PAYLOAD(netlink_msg);
 
   Row r;
 
@@ -162,22 +175,23 @@ QueryData genRoutes(QueryContext& context) {
   }
 
   // Create netlink message header
-  void* netlink_buffer = malloc(MAX_NETLINK_SIZE);
-  struct nlmsghdr* netlink_msg = (struct nlmsghdr*)netlink_buffer;
-  if (netlink_msg == nullptr) {
+  auto netlink_buffer = (void*)malloc(MAX_NETLINK_SIZE);
+  if (netlink_buffer == nullptr) {
     close(socket_fd);
     return {};
   }
 
+  memset(netlink_buffer, 0, MAX_NETLINK_SIZE);
+  auto netlink_msg = (struct nlmsghdr*)netlink_buffer;
   netlink_msg->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
   netlink_msg->nlmsg_type = RTM_GETROUTE; // routes from kernel routing table
-  netlink_msg->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+  netlink_msg->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST | NLM_F_ATOMIC;
   netlink_msg->nlmsg_seq = 0;
   netlink_msg->nlmsg_pid = getpid();
 
   // Send the netlink request to the kernel
   if (send(socket_fd, netlink_msg, netlink_msg->nlmsg_len, 0) < 0) {
-    VLOG(1) << "Cannot write NETLINK request header to socket";
+    TLOG << "Cannot write NETLINK request header to socket";
     close(socket_fd);
     free(netlink_buffer);
     return {};
@@ -186,7 +200,7 @@ QueryData genRoutes(QueryContext& context) {
   // Wrap the read socket to support multi-netlink messages
   size_t size = 0;
   if (!readNetlink(socket_fd, 1, (char*)netlink_msg, &size).ok()) {
-    VLOG(1) << "Cannot read NETLINK response from socket";
+    TLOG << "Cannot read NETLINK response from socket";
     close(socket_fd);
     free(netlink_buffer);
     return {};

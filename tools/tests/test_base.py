@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-#  Copyright (c) 2014, Facebook, Inc.
+#  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
 #  This source code is licensed under the BSD-style license found in the
@@ -11,22 +11,26 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 # pyexpect.replwrap will not work with unicode_literals
-#from __future__ import unicode_literals
+# from __future__ import unicode_literals
 
 import copy
 import os
 import psutil
 import random
 import re
-import shutil
 import signal
 import subprocess
 import sys
 import time
 import threading
 import unittest
-
+import utils
 import pexpect
+
+# While this path can be variable, in practice is lives statically.
+OSQUERY_DEPENDENCIES = "/usr/local/osquery"
+sys.path = [OSQUERY_DEPENDENCIES + "/lib/python2.7/site-packages"] + sys.path
+
 try:
     from pexpect.replwrap import REPLWrapper
 except ImportError as e:
@@ -39,7 +43,7 @@ except ImportError as e:
 try:
     import argparse
 except ImportError:
-    print ("Cannot import argparse: pip install argparse?")
+    print("Cannot import argparse: pip install argparse?")
     exit(1)
 
 try:
@@ -48,12 +52,12 @@ try:
     from thrift.transport import TTransport
     from thrift.protocol import TBinaryProtocol
 except ImportError:
-    print ("Cannot import thrift: pip install thrift?")
+    print("Cannot import thrift: pip install thrift?")
     exit(1)
 
 '''Defaults that should be used in integration tests.'''
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-CONFIG_DIR = "/tmp/osquery-tests/"
+CONFIG_DIR = "/tmp/osquery-tests-python%d/" % (os.getuid())
 CONFIG_NAME = CONFIG_DIR + "tests"
 DEFAULT_CONFIG = {
     "options": {
@@ -65,18 +69,17 @@ DEFAULT_CONFIG = {
         "extensions_timeout": "0",
         "watchdog_level": "3",
         "disable_logging": "true",
+        "disable_events": "true",
         "force": "true",
     },
     "schedule": {},
 }
 
-# osquery-specific python tooling and utilities
-import utils
-
 '''Expect CONFIG to be set during Tester.main() to a python dict.'''
 CONFIG = None
 '''Expect ARGS to contain the argparsed namespace.'''
 ARGS = None
+
 
 class OsqueryUnknownException(Exception):
     '''Exception thrown for unknown output from the shell'''
@@ -101,7 +104,7 @@ class OsqueryWrapper(REPLWrapper):
             options[option] = args[option]
         options["database_path"] += str(random.randint(1000, 9999))
         command = command + " " + " ".join(["--%s=%s" % (k, v) for
-            k, v in options.iteritems()])
+                                            k, v in options.iteritems()])
         proc = pexpect.spawn(command, env=env)
         super(OsqueryWrapper, self).__init__(
             proc,
@@ -120,12 +123,21 @@ class OsqueryWrapper(REPLWrapper):
         # On Mac, the query appears first in the string. Remove it if so.
         result = re.sub(re.escape(query), '', result).strip()
         result_lines = result.splitlines()
-
-        if len(result_lines) < 1:
+        if len(result_lines) < 2:
             raise OsqueryUnknownException(
-                'Unexpected output:\n %s' % result_lines)
-        if result_lines[0].startswith(self.ERROR_PREFIX):
-            raise OsqueryException(result_lines[0])
+                'Unexpected output:\n %s' % result_lines[0])
+        if result_lines[1].startswith(self.ERROR_PREFIX):
+            raise OsqueryException(result_lines[1])
+
+        noise = 0
+        for l in result_lines:
+            if len(l) == 0 or l[0] != '+':
+                # This is not a result line
+                noise += 1
+            elif l[0] == '+':
+                break
+        for l in range(noise):
+            result_lines.pop(0)
 
         try:
             header = result_lines[1]
@@ -147,6 +159,7 @@ class ProcRunner(object):
     The subprocess is opened in a new thread and state is tracked using
     this class wrapper.
     '''
+
     def __init__(self, name, path, _args=[], interval=0.02, silent=False):
         self.started = False
         self.proc = None
@@ -155,31 +168,33 @@ class ProcRunner(object):
         self.args = _args
         self.interval = interval
         self.silent = silent
+        self.retcode = -1
         thread = threading.Thread(target=self.run, args=())
         thread.daemon = True
         thread.start()
 
     def run(self):
         pid = 0
-        code = -1
         try:
             if self.silent:
-                self.proc = subprocess.Popen([self.path] + self.args,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.proc = subprocess.Popen(
+                    [self.path] + self.args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE)
             else:
                 self.proc = subprocess.Popen([self.path] + self.args)
             pid = self.proc.pid
             self.started = True
         except Exception as e:
-            print (utils.red("Process start failed:") + " %s" % self.name)
-            print (str(e))
+            print(utils.red("Process start failed:") + " %s" % self.name)
+            print(str(e))
             sys.exit(1)
         try:
             while self.proc.poll() is None:
                 self.started = True
                 time.sleep(self.interval)
             self.started = True
-            code = -1 if self.proc is None else self.proc.poll()
+            self.retcode = -1 if self.proc is None else self.proc.poll()
             self.proc = None
         except Exception as e:
             return
@@ -209,6 +224,11 @@ class ProcRunner(object):
         except:
             pass
         return []
+
+    @property
+    def code(self):
+        self.requireStarted()
+        return self.retcode
 
     @property
     def pid(self):
@@ -269,16 +289,16 @@ class ProcessGenerator(object):
     generators = []
 
     def setUp(self):
-        shutil.rmtree(CONFIG_DIR)
-        os.makedirs(CONFIG_DIR)
+        utils.reset_dir(CONFIG_DIR)
 
     def _run_daemon(self, options={}, silent=False, options_only={},
-            overwrite={}):
+                    overwrite={}):
         '''Spawn an osquery daemon process'''
         global ARGS, CONFIG_NAME, CONFIG
         config = copy.deepcopy(CONFIG)
         config["options"]["database_path"] += str(random.randint(1000, 9999))
-        config["options"]["extensions_socket"] += str(random.randint(1000, 9999))
+        config["options"][
+            "extensions_socket"] += str(random.randint(1000, 9999))
         for option in options.keys():
             config["options"][option] = options[option]
         flags = ["--%s=%s" % (k, v) for k, v in config["options"].items()]
@@ -298,19 +318,21 @@ class ProcessGenerator(object):
         '''Spawn an osquery extension (example_extension)'''
         global ARGS, CONFIG
         config = copy.deepcopy(CONFIG)
-        config["options"]["extensions_socket"] += str(random.randint(1000, 9999))
+        config["options"][
+            "extensions_socket"] += str(random.randint(1000, 9999))
         binary = os.path.join(ARGS.build, "osquery", "example_extension.ext")
         if path is not None:
             config["options"]["extensions_socket"] = path
         extension = ProcRunner("extension",
-            binary,
-            [
-                "--socket=%s" % config["options"]["extensions_socket"],
-                "--verbose" if not silent else "",
-                "--timeout=%d" % timeout,
-                "--interval=%d" % 0,
-            ],
-            silent=silent)
+                               binary,
+                               [
+                                   "--socket=%s" % config["options"][
+                                       "extensions_socket"],
+                                   "--verbose" if not silent else "",
+                                   "--timeout=%d" % timeout,
+                                   "--interval=%d" % 0,
+                               ],
+                               silent=silent)
         self.generators.append(extension)
         extension.options = config["options"]
         return extension
@@ -330,7 +352,7 @@ class ProcessGenerator(object):
                     pass
 
 
-class EXClient:
+class EXClient(object):
     '''An osquery Thrift/extensions python client generator.'''
     transport = None
     '''The instance transport object.'''
@@ -390,6 +412,7 @@ class EXClient:
 
 class Autoloader(object):
     '''Helper class to write a module or extension autoload file.'''
+
     def __init__(self, autoloads=[]):
         global CONFIG_DIR
         self.path = CONFIG_DIR + "ext.load" + str(random.randint(1000, 9999))
@@ -402,21 +425,53 @@ class Autoloader(object):
         except:
             pass
 
+
 class TimeoutRunner(object):
+
     def __init__(self, cmd=[], timeout_sec=1):
         self.stdout = None
         self.stderr = None
-        self.proc = subprocess.Popen(" ".join(cmd),
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE)
+        self.proc = subprocess.Popen(cmd,
+                                     stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
         kill_proc = lambda p: p.kill()
         timer = threading.Timer(timeout_sec, kill_proc, [self.proc])
         timer.start()
         self.stdout, self.stderr = self.proc.communicate()
         timer.cancel()
 
+
+def flaky(gen):
+    exceptions = []
+    def attempt(this):
+        try:
+            worked = gen(this)
+            return True
+        except Exception as e:
+            import traceback
+            exc_type, exc_obj, tb = sys.exc_info()
+            exceptions.append(e)
+            print (traceback.format_tb(tb)[1])
+        return False
+    def wrapper(this):
+        for i in range(3):
+            if attempt(this):
+                return True
+        i = 1
+        for exc in exceptions:
+            print("Test (attempt %d) %s::%s failed: %s" % (
+                i,
+                this.__class__.__name__,
+                gen.__name__,  str(exc[0])))
+            i += 1
+        if len(exceptions) > 0:
+            raise exceptions[0]
+        return False
+    return wrapper
+
+
 class Tester(object):
+
     def __init__(self):
         global ARGS, CONFIG, CONFIG_DIR
         parser = argparse.ArgumentParser(description=(
@@ -439,19 +494,14 @@ class Tester(object):
         ARGS = parser.parse_args()
 
         if not os.path.exists(ARGS.build):
-            print ("Cannot find --build: %s" % ARGS.build)
-            print ("You must first run: make")
+            print("Cannot find --build: %s" % ARGS.build)
+            print("You must first run: make")
             exit(1)
 
         # Write config
         random.seed(time.time())
 
-        try:
-            shutil.rmtree(CONFIG_DIR)
-        except:
-            # Allow the tester to fail
-            pass
-        os.makedirs(CONFIG_DIR)
+        utils.reset_dir(CONFIG_DIR)
         CONFIG = read_config(ARGS.config) if ARGS.config else DEFAULT_CONFIG
 
     def run(self):
@@ -472,7 +522,7 @@ def expect(functional, expected, interval=0.01, timeout=4):
             if len(result) == expected:
                 break
         except Exception as e:
-            print ("Expect exception (%s): %s not %s" % (
+            print("Expect exception (%s): %s not %s" % (
                 str(e), str(functional), expected))
             return None
         if delay >= timeout:
@@ -480,6 +530,52 @@ def expect(functional, expected, interval=0.01, timeout=4):
         time.sleep(interval)
         delay += interval
     return result
+
+
+class QueryTester(ProcessGenerator, unittest.TestCase):
+
+    def setUp(self):
+        self.binary = os.path.join(ARGS.build, "osquery", "osqueryi")
+        self.daemon = self._run_daemon({
+            # The set of queries will hammer the daemon process.
+            "disable_watchdog": True,
+            # Enable the 'hidden' flag "registry_exceptions" to prevent
+            # catching.
+            "registry_exceptions": True,
+        })
+        self.assertTrue(self.daemon.isAlive())
+
+        # The sets of example tests will use the extensions APIs.
+        self.client = EXClient(self.daemon.options["extensions_socket"])
+        expectTrue(self.client.open)
+        self.assertTrue(self.client.open())
+        self.em = self.client.getEM()
+
+    def tearDown(self):
+        self.client.close()
+        self.daemon.kill()
+
+    def _execute(self, query):
+        try:
+            result = self.em.query(query)
+            self.assertEqual(result.status.code, 0)
+            return result.response
+        except Exception as e:
+            print("General exception executing query: %s" % (
+                utils.lightred(query)))
+            raise e
+
+    def _execute_set(self, queries):
+        for example in queries:
+            start_time = time.time()
+            result = self._execute(example)
+            end_time = time.time()
+            duration_ms = int((end_time - start_time) * 1000)
+            if duration_ms > 2000:
+                # Query took longer than 2 seconds.
+                duration_ms = utils.lightred(duration_ms)
+            print("Query (%sms): %s, rows: %d" % (
+                duration_ms, example, len(result)))
 
 
 def expectTrue(functional, interval=0.01, timeout=8):
@@ -496,22 +592,27 @@ def expectTrue(functional, interval=0.01, timeout=8):
 def assertPermissions():
     stat_info = os.stat('.')
     if stat_info.st_uid != os.getuid():
-        print (utils.lightred("Will not load modules/extensions in tests."))
-        print (utils.lightred("Repository owner (%d) executer (%d) mismatch" % (
+        print(utils.lightred("Will not load modules/extensions in tests."))
+        print(utils.lightred("Repository owner (%d) executer (%d) mismatch" % (
             stat_info.st_uid, os.getuid())))
         exit(1)
+
+
+def getTestDirectory(base):
+    path = os.path.join(base, "test-dir" + str(random.randint(1000, 9999)))
+    utils.reset_dir(path)
+    return path
 
 
 def loadThriftFromBuild(build_dir):
     '''Find and import the thrift-generated python interface.'''
     thrift_path = build_dir + "/generated/gen-py"
     try:
-        sys.path.append(thrift_path)
-        sys.path.append(thrift_path + "/osquery")
+        sys.path = [thrift_path, thrift_path + "/osquery"] + sys.path
         from osquery import ExtensionManager, Extension
         EXClient.setUp(ExtensionManager, Extension)
     except ImportError as e:
-        print ("Cannot import osquery thrift API from %s" % (thrift_path))
-        print ("Exception: %s" % (str(e)))
-        print ("You must first run: make")
+        print("Cannot import osquery thrift API from %s" % (thrift_path))
+        print("Exception: %s" % (str(e)))
+        print("You must first run: make")
         exit(1)

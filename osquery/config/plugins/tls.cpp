@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2014, Facebook, Inc.
+ *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
  *  This source code is licensed under the BSD-style license found in the
@@ -8,25 +8,33 @@
  *
  */
 
-#include <vector>
 #include <sstream>
+#include <vector>
 
 #include <boost/property_tree/ptree.hpp>
 
 #include <osquery/config.h>
+#include <osquery/dispatcher.h>
 #include <osquery/enroll.h>
 #include <osquery/flags.h>
 #include <osquery/registry.h>
 
+#include "osquery/core/conversions.h"
+#include "osquery/core/json.h"
 #include "osquery/remote/requests.h"
-#include "osquery/remote/transports/tls.h"
 #include "osquery/remote/serializers/json.h"
+#include "osquery/remote/utility.h"
 
-#define CONFIG_TLS_MAX_ATTEMPTS 3
+#include "osquery/config/plugins/tls.h"
 
 namespace pt = boost::property_tree;
 
 namespace osquery {
+
+CLI_FLAG(uint64,
+         config_tls_max_attempts,
+         3,
+         "Number of attempts to retry a TLS config/enroll request");
 
 /// Config retrieval TLS endpoint (path) using TLS hostname.
 CLI_FLAG(string,
@@ -34,58 +42,97 @@ CLI_FLAG(string,
          "",
          "TLS/HTTPS endpoint for config retrieval");
 
-class TLSConfigPlugin : public ConfigPlugin {
- public:
-  Status genConfig(std::map<std::string, std::string>& config);
-};
+/// Config polling/updating, only applies to TLS configurations.
+CLI_FLAG(uint64,
+         config_tls_refresh,
+         0,
+         "Optional interval in seconds to re-read configuration");
+
+DECLARE_bool(tls_secret_always);
+DECLARE_string(tls_enroll_override);
+DECLARE_bool(tls_node_api);
+DECLARE_bool(enroll_always);
 
 REGISTER(TLSConfigPlugin, "config", "tls");
 
-Status makeTLSConfigRequest(const std::string& uri, pt::ptree& output) {
-  // Make a request to the config endpoint, providing the node secret.
-  pt::ptree params;
-  params.put<std::string>("node_key", getNodeKey("tls"));
-
-  auto request = Request<TLSTransport, JSONSerializer>(uri);
-  auto status = request.call(params);
-  if (!status.ok()) {
-    return status;
+Status TLSConfigPlugin::setUp() {
+  if (FLAGS_enroll_always && !FLAGS_disable_enrollment) {
+    // clear any cached node key
+    clearNodeKey();
+    auto node_key = getNodeKey("tls");
+    if (node_key.size() == 0) {
+      // Could not generate a node key, continue logging to stderr.
+      return Status(1, "No node key, TLS config failed.");
+    }
   }
 
-  // The call succeeded, store the enrolled key.
-  status = request.getResponse(output);
-  if (!status.ok()) {
-    return status;
+  uri_ = TLSRequestHelper::makeURI(FLAGS_config_tls_endpoint);
+
+  // If the initial configuration includes a non-0 refresh, start an additional
+  // service that sleeps and periodically regenerates the configuration.
+  if (FLAGS_config_tls_refresh >= 1) {
+    Dispatcher::addService(std::make_shared<TLSConfigRefreshRunner>());
   }
 
-  // Receive config or key rejection
-  if (output.count("node_invalid") > 0) {
-    return Status(1, "Config retrieval failed: Invalid node key");
-  }
   return Status(0, "OK");
 }
 
 Status TLSConfigPlugin::genConfig(std::map<std::string, std::string>& config) {
-  auto uri = "https://" + FLAGS_tls_hostname + FLAGS_config_tls_endpoint;
-  VLOG(1) << "TLSConfigPlugin requesting a config from: " << uri;
+  std::string json;
 
-  pt::ptree recv;
-  for (size_t i = 1; i <= CONFIG_TLS_MAX_ATTEMPTS; i++) {
-    auto status = makeTLSConfigRequest(uri, recv);
-    if (status.ok()) {
-      std::stringstream ss;
-      write_json(ss, recv);
-      config["tls_plugin"] = ss.str();
-      return Status(0, "OK");
-    } else if (i == CONFIG_TLS_MAX_ATTEMPTS) {
-      break;
-    }
-
-    LOG(WARNING) << "Failed config retrieval from " << uri << " ("
-                 << status.what() << ") retrying...";
-    ::sleep(i * i);
+  pt::ptree params;
+  if (FLAGS_tls_node_api) {
+    // The TLS node API morphs some verbs and variables.
+    params.put("_get", true);
   }
 
-  return Status(1, "TLSConfigPlugin failed");
+  auto s = TLSRequestHelper::go<JSONSerializer>(
+      uri_, params, json, FLAGS_config_tls_max_attempts);
+  if (!s.ok()) {
+    return s;
+  }
+
+  if (FLAGS_tls_node_api) {
+    // The node API embeds configuration data (JSON escaped).
+    pt::ptree tree;
+    try {
+      std::stringstream input;
+      input << json;
+      pt::read_json(input, tree);
+    } catch (const pt::json_parser::json_parser_error& /* e */) {
+      VLOG(1) << "Could not parse JSON from TLS node API";
+    }
+
+    // Re-encode the config key into JSON.
+    config["tls_plugin"] = unescapeUnicode(tree.get("config", ""));
+  } else {
+    config["tls_plugin"] = json;
+  }
+  return s;
+}
+
+void TLSConfigRefreshRunner::start() {
+  while (!interrupted()) {
+    // Cool off and time wait the configured period.
+    // Apply this interruption initially as at t=0 the config was read.
+    pauseMilli(FLAGS_config_tls_refresh * 1000);
+    // Since the pause occurs before the logic, we need to check for an
+    // interruption request.
+    if (interrupted()) {
+      return;
+    }
+
+    // Access the configuration.
+    auto plugin = Registry::get("config", "tls");
+    if (plugin != nullptr) {
+      auto config_plugin = std::dynamic_pointer_cast<ConfigPlugin>(plugin);
+
+      // The config instance knows the TLS plugin is selected.
+      std::map<std::string, std::string> config;
+      if (config_plugin->genConfig(config)) {
+        Config::getInstance().update(config);
+      }
+    }
+  }
 }
 }
