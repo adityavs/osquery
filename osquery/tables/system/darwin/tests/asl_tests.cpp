@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <chrono>
@@ -19,6 +19,7 @@
 #include <osquery/filesystem.h>
 #include <osquery/sql.h>
 
+#include "osquery/core/conversions.h"
 #include "osquery/tables/system/darwin/asl_utils.h"
 #include "osquery/tests/test_util.h"
 
@@ -28,6 +29,10 @@ namespace osquery {
 namespace tables {
 
 class AslTests : public testing::Test {};
+
+// macOS ASL is deprecated in 10.12
+_Pragma("clang diagnostic push");
+_Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"");
 
 #ifndef OLD_ASL_API
 TEST_F(AslTests, test_add_query_op) {
@@ -169,8 +174,10 @@ TEST_F(AslTests, test_convert_like_regex) {
 
 TEST_F(AslTests, test_actual_query) {
   auto version = SQL::selectAllFrom("os_version");
-  if (version[0]["minor"] == "12") {
-    // MacOS Sierra does not support ASL.
+  unsigned long minor_version;
+  auto s = safeStrtoul(version[0]["minor"], 10, minor_version);
+  if (minor_version >= 12) {
+    // macOS Sierra and above do not support ASL.
     return;
   }
 
@@ -193,5 +200,7 @@ TEST_F(AslTests, test_actual_query) {
   ASSERT_EQ("osquery_test", results.rows()[0].at("sender"));
   ASSERT_EQ("user", results.rows()[0].at("facility"));
 }
+
+_Pragma("clang diagnostic pop");
 }
 }

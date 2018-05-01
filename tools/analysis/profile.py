@@ -3,9 +3,10 @@
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant
-#  of patent rights can be found in the PATENTS file in the same directory.
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -50,8 +51,8 @@ def check_leaks_linux(shell, query, count=1, supp_file=None):
         shell,
         "--profile",
         "%d" % count,
-        "--query",
         query,
+        "--disable_extensions",
     ]
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -122,7 +123,7 @@ def profile_leaks(shell, queries, count=1, rounds=1, supp_file=None):
                 if key == "indirectly":
                     output = utils.yellow(output)
                     report[name] = "WARNING"
-            else:
+            elif name not in report.keys():
                 report[name] = "SAFE"
             display.append("%s: %s" % (key, output))
         print("  %s" % "; ".join(display))
@@ -138,7 +139,8 @@ def run_query(shell, query, timeout=0, count=1):
         str(count),
         "--profile_delay",
         "1",
-        query
+        query,
+        "--disable_extensions",
     ], timeout=timeout, count=count)
 
 
@@ -339,6 +341,11 @@ if __name__ == "__main__":
             print("Cannot find --config: %s" % (args.config))
             exit(1)
         queries = utils.queries_from_config(args.config)
+        # Search queries in subdirectory ".d" based on the config filename
+        if os.path.isdir(args.config + ".d"):
+            for config_file in os.listdir(args.config + ".d"):
+                queries.update(utils.queries_from_config(os.path.join(
+                    args.config + ".d", config_file)))
     elif args.query is not None:
         queries["manual"] = args.query
     elif args.force:
@@ -370,3 +377,9 @@ if __name__ == "__main__":
             else:
                 fh.write(json.dumps(summary(results), indent=1))
         print("Wrote output summary: %s" % args.output)
+
+    if args.leaks:
+        for name in results.keys():
+            if results[name] != "SAFE":
+                sys.exit(1)
+    sys.exit(0)

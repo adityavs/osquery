@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <fcntl.h>
@@ -14,6 +14,8 @@
 
 #ifndef WIN32
 #include <grp.h>
+#include <netdb.h>
+#include <sys/socket.h>
 #endif
 
 #include <signal.h>
@@ -40,6 +42,7 @@
 #include <osquery/core.h>
 #include <osquery/database.h>
 #include <osquery/filesystem.h>
+#include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
@@ -55,10 +58,12 @@ namespace fs = boost::filesystem;
 
 namespace osquery {
 
+DECLARE_uint64(alarm_timeout);
+
 /// The path to the pidfile for osqueryd
 CLI_FLAG(string,
          pidfile,
-         OSQUERY_DB_HOME "/osqueryd.pidfile",
+         OSQUERY_PIDFILE "osqueryd.pidfile",
          "Path to the daemon pidfile mutex");
 
 /// Should the daemon force unload previously-running osqueryd daemons.
@@ -70,7 +75,14 @@ CLI_FLAG(bool,
 FLAG(string,
      host_identifier,
      "hostname",
-     "Field used to identify the host running osquery (hostname, uuid)");
+     "Field used to identify the host running osquery (hostname, uuid, "
+     "instance, ephemeral, specified)");
+
+// Only used when host_identifier=specified
+FLAG(string,
+     specified_identifier,
+     "",
+     "Field used to specify the host_identifier when set to \"specified\"");
 
 FLAG(bool, utc, true, "Convert all UNIX times to UTC");
 
@@ -87,27 +99,58 @@ struct tm* localtime_r(time_t* t, struct tm* result) {
 #endif
 
 std::string getHostname() {
-#ifdef WIN32
-  long size = 256;
-#else
+  long max_path = 256;
+  long size = 0;
+#ifndef WIN32
   static long max_hostname = sysconf(_SC_HOST_NAME_MAX);
-  long size = (max_hostname > 255) ? max_hostname + 1 : 256;
+  size = (max_hostname > max_path - 1) ? max_hostname + 1 : max_path;
 #endif
-  char* hostname = (char*)malloc(size);
-  std::string hostname_string;
-  if (hostname != nullptr) {
-    memset((void*)hostname, 0, size);
-    gethostname(hostname, size - 1);
-    hostname_string = std::string(hostname);
-    free(hostname);
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    size = max_path;
   }
 
+  std::vector<char> hostname(size, 0x0);
+  std::string hostname_string;
+  if (hostname.data() != nullptr) {
+    gethostname(hostname.data(), size - 1);
+    hostname_string = std::string(hostname.data());
+  }
   boost::algorithm::trim(hostname_string);
   return hostname_string;
 }
 
+std::string getFqdn() {
+  if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+    std::string fqdn_string = getHostname();
+
+#ifndef WIN32
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_flags = AI_CANONNAME;
+
+    struct addrinfo* res = nullptr;
+    if (getaddrinfo(fqdn_string.c_str(), nullptr, &hints, &res) == 0) {
+      if (res->ai_canonname != nullptr) {
+        fqdn_string = res->ai_canonname;
+      }
+    }
+    if (res != nullptr) {
+      freeaddrinfo(res);
+    }
+#endif
+    return fqdn_string;
+  } else {
+    unsigned long size = 256;
+    std::vector<char> fqdn(size, 0x0);
+#ifdef WIN32
+    GetComputerNameEx(ComputerNameDnsFullyQualified, fqdn.data(), &size);
+#endif
+    return fqdn.data();
+  }
+}
+
 std::string generateNewUUID() {
-  LOG(INFO) << "Cannot retrieve platform UUID: generating an ephemeral UUID";
   boost::uuids::uuid uuid = boost::uuids::random_generator()();
   return boost::uuids::to_string(uuid);
 }
@@ -145,7 +188,28 @@ std::string generateHostUUID() {
   }
 
   // Unable to get the hardware UUID, just return a new UUID
+  VLOG(1) << "Failed to read system uuid, returning ephemeral uuid";
   return generateNewUUID();
+}
+
+Status getInstanceUUID(std::string& ident) {
+  // Lookup the instance identifier (UUID) previously generated and stored.
+  auto status =
+      getDatabaseValue(kPersistentSettings, "instance_uuid_v1", ident);
+  if (ident.size() == 0) {
+    // There was no UUID stored in the database, generate one and store it.
+    ident = osquery::generateNewUUID();
+    return setDatabaseValue(kPersistentSettings, "instance_uuid_v1", ident);
+  }
+
+  return status;
+}
+
+Status getEphemeralUUID(std::string& ident) {
+  if (ident.size() == 0) {
+    ident = osquery::generateNewUUID();
+  }
+  return Status(0, "OK");
 }
 
 Status getHostUUID(std::string& ident) {
@@ -154,25 +218,70 @@ Status getHostUUID(std::string& ident) {
   if (ident.size() == 0) {
     // There was no UUID stored in the database, generate one and store it.
     ident = osquery::generateHostUUID();
-    VLOG(1) << "Using UUID " << ident << " as host identifier";
     return setDatabaseValue(kPersistentSettings, "host_uuid_v3", ident);
   }
-
   return status;
 }
 
-std::string getHostIdentifier() {
-  if (FLAGS_host_identifier != "uuid") {
-    // use the hostname as the default machine identifier
-    return osquery::getHostname();
+Status getSpecifiedUUID(std::string& ident) {
+  if (FLAGS_specified_identifier.empty()) {
+    return Status(1, "No specified identifier for host");
   }
+  ident = FLAGS_specified_identifier;
+  return Status(0, "OK");
+}
 
-  // Generate a identifier/UUID for this application launch, and persist.
+std::string getHostIdentifier() {
   static std::string ident;
+
+  Status result(2);
   if (ident.size() == 0) {
-    getHostUUID(ident);
+    // The identifier has not been set yet.
+    if (FLAGS_host_identifier == "uuid") {
+      result = getHostUUID(ident);
+    } else if (FLAGS_host_identifier == "instance") {
+      result = getInstanceUUID(ident);
+    } else if (FLAGS_host_identifier == "ephemeral") {
+      result = getEphemeralUUID(ident);
+    } else if (FLAGS_host_identifier == "specified") {
+      result = getSpecifiedUUID(ident);
+    }
+
+    if (!result.ok()) {
+      // assuming the default of "hostname" as the machine identifier
+      // intentionally not set to `ident` because the hostname may change
+      // throughout the life of the process and we always want to be using the
+      // most current hostname
+      return osquery::getHostname();
+    } else {
+      VLOG(1) << "Using host identifier: " << ident;
+    }
   }
   return ident;
+}
+
+std::string toAsciiTime(const struct tm* tm_time) {
+  if (tm_time == nullptr) {
+    return "";
+  }
+
+  auto time_str = platformAsctime(tm_time);
+  boost::algorithm::trim(time_str);
+  return time_str + " UTC";
+}
+
+std::string toAsciiTimeUTC(const struct tm* tm_time) {
+  size_t epoch = toUnixTime(tm_time);
+  struct tm tptr;
+
+  memset(&tptr, 0, sizeof(tptr));
+
+  if (epoch == (size_t)-1) {
+    return "";
+  }
+
+  gmtime_r((time_t*)&epoch, &tptr);
+  return toAsciiTime(&tptr);
 }
 
 std::string getAsciiTime() {
@@ -181,13 +290,20 @@ std::string getAsciiTime() {
   struct tm now;
   gmtime_r(&result, &now);
 
-  auto time_str = platformAsctime(&now);
-  boost::algorithm::trim(time_str);
-  return time_str + " UTC";
+  return toAsciiTime(&now);
+}
+
+size_t toUnixTime(const struct tm* tm_time) {
+  struct tm result;
+  memset(&result, 0, sizeof(result));
+
+  memcpy(&result, tm_time, sizeof(result));
+  return mktime(&result);
 }
 
 size_t getUnixTime() {
-  return std::time(nullptr);
+  std::time_t ut = std::time(nullptr);
+  return ut < 0 ? 0 : ut;
 }
 
 Status checkStalePid(const std::string& content) {
@@ -207,7 +323,7 @@ Status checkStalePid(const std::string& content) {
   query_text << "SELECT name FROM processes WHERE pid = " << pid
              << " AND name LIKE 'osqueryd%';";
 
-  auto q = SQL(query_text.str());
+  SQL q(query_text.str());
   if (!q.ok()) {
     return Status(1, "Error querying processes: " + q.getMessageString());
   }
@@ -225,8 +341,7 @@ Status checkStalePid(const std::string& content) {
 
     return Status(1, "osqueryd (" + content + ") is already running");
   } else {
-    VLOG(1) << "Found stale process for osqueryd (" << content
-            << ") removing pidfile";
+    VLOG(1) << "Found stale process for osqueryd (" << content << ")";
   }
 
   return Status(0, "OK");
@@ -251,66 +366,108 @@ Status createPidFile() {
   }
 
   // Now the pidfile is either the wrong pid or the pid is not running.
-  try {
-    boost::filesystem::remove(pidfile_path);
-  } catch (const boost::filesystem::filesystem_error& /* e */) {
+  if (!removePath(pidfile_path)) {
     // Unable to remove old pidfile.
     LOG(WARNING) << "Unable to remove the osqueryd pidfile";
   }
 
   // If no pidfile exists or the existing pid was stale, write, log, and run.
-  auto pid = boost::lexical_cast<std::string>(
-      PlatformProcess::getCurrentProcess()->pid());
+  auto pid = std::to_string(PlatformProcess::getCurrentPid());
   VLOG(1) << "Writing osqueryd pid (" << pid << ") to "
           << pidfile_path.string();
   auto status = writeTextFile(pidfile_path, pid, 0644);
   return status;
 }
 
-#ifndef WIN32
-
-bool ownerFromResult(const QueryData& result, long& uid, long& gid) {
-  if (result.empty()) {
+bool PlatformProcess::cleanup() const {
+  if (!isValid()) {
     return false;
   }
 
-  if (!safeStrtol(result[0].at("uid"), 10, uid) ||
-      !safeStrtol(result[0].at("gid"), 10, gid)) {
+  size_t delay = 0;
+  size_t timeout = (FLAGS_alarm_timeout + 1) * 1000;
+  while (delay < timeout) {
+    int status = 0;
+    if (checkStatus(status) == PROCESS_EXITED) {
+      return true;
+    }
+
+    sleepFor(200);
+    delay += 200;
+  }
+  // The requested process did not exit.
+  return false;
+}
+
+#ifndef WIN32
+
+static inline bool ownerFromResult(const Row& row, long& uid, long& gid) {
+  if (!safeStrtol(row.at("uid"), 10, uid) ||
+      !safeStrtol(row.at("gid"), 10, gid)) {
     return false;
   }
   return true;
 }
 
 bool DropPrivileges::dropToParent(const fs::path& path) {
-  auto result =
-      SQL::selectAllFrom("file", "path", EQUALS, path.parent_path().string());
+  auto parent = path.parent_path().string();
+  auto result = SQL::selectAllFrom("file", "path", EQUALS, parent);
+  if (result.empty()) {
+    return false;
+  }
+
+  if (result.front().at("symlink") == "1") {
+    // The file is a symlink, inspect the owner of the link.
+    struct stat link_stat;
+    if (lstat(parent.c_str(), &link_stat) != 0) {
+      return false;
+    }
+
+    return dropTo(link_stat.st_uid, link_stat.st_gid);
+  }
 
   long uid = 0;
   long gid = 0;
-  if (!ownerFromResult(result, uid, gid)) {
+  if (!ownerFromResult(result.front(), uid, gid)) {
     return false;
   }
+
   return dropTo(static_cast<uid_t>(uid), static_cast<gid_t>(gid));
 }
 
 bool DropPrivileges::dropTo(const std::string& user) {
   auto result = SQL::selectAllFrom("users", "username", EQUALS, user);
+  if (result.empty()) {
+    return false;
+  }
 
   long uid = 0;
   long gid = 0;
-  if (!ownerFromResult(result, uid, gid)) {
+  if (!ownerFromResult(result.front(), uid, gid)) {
     return false;
   }
+
   return dropTo(static_cast<uid_t>(uid), static_cast<gid_t>(gid));
 }
 
 bool setThreadEffective(uid_t uid, gid_t gid) {
-#ifdef __APPLE__
+#if defined(__APPLE__)
   return (pthread_setugid_np(uid, gid) == 0);
-#else
+#elif defined(__linux__)
   return (syscall(SYS_setresgid, -1, gid, -1) == 0 &&
           syscall(SYS_setresuid, -1, uid, -1) == 0);
 #endif
+  return 0;
+}
+
+bool DropPrivileges::dropTo(const std::string& uid, const std::string& gid) {
+  unsigned long int _uid = 0;
+  unsigned long int _gid = 0;
+  if (!safeStrtoul(uid, 10, _uid).ok() || !safeStrtoul(gid, 10, _gid).ok() ||
+      !dropTo(static_cast<uid_t>(_uid), static_cast<gid_t>(_gid))) {
+    return false;
+  }
+  return true;
 }
 
 bool DropPrivileges::dropTo(uid_t uid, gid_t gid) {
@@ -330,8 +487,10 @@ bool DropPrivileges::dropTo(uid_t uid, gid_t gid) {
   }
 
   group_size_ = getgroups(0, nullptr);
-  original_groups_ = (gid_t*)malloc(group_size_ * sizeof(gid_t));
-  group_size_ = getgroups(group_size_, original_groups_);
+  if (group_size_ > 0) {
+    original_groups_ = (gid_t*)malloc(group_size_ * sizeof(gid_t));
+    group_size_ = getgroups(group_size_, original_groups_);
+  }
   setgroups(1, &gid);
 
   if (!setThreadEffective(uid, gid)) {
@@ -347,27 +506,29 @@ bool DropPrivileges::dropTo(uid_t uid, gid_t gid) {
 }
 
 void DropPrivileges::restoreGroups() {
-  setgroups(group_size_, original_groups_);
-  group_size_ = 0;
-  free(original_groups_);
+  if (group_size_ > 0) {
+    setgroups(group_size_, original_groups_);
+    group_size_ = 0;
+    free(original_groups_);
+  }
   original_groups_ = nullptr;
-  }
-
-  DropPrivileges::~DropPrivileges() {
-    // We are elevating privileges, there is no security vulnerability if
-    // either privilege change fails.
-    if (dropped_) {
-#ifdef __APPLE__
-      setThreadEffective(KAUTH_UID_NONE, KAUTH_GID_NONE);
-#else
-      setThreadEffective(getuid(), getgid());
-#endif
-      dropped_ = false;
-    }
-
-    if (original_groups_ != nullptr) {
-      restoreGroups();
-    }
-  }
-#endif
 }
+
+DropPrivileges::~DropPrivileges() {
+  // We are elevating privileges, there is no security vulnerability if
+  // either privilege change fails.
+  if (dropped_) {
+#ifdef __APPLE__
+    setThreadEffective(KAUTH_UID_NONE, KAUTH_GID_NONE);
+#else
+    setThreadEffective(getuid(), getgid());
+#endif
+    dropped_ = false;
+  }
+
+  if (original_groups_ != nullptr) {
+    restoreGroups();
+  }
+}
+#endif
+} // namespace osquery

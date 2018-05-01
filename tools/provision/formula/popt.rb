@@ -3,22 +3,24 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 class Popt < AbstractOsqueryFormula
   desc "Library like getopt(3) with a number of enhancements"
   homepage "http://rpm5.org"
+  license "X11"
   url "http://rpm5.org/files/popt/popt-1.16.tar.gz"
   sha256 "e728ed296fe9f069a0e005003c3d6b2dde3d9cad453422a10d6558616d304cc8"
-  revision 1
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "17e701881a808c8b5de4fcce727a101addaa07db2a673accb1387c7def606fb9" => :x86_64_linux
+    sha256 "9ce9ed60a436613a9b0f5ef5f8626bb7e697258ade9fc269631ae402362a8df2" => :sierra
+    sha256 "4a558a63baba5636d839c7cd6946c19a1a92471430709250bf2bccc5caa79c4d" => :x86_64_linux
   end
 
-  option :universal
-
   def install
-    ENV.universal_binary if build.universal?
-    system "./configure", "--disable-debug", "--disable-dependency-tracking",
-                          "--prefix=#{prefix}"
+    system "./configure", "--disable-debug",
+                          "--disable-dependency-tracking",
+                          "--prefix=#{prefix}",
+                          "--disable-shared",
+                          "--enable-static"
     system "make", "install"
   end
 end

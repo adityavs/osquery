@@ -1,38 +1,51 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
+
+#include <thread>
 
 #include <gtest/gtest.h>
 
 #include <osquery/core.h>
+#include <osquery/filesystem.h>
 #include <osquery/logger.h>
+
+DECLARE_int32(minloglevel);
+DECLARE_int32(stderrthreshold);
 
 namespace osquery {
 
+DECLARE_int32(logger_min_status);
 DECLARE_bool(logger_secondary_status_only);
+DECLARE_bool(logger_status_sync);
+DECLARE_bool(logger_event_type);
+DECLARE_bool(logger_snapshot_event_type);
+DECLARE_bool(disable_logging);
 
 class LoggerTests : public testing::Test {
  public:
-  void SetUp() {
+  void SetUp() override {
     // Backup the logging status, then disable.
     logging_status_ = FLAGS_disable_logging;
     FLAGS_disable_logging = false;
+    FLAGS_logger_status_sync = true;
 
     // Setup / initialize static members.
     log_lines.clear();
     status_messages.clear();
     statuses_logged = 0;
-    last_status = {O_INFO, "", -1, ""};
+    last_status = {O_INFO, "", 10, "", "cal_time", 0, "host"};
   }
 
-  void TearDown() {
+  void TearDown() override {
     FLAGS_disable_logging = logging_status_;
+    FLAGS_logger_status_sync = false;
   }
 
   // Track lines emitted to logString
@@ -118,8 +131,9 @@ class TestLoggerPlugin : public LoggerPlugin {
 };
 
 TEST_F(LoggerTests, test_plugin) {
-  Registry::add<TestLoggerPlugin>("logger", "test");
-  Registry::setUp();
+  auto& rf = RegistryFactory::get();
+  rf.registry("logger")->add("test", std::make_shared<TestLoggerPlugin>());
+  rf.setUp();
 
   auto s = Registry::call("logger", "test", {{"string", "foobar"}});
   EXPECT_TRUE(s.ok());
@@ -127,9 +141,10 @@ TEST_F(LoggerTests, test_plugin) {
 }
 
 TEST_F(LoggerTests, test_logger_init) {
+  auto& rf = RegistryFactory::get();
   // Expect the logger to have been registered from the first test.
-  EXPECT_TRUE(Registry::exists("logger", "test"));
-  EXPECT_TRUE(Registry::setActive("logger", "test").ok());
+  EXPECT_TRUE(rf.exists("logger", "test"));
+  EXPECT_TRUE(rf.setActive("logger", "test").ok());
 
   initStatusLogger("logger_test");
   // This will be printed to stdout.
@@ -164,16 +179,59 @@ TEST_F(LoggerTests, test_log_string) {
 }
 
 TEST_F(LoggerTests, test_logger_log_status) {
+  std::string warning = "Logger test is generating a warning status (2)";
+  auto now = getUnixTime();
   // This will be printed to stdout.
-  LOG(WARNING) << "Logger test is generating a warning status (2)";
+  LOG(WARNING) << warning;
 
   // The second warning status will be sent to the logger plugin.
   EXPECT_EQ(1U, LoggerTests::statuses_logged);
+
+  EXPECT_EQ(O_WARNING, LoggerTests::last_status.severity);
+  EXPECT_GT(LoggerTests::last_status.line, 0U);
+  EXPECT_EQ(warning, LoggerTests::last_status.message);
+  EXPECT_GE(now, LoggerTests::last_status.time);
+  EXPECT_EQ(getHostIdentifier(), LoggerTests::last_status.identifier);
+}
+
+TEST_F(LoggerTests, test_logger_status_level) {
+  auto minloglevel = FLAGS_minloglevel;
+  FLAGS_minloglevel = 0;
+  // This will be printed to stdout.
+  LOG(INFO) << "Logger test is generating an info status";
+  EXPECT_EQ(1U, LoggerTests::statuses_logged);
+
+  FLAGS_minloglevel = 1;
+  setVerboseLevel();
+
+  LOG(INFO) << "Logger test is generating an info status";
+  EXPECT_EQ(1U, LoggerTests::statuses_logged);
+  LOG(WARNING) << "Logger test is generating a warning status";
+  EXPECT_EQ(2U, LoggerTests::statuses_logged);
+  FLAGS_minloglevel = minloglevel;
+
+  auto stderrthreshold = FLAGS_stderrthreshold;
+  FLAGS_stderrthreshold = 2;
+  setVerboseLevel();
+
+  LOG(WARNING) << "Logger test is generating a warning status";
+  EXPECT_EQ(3U, LoggerTests::statuses_logged);
+  FLAGS_stderrthreshold = stderrthreshold;
+
+  auto logger_min_status = FLAGS_logger_min_status;
+  FLAGS_logger_min_status = 1;
+  setVerboseLevel();
+
+  LOG(INFO) << "Logger test is generating an info status";
+  EXPECT_EQ(3U, LoggerTests::statuses_logged);
+  LOG(WARNING) << "Logger test is generating a warning status";
+  EXPECT_EQ(4U, LoggerTests::statuses_logged);
+  FLAGS_logger_min_status = logger_min_status;
 }
 
 TEST_F(LoggerTests, test_feature_request) {
   // Retrieve the test logger plugin.
-  auto plugin = Registry::get("logger", "test");
+  auto plugin = RegistryFactory::get().plugin("logger", "test");
   auto logger = std::dynamic_pointer_cast<TestLoggerPlugin>(plugin);
 
   logger->shouldLogEvent = false;
@@ -188,7 +246,7 @@ TEST_F(LoggerTests, test_feature_request) {
 
 TEST_F(LoggerTests, test_logger_variations) {
   // Retrieve the test logger plugin.
-  auto plugin = Registry::get("logger", "test");
+  auto plugin = RegistryFactory::get().plugin("logger", "test");
   auto logger = std::dynamic_pointer_cast<TestLoggerPlugin>(plugin);
   // Change the behavior.
   logger->shouldLogStatus = false;
@@ -219,6 +277,16 @@ TEST_F(LoggerTests, test_logger_snapshots) {
 
   // Expect the plugin to optionally handle snapshot logging.
   EXPECT_EQ(1U, LoggerTests::snapshot_rows_added);
+
+  // Expect a single event, event though there were two added.
+  item.results.added.push_back({{"test_column", "test_value"}});
+  logSnapshotQuery(item);
+  EXPECT_EQ(2U, LoggerTests::snapshot_rows_added);
+
+  FLAGS_logger_snapshot_event_type = true;
+  logSnapshotQuery(item);
+  EXPECT_EQ(4U, LoggerTests::snapshot_rows_added);
+  FLAGS_logger_snapshot_event_type = false;
 }
 
 class SecondTestLoggerPlugin : public LoggerPlugin {
@@ -245,8 +313,14 @@ class SecondTestLoggerPlugin : public LoggerPlugin {
 };
 
 TEST_F(LoggerTests, test_multiple_loggers) {
-  Registry::add<SecondTestLoggerPlugin>("logger", "second_test");
-  EXPECT_TRUE(Registry::setActive("logger", "test,second_test").ok());
+  auto& rf = RegistryFactory::get();
+  auto second = std::make_shared<SecondTestLoggerPlugin>();
+  rf.registry("logger")->add("second_test", second);
+  EXPECT_TRUE(rf.setActive("logger", "test,second_test").ok());
+
+  auto test_plugin = rf.registry("logger")->plugin("test");
+  auto test_logger = std::dynamic_pointer_cast<TestLoggerPlugin>(test_plugin);
+  test_logger->shouldLogStatus = false;
 
   // With two active loggers, the string should be added twice.
   logString("this is a test", "added");
@@ -259,12 +333,11 @@ TEST_F(LoggerTests, test_multiple_loggers) {
   EXPECT_EQ(0U, LoggerTests::statuses_logged);
 
   // Now try to initialize multiple loggers (1) forwards, (2) does not.
-  Registry::setActive("logger", "test,second_test");
   initLogger("logger_test");
   LOG(WARNING) << "Logger test is generating a warning status (5)";
   // Now that the "test" logger is initialized, the status log will be
   // forwarded.
-  EXPECT_EQ(2U, LoggerTests::statuses_logged);
+  EXPECT_EQ(1U, LoggerTests::statuses_logged);
 
   // Multiple logger plugins have a 'primary' concept.
   auto flag_default = FLAGS_logger_secondary_status_only;
@@ -272,35 +345,138 @@ TEST_F(LoggerTests, test_multiple_loggers) {
   logString("this is another test", "added");
   // Only one log line will be appended since 'second_test' is secondary.
   EXPECT_EQ(3U, LoggerTests::log_lines.size());
-  // However, again, 2 status lines will be forwarded.
+  // Only one status line will be forwarded.
   LOG(WARNING) << "Logger test is generating another warning (6)";
-  EXPECT_EQ(4U, LoggerTests::statuses_logged);
+  EXPECT_EQ(2U, LoggerTests::statuses_logged);
   FLAGS_logger_secondary_status_only = flag_default;
   logString("this is a third test", "added");
   EXPECT_EQ(5U, LoggerTests::log_lines.size());
+
+  // Reconfigure the second logger to forward status logs.
+  test_logger->shouldLogStatus = true;
+  initLogger("logger_test");
+  LOG(WARNING) << "Logger test is generating another warning (7)";
+  EXPECT_EQ(4U, LoggerTests::statuses_logged);
 }
 
 TEST_F(LoggerTests, test_logger_scheduled_query) {
-  Registry::setActive("logger", "test");
+  RegistryFactory::get().setActive("logger", "test");
+  initLogger("scheduled_query");
 
   QueryLogItem item;
   item.name = "test_query";
   item.identifier = "unknown_test_host";
   item.time = 0;
   item.calendar_time = "no_time";
+  item.epoch = 0L;
+  item.counter = 0L;
   item.results.added.push_back({{"test_column", "test_value"}});
   logQueryLogItem(item);
   EXPECT_EQ(1U, LoggerTests::log_lines.size());
 
+  // The entire removed/added is one event when result events is false.
+  FLAGS_logger_event_type = false;
   item.results.removed.push_back({{"test_column", "test_new_value\n"}});
   logQueryLogItem(item);
-  ASSERT_EQ(3U, LoggerTests::log_lines.size());
+  EXPECT_EQ(2U, LoggerTests::log_lines.size());
+  FLAGS_logger_event_type = true;
+
+  // Now the two removed will be individual events.
+  logQueryLogItem(item);
+  ASSERT_EQ(4U, LoggerTests::log_lines.size());
 
   // Make sure the JSON output does not have a newline.
   std::string expected =
       "{\"name\":\"test_query\",\"hostIdentifier\":\"unknown_test_host\","
-      "\"calendarTime\":\"no_time\",\"unixTime\":\"0\",\"columns\":{\"test_"
-      "column\":\"test_value\"},\"action\":\"added\"}";
+      "\"calendarTime\":\"no_time\",\"unixTime\":0,\"epoch\":0,"
+      "\"counter\":0,\"columns\":{\"test_column\":\"test_value\"},"
+      "\"action\":\"added\"}";
   EXPECT_EQ(LoggerTests::log_lines.back(), expected);
+}
+
+class RecursiveLoggerPlugin : public LoggerPlugin {
+ protected:
+  bool usesLogStatus() override {
+    return true;
+  }
+
+  Status logString(const std::string& s) override {
+    return Status(0, s);
+  }
+
+  void init(const std::string& name,
+            const std::vector<StatusLogLine>& log) override {
+    logStatus(log);
+  }
+
+  Status logStatus(const std::vector<StatusLogLine>& log) override {
+    for (const auto& item : log) {
+      if (item.message == "recurse") {
+        LOG(WARNING) << "Logging a status withing a status logger";
+      }
+      statuses++;
+    }
+    return Status(0, "OK");
+  }
+
+  Status logSnapshot(const std::string& s) override {
+    return Status(0, "OK");
+  }
+
+ public:
+  size_t statuses{0};
+};
+
+TEST_F(LoggerTests, test_recursion) {
+  // Stop the internal Glog facilities.
+  google::ShutdownGoogleLogging();
+
+  auto& rf = RegistryFactory::get();
+  auto plugin = std::make_shared<RecursiveLoggerPlugin>();
+  rf.registry("logger")->add("recurse", plugin);
+  EXPECT_TRUE(rf.exists("logger", "recurse"));
+  EXPECT_TRUE(rf.setActive("logger", "recurse").ok());
+
+  FLAGS_logtostderr = true;
+  initStatusLogger("logger_test");
+  initLogger("logger_test");
+  LOG(WARNING) << "Log to the recursive logger";
+  EXPECT_EQ(1U, plugin->statuses);
+
+  FLAGS_logger_status_sync = false;
+  LOG(WARNING) << "recurse";
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    for (size_t i = 0; i < 100; i++) {
+      std::this_thread::sleep_for(std::chrono::microseconds(10));
+      if (plugin->statuses == 3U) {
+        break;
+      }
+    }
+  }
+  EXPECT_EQ(3U, plugin->statuses);
+
+  // Try again with the tool type as a daemon.
+  auto tool_type = kToolType;
+  kToolType = ToolType::DAEMON;
+  LOG(WARNING) << "recurse";
+
+  // The daemon calls the status relay within the scheduler.
+  EXPECT_EQ(3U, plugin->statuses);
+
+  // All of recursive log lines will sink during the next call.
+  relayStatusLogs(true);
+  EXPECT_EQ(4U, plugin->statuses);
+  relayStatusLogs(true);
+  EXPECT_EQ(5U, plugin->statuses);
+  kToolType = tool_type;
+
+  EXPECT_EQ(0U, queuedStatuses());
+  EXPECT_EQ(0U, queuedSenders());
+
+  // Make sure the test file does not create a filesystem log.
+  // This will happen if the logtostderr is not set.
+  EXPECT_FALSE(pathExists("logger_test.INFO"));
+
+  FLAGS_logtostderr = false;
 }
 }

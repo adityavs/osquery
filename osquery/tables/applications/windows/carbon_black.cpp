@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -26,7 +26,7 @@ namespace osquery {
 namespace tables {
 
 // Carbon Black registry path
-#define kCbRegLoc "SOFTWARE\\CarbonBlack\\config"
+const std::string kCbRegLoc = "SOFTWARE\\CarbonBlack\\config";
 
 void getQueue(Row& r) {
   fs::path cbDir = getSystemRoot();
@@ -54,7 +54,7 @@ void getQueue(Row& r) {
 
 void getSettings(Row& r) {
   QueryData results;
-  queryKey("HKEY_LOCAL_MACHINE", kCbRegLoc, results);
+  queryKey("HKEY_LOCAL_MACHINE\\" + kCbRegLoc, results);
   for (const auto& kKey : results) {
     if (kKey.at("name") == "CollectCrossProcess") {
       r["collect_cross_processes"] = SQL_TEXT(kKey.at("data"));

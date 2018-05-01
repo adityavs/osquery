@@ -1,20 +1,20 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 
-#include <osquery/hash.h>
 #include <osquery/tables.h>
 
 #include "osquery/core/conversions.h"
+#include "osquery/tables/system/hash.h"
 
 namespace osquery {
 namespace tables {
@@ -22,18 +22,16 @@ namespace tables {
 #define kIOACPIClassName_ "AppleACPIPlatformExpert"
 #define kIOACPIPropertyName_ "ACPI Tables"
 
-void genACPITable(const void *key, const void *value, void *results) {
+void genACPITable(const void* key, const void* value, void* results) {
   Row r;
-
-  r["name"] = stringFromCFString((CFStringRef)key);
-
   auto data = (CFDataRef)value;
   auto length = CFDataGetLength(data);
-  r["size"] = INTEGER(length);
-  r["md5"] =
-      osquery::hashFromBuffer(HASH_TYPE_MD5, CFDataGetBytePtr(data), length);
 
-  ((QueryData *)results)->push_back(r);
+  r["name"] = stringFromCFString((CFStringRef)key);
+  r["size"] = INTEGER(length);
+  r["md5"] = hashFromBuffer(HASH_TYPE_MD5, CFDataGetBytePtr(data), length);
+
+  ((QueryData*)results)->push_back(r);
 }
 
 QueryData genACPITables(QueryContext& context) {

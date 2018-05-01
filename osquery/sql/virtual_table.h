@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -35,6 +35,7 @@ extern RecursiveMutex kAttachMutex;
  * Only used in the SQLite virtual table module methods.
  */
 struct BaseCursor : private boost::noncopyable {
+ public:
   /// SQLite virtual table cursor.
   sqlite3_vtab_cursor base;
 
@@ -43,6 +44,15 @@ struct BaseCursor : private boost::noncopyable {
 
   /// Table data generated from last access.
   QueryData data;
+
+  /// Callable generator.
+  std::unique_ptr<RowGenerator::pull_type> generator{nullptr};
+
+  /// Results of current call.
+  Row current;
+
+  /// Does the backing local table use a generator type.
+  bool uses_generator{false};
 
   /// Current cursor position.
   size_t row{0};
@@ -62,25 +72,30 @@ struct VirtualTable : private boost::noncopyable {
   sqlite3_vtab base;
 
   /// Added structure: A content structure with metadata about the table.
-  VirtualTableContent *content{nullptr};
+  VirtualTableContent* content{nullptr};
 
   /// Added structure: The thread-local DB instance associated with the query.
-  SQLiteDBInstance *instance{nullptr};
+  SQLiteDBInstance* instance{nullptr};
 };
 
 /// Attach a table plugin name to an in-memory SQLite database.
-Status attachTableInternal(const std::string &name,
-                           const std::string &statement,
-                           const SQLiteDBInstanceRef &instance);
+Status attachTableInternal(const std::string& name,
+                           const std::string& statement,
+                           const SQLiteDBInstanceRef& instance);
 
 /// Detach (drop) a table.
-Status detachTableInternal(const std::string &name, sqlite3 *db);
+Status detachTableInternal(const std::string& name,
+                           const SQLiteDBInstanceRef& instance);
 
 Status attachFunctionInternal(
-    const std::string &name,
+    const std::string& name,
     std::function<
-        void(sqlite3_context *context, int argc, sqlite3_value **argv)> func);
+        void(sqlite3_context* context, int argc, sqlite3_value** argv)> func);
 
+/// Attach all table plugins to an in-memory SQLite database.
+void attachVirtualTables(const SQLiteDBInstanceRef& instance);
+
+#if !defined(OSQUERY_EXTERNAL)
 /**
  * A generated foreign amalgamation file includes schema for all tables.
  *
@@ -90,7 +105,5 @@ Status attachFunctionInternal(
  * their filter generation functions.
  */
 void registerForeignTables();
-
-/// Attach all table plugins to an in-memory SQLite database.
-void attachVirtualTables(const SQLiteDBInstanceRef &instance);
+#endif
 }

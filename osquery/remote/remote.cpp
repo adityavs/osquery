@@ -1,15 +1,15 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
-#include <string>
 #include <cstring>
+#include <string>
 
 #include <zlib.h>
 
@@ -41,7 +41,7 @@ std::string compressString(const std::string& data) {
     char buffer[16384] = {0};
     while (ret == Z_OK) {
       zs.next_out = reinterpret_cast<Bytef*>(buffer);
-      zs.avail_out = sizeof(output);
+      zs.avail_out = sizeof(buffer);
 
       ret = deflate(&zs, Z_FINISH);
       if (output.size() < zs.total_out) {

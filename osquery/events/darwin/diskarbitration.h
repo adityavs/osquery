@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -34,7 +34,7 @@ struct DiskArbitrationEventContext : public EventContext {
   std::string path;
   std::string device_path;
   std::string name;
-  std::string bsd_name;
+  std::string device;
   std::string uuid;
   std::string size;
   std::string ejectable;
@@ -63,28 +63,28 @@ class DiskArbitrationEventPublisher
 
   void tearDown() override;
 
-  bool shouldFire(const DiskArbitrationSubscriptionContextRef &sc,
-                  const DiskArbitrationEventContextRef &ec) const override;
+  bool shouldFire(const DiskArbitrationSubscriptionContextRef& sc,
+                  const DiskArbitrationEventContextRef& ec) const override;
 
   Status run() override;
 
-  static void DiskAppearedCallback(DADiskRef disk, void *context);
+  static void DiskAppearedCallback(DADiskRef disk, void* context);
 
-  static void DiskDisappearedCallback(DADiskRef disk, void *context);
+  static void DiskDisappearedCallback(DADiskRef disk, void* context);
 
  private:
   void restart();
 
   void stop() override;
 
-  static std::string getProperty(const CFStringRef &property,
-                                 const CFDictionaryRef &dict);
+  static std::string getProperty(const CFStringRef& property,
+                                 const CFDictionaryRef& dict);
 
-  static std::string extractUdifChecksum(const std::string &path);
+  static std::string extractUdifChecksum(const std::string& path);
 
-  static void fire(const std::string &action,
-                   const DiskArbitrationEventContextRef &ec,
-                   const CFDictionaryRef &dict);
+  static void fire(const std::string& action,
+                   const DiskArbitrationEventContextRef& ec,
+                   const CFDictionaryRef& dict);
 
  private:
   /// Disk arbitration session.

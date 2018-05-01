@@ -4,6 +4,8 @@ The bulk of the development environment provisioning logic is in the `tools\prov
 
 Generating the Visual Studio 2015 solution and building the **osquery** binaries is done via the `tools\make-win64-binaries.bat` batch script. 
 
+**Note**: Both batch scripts above need to be run from the repo root, i.e their invocation should be exactly as they appear above. Read '**Build Process**' below for more details on provisioning.
+
 ## Initial Assumptions
 
  * `git` for Windows should be already installed in order to `git clone` the **osquery** repository containing the provisioning script
@@ -62,6 +64,8 @@ Official chocolatey sources do not provide everything we need. In order to mitig
  * linenoise-ng 1.0.0
  * clang-format 3.9.0
  * zlib 1.2.8
+
+**Note:** Depending on your internet connection it can take time for packages to download. A slow internet connection might cause a time-out error. If such an error occurs then increase the value of the execution-time of the `choco install` command.
 
 ## Other Actions
 

@@ -3,16 +3,17 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 class GoogleBenchmark < AbstractOsqueryFormula
   desc "C++ microbenchmark support library"
   homepage "https://github.com/google/benchmark"
-  url "https://github.com/google/benchmark/archive/v1.0.0.tar.gz"
-  sha256 "d2206c263fc1a7803d4b10e164e0c225f6bcf0d5e5f20b87929f137dee247b54"
+  license "Apache-2.0"
+  url "https://github.com/google/benchmark/archive/v1.3.0.tar.gz"
+  sha256 "f19559475a592cbd5ac48b61f6b9cedf87f0b6775d1443de54cfe8f53940b28d"
   head "https://github.com/google/benchmark.git"
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "b69e21940600808f50327171dd226fe8649c42ebadfaa222951c759c1366e23b" => :sierra
-    sha256 "980e2adab86440ba9c3edea31cf082b1b5f7cd3a08df1f2491c4ebc1d2b7f5c9" => :el_capitan
-    sha256 "11e90b22673d2ba5417557a73ed8eaf9b0688f698d16645b907a84d9ee0f0e52" => :x86_64_linux
+    sha256 "33d981ca1428be694a0e9487c4e81291b6354c584de37d9543c80f19d4339a1b" => :sierra
+    sha256 "e60b61331ed05de0ca27e59dbd6eb41acd5f0a1bf955f69ebcdffe1a645e360e" => :x86_64_linux
   end
 
   depends_on "cmake" => :build

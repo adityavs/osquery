@@ -4,7 +4,7 @@ schema([
     Column("uid", BIGINT, "The local user that owns the extension",
         additional=True),
     Column("name", TEXT, "Extension display name"),
-    Column("identifier", TEXT, "Extension identifier"),
+    Column("identifier", TEXT, "Extension identifier", index=True),
     Column("version", TEXT, "Extension-supplied version"),
     Column("description", TEXT, "Extension-optional description"),
     Column("locale", TEXT, "Default locale supported by extension"),
@@ -17,6 +17,9 @@ schema([
 ])
 attributes(user_data=True)
 implementation("applications/browser_chrome@genChromeExtensions")
+examples([
+    "select * from users join chrome_extensions using (uid)",
+])
 fuzz_paths([
     "/Library/Application Support/Google/Chrome/",
     "/Users",

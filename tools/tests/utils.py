@@ -3,9 +3,10 @@
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant
-#  of patent rights can be found in the PATENTS file in the same directory.
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -62,6 +63,10 @@ def reset_dir(p):
         pass
 
 
+def copy_file(f, d):
+    shutil.copy(f, d)
+
+
 def platform():
     platform = sys.platform
     if platform.find("linux") == 0:
@@ -73,7 +78,7 @@ def platform():
 
 def queries_from_config(config_path):
     config = {}
-    rmcomment = re.compile('\/\*[\*A-Za-z0-9\n\s\.\{\}\'\/\\\:]+\*/|//.*')
+    rmcomment = re.compile('\/\*[\*A-Za-z0-9\n\s\.\{\}\'\/\\\:]+\*\/|\s+\/\/.*|^\/\/.*|\x5c\x5c\x0a')
     try:
         with open(config_path, "r") as fh:
             configcontent = fh.read()
@@ -91,18 +96,18 @@ def queries_from_config(config_path):
             queries[name] = details["query"]
     if "packs" in config:
         for keys,values in config["packs"].iteritems():
-            with open(values) as fp:
-                packfile = fp.read()
-                packcontent = rmcomment.sub('',packfile)
-                packqueries = json.loads(packcontent)
-                for queryname,query in packqueries["queries"].iteritems():
-                    queries["pack_"+queryname] = query["query"]
+            # Check if it is an internal pack definition
+            if type(values) is dict:
+                for queryname, query in values["queries"].iteritems():
+                    queries["pack_" + queryname] = query["query"]
+            else:
+                with open(values) as fp:
+                    packfile = fp.read()
+                    packcontent = rmcomment.sub('', packfile)
+                    packqueries = json.loads(packcontent)
+                    for queryname, query in packqueries["queries"].iteritems():
+                        queries["pack_" + queryname] = query["query"]
 
-
-        pass
-    if len(queries) == 0:
-        print("Could not find a schedule/queries in config: %s" % config_path)
-        exit(0)
     return queries
 
 
@@ -167,6 +172,8 @@ def profile_cmd(cmd, proc=None, shell=False, timeout=0, count=1):
             stats = current_stats
             percents.append(stats["utilization"])
         except psutil.AccessDenied:
+            break
+        except psutil.ZombieProcess:
             break
         delay += step
         if timeout > 0 and delay >= timeout + 2:

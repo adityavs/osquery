@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <vector>
@@ -29,7 +29,6 @@ namespace osquery {
 class FileEventSubscriber : public EventSubscriber<INotifyEventPublisher> {
  public:
   Status init() override {
-    configure();
     return Status(0);
   }
 
@@ -48,8 +47,7 @@ class FileEventSubscriber : public EventSubscriber<INotifyEventPublisher> {
 };
 
 /**
- * @brief Each EventSubscriber must register itself so the init method is
- *called.
+ * @brief EventSubscribers must register so their init method is called.
  *
  * This registers FileEventSubscriber into the osquery EventSubscriber
  * pseudo-plugin registry.
@@ -62,18 +60,22 @@ void FileEventSubscriber::configure() {
   removeSubscriptions();
 
   auto parser = Config::getParser("file_paths");
-  auto& accesses = parser->getData().get_child("file_accesses");
-  Config::getInstance().files([this, &accesses](
-      const std::string& category, const std::vector<std::string>& files) {
+  auto& accesses = parser->getData().doc()["file_accesses"];
+  Config::get().files([this, &accesses](const std::string& category,
+                                        const std::vector<std::string>& files) {
     for (const auto& file : files) {
       VLOG(1) << "Added file event listener to: " << file;
       auto sc = createSubscriptionContext();
       // Use the filesystem globbing pattern to determine recursiveness.
       sc->recursive = 0;
-      sc->path = file;
+      sc->opath = sc->path = file;
       sc->mask = kFileDefaultMasks;
-      if (accesses.count(category) > 0) {
-        sc->mask |= kFileAccessMasks;
+
+      for (const auto& item : accesses.GetArray()) {
+        if (item.GetString() == category) {
+          sc->mask |= kFileAccessMasks;
+          break;
+        }
       }
       sc->category = category;
       subscribe(&FileEventSubscriber::Callback, sc);

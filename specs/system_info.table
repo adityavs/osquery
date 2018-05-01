@@ -8,11 +8,13 @@ schema([
     Column("cpu_brand", TEXT, "CPU brand string, contains vendor and model"),
     Column("cpu_physical_cores", INTEGER, "Max number of CPU physical cores"),
     Column("cpu_logical_cores", INTEGER, "Max number of CPU logical cores"),
+    Column("cpu_microcode", TEXT, "Microcode version"),
     Column("physical_memory", BIGINT, "Total physical memory in bytes"),
     Column("hardware_vendor", TEXT, "Hardware or board vendor"),
     Column("hardware_model", TEXT, "Hardware or board model"),
     Column("hardware_version", TEXT, "Hardware or board version"),
     Column("hardware_serial", TEXT, "Device or board serial number"),
     Column("computer_name", TEXT, "Friendly computer name (optional)"),
+    Column("local_hostname", TEXT, "Local hostname (optional)"),
 ])
 implementation("system/system_info@genSystemInfo")

@@ -1,6 +1,6 @@
-As of osquery version 1.4.2, file integrity monitoring support was introduced for Linux (using inotify) and Darwin (using FSEvents) platforms.  This module reads a list of files/directories to monitor for changes from the osquery config and details changes and hashes to those selected files in the [`file_events`](https://osquery.io/docs/tables/#file_events) table.
+File integrity monitoring (FIM) is available for Linux and Darwin using inotify and FSEvents. The daemon reads a list of files/directories from the osquery configuration. The actions (and hashes when appropriate) to those selected files populate the [`file_events`](https://osquery.io/schema/#file_events) table.
 
-To get started with FIM (file integrity monitoring), you must first identify which files and directories you wish to monitor. Then use *fnmatch*-style, or filesystem globbing, patterns to represent the target paths. You may use standard wildcards "*\**" or SQL-style wildcards "*%*":
+To get started with FIM, you must first identify which files and directories you wish to monitor. Then use *fnmatch*-style, or filesystem globbing, patterns to represent the target paths. You may use standard wildcards "*\**" or SQL-style wildcards "*%*":
 
 **Matching wildcard rules**
 
@@ -19,17 +19,23 @@ To get started with FIM (file integrity monitoring), you must first identify whi
 
 For example, you may want to monitor `/etc` along with other files on a Linux system. After you identify your target files and directories you wish to monitor, add them to a new section in the config *file_paths*.
 
+**Note:** Many applications may replace a file instead of editing them in place. If you monitor the file directly, osquery will need to be restarted in order to monitor the replacement. This can be avoided by monitoring the containing directory instead. 
+
+The three areas below that are relevant to FIM are the scheduled query against `file_events`, the added `file_paths` section and the `exclude_paths` sections. The `file_events` query is scheduled to collect all of the FIM events that have occurred on any files within the paths specified within `file_paths` but excluding the paths specified within `exclude_paths` on a five minute interval. At a high level this means events are buffered within osquery and sent to the configured _logger_ every five minutes.
+
+**Note:** You cannot match recursively inside a path. For example `/Users/%%/Configuration.conf` is not a valid wildcard.
+
 ## Example FIM Config
 
 ```json
 {
   "schedule": {
     "crontab": {
-      "query": "select * from crontab;",
+      "query": "SELECT * FROM crontab;",
       "interval": 300
     },
     "file_events": {
-      "query": "select * from file_events;",
+      "query": "SELECT * FROM file_events;",
       "removed": false,
       "interval": 300
     }
@@ -45,13 +51,28 @@ For example, you may want to monitor `/etc` along with other files on a Linux sy
     "tmp": [
       "/tmp/%%"
     ]
+  },
+  "exclude_paths": {
+    "homes": [
+      "/home/not_to_monitor/.ssh/%%"
+    ],
+    "tmp": [
+      "/tmp/too_many_events/"
+    ]
   }
 }
 ```
 
+One must not mention arbitrary category name under the exclude_paths node, only valid categories are allowed.
+
+* `valid category` - Categories which are mentioned under `file_paths` node. In the above example config `homes`, `etc` and `tmp` are termed as valid categories.
+* `invalid category` - Any other category name apart from `homes`, `etc` and `tmp` are considered as invalid categories.
+
+**Note:** Invalid categories get dropped silently, i.e. they don't have any effect on the events generated.
+
 ## Sample Event Output
 
-As file changes happen, events will appear in the [**file_events**](https://osquery.io/docs/tables/#file_events) table.  During a file change event, the md5, sha1, and sha256 for the file will be calculated if possible.  A sample event looks like this:
+As file changes happen, events will appear in the [**file_events**](https://osquery.io/schema/#file_events) table.  During a file change event, the md5, sha1, and sha256 for the file will be calculated if possible. A sample event looks like this:
 
 ```json
 {
@@ -85,20 +106,34 @@ fs.inotify.max_queued_events = 32768
 
 ## File Accesses
 
-File accesses on Linux using inotify may induce unexpected and unwanted performance reduction. To prevent 'flooding' of access events alongside FIM, access events for `file_path` categories is an explicit opt-in. Add the following list of categories:
+In addition to FIM which generates events if a file is created/modified/deleted, osquery also supports file access monitoring which can generate events if a file is accessed.
+
+File accesses on Linux using inotify may induce unexpected and unwanted performance reduction. To prevent 'flooding' of access events alongside FIM, enabling access events for `file_path` categories is an explicit opt-in. You may add categories that were defined in your `file_paths` stanza:
 
 ```json
 {
+  "file_paths": {
+    "homes": [
+      "/root/.ssh/%%",
+      "/home/%/.ssh/%%"
+    ],
+    "etc": [
+      "/etc/%%"
+    ],
+    "tmp": [
+      "/tmp/%%"
+    ]
+  },
   "file_accesses": ["homes", "etc"]
 }
 ```
 
-To enable access monitoring for the above set of directories in 'homes' and the single 'etc'.
+The above configuration snippet will enable file integrity monitoring for 'homes', 'etc', and 'tmp' but only enable access monitoring for the 'homes' and 'etc' directories.
 
-**WARNING:** The hashes of files will not be calculated to avoid generating additional access events.
+> NOTICE: The hashes of files will not be calculated to avoid generating additional access events.
 
-### Process File Accesses on OS X
+### Process File Accesses on macOS
 
-It is possible to monitor for file accesses by process using the osquery OS X kernel module. File accesses induce a LOT of stress on the system and are more or less useless giving the context from userland monitoring systems (aka, not having the process that caused the modification).
+It is possible to monitor for file accesses by process using the osquery macOS kernel module. File accesses induce a LOT of stress on the system and are more or less useless giving the context from userland monitoring systems (aka, not having the process that caused the modification).
 
-If the OS X kernel extension is running, the `process_file_events` table will be populated using the same **file_paths** key in the osquery config. This implementation of access monitoring includes process PIDs and should not cause CPU or memory latency outside of the normal kernel extension/module guarantees. See [../development/kernel.md](Kernel) for more information.
+If the macOS kernel extension is running, the `process_file_events` table will be populated using the same **file_paths** key in the osquery config. This implementation of access monitoring includes process PIDs and should not cause CPU or memory latency outside of the normal kernel extension/module guarantees. See [../development/kernel.md](Kernel) for more information.

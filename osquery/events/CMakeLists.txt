@@ -1,3 +1,11 @@
+#  Copyright (c) 2014-present, Facebook, Inc.
+#  All rights reserved.
+#
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
+
 if(APPLE)
   ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreServices")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework SystemConfiguration")
@@ -11,12 +19,10 @@ elseif(FREEBSD)
   file(GLOB OSQUERY_EVENTS_FREEBSD "freebsd/*.cpp")
   ADD_OSQUERY_LIBRARY(FALSE osquery_events_freebsd ${OSQUERY_EVENTS_FREEBSD})
 elseif(WINDOWS)
-  # TODO: When we have Windows events, uncomment these
-  # file(GLOB OSQUERY_EVENTS_WINDOWS "windows/*.cpp")
-  # ADD_OSQUERY_LIBRARY(FALSE osquery_events_windows ${OSQUERY_EVENTS_WINDOWS})
+  ADD_OSQUERY_LINK_CORE("wevtapi.lib")
+  file(GLOB OSQUERY_EVENTS_WINDOWS "windows/*.cpp")
+  ADD_OSQUERY_LIBRARY(FALSE osquery_events_windows ${OSQUERY_EVENTS_WINDOWS})
 else()
-  # See the root CMakeLists for SYSTEMD detection.
-  # The udev library link is not available without systemd-devel.
   ADD_OSQUERY_LINK_ADDITIONAL("udev")
   ADD_OSQUERY_LINK_ADDITIONAL("audit")
 
@@ -28,10 +34,10 @@ ADD_OSQUERY_LIBRARY(TRUE osquery_events
   events.cpp
 )
 
-if(NOT WINDOWS)
-  file(GLOB OSQUERY_EVENTS_TESTS "tests/*.cpp")
-  ADD_OSQUERY_TEST(TRUE ${OSQUERY_EVENTS_TESTS})
+file(GLOB OSQUERY_EVENTS_TESTS "tests/*.cpp")
+ADD_OSQUERY_TEST(TRUE ${OSQUERY_EVENTS_TESTS})
 
+if(NOT WINDOWS)
   file(GLOB OSQUERY_EVENTS_BENCHMARKS "benchmarks/*.cpp")
   if (LINUX)
     file(GLOB OSQUERY_EVENTS_PLATFORM_BENCHMARKS "linux/benchmarks/*.cpp")
@@ -44,29 +50,34 @@ if(NOT WINDOWS)
   )
 
   # Kernel-related userland code.
-  file(GLOB OSQUERY_EVENTS_KERNEL "kernel/*.cpp")
-  ADD_OSQUERY_LIBRARY(FALSE osquery_events_kernel
-    kernel.cpp
-    ${OSQUERY_EVENTS_KERNEL}
-  )
+  if(NOT SKIP_KERNEL)
+    file(GLOB OSQUERY_EVENTS_KERNEL "kernel/*.cpp")
+    ADD_OSQUERY_LIBRARY(FALSE osquery_events_kernel
+      kernel.cpp
+      ${OSQUERY_EVENTS_KERNEL}
+    )
 
-  # Special kernel test define when building non-SDK and non-Release.
-  if(NOT OSQUERY_BUILD_RELEASE AND NOT OSQUERY_BUILD_SDK_ONLY)
-    set_target_properties(osquery_events_kernel
-      PROPERTIES COMPILE_DEFINITIONS "KERNEL_TEST=1")
+    # Special kernel test define when building non-SDK and non-Release.
+    if(NOT OSQUERY_BUILD_RELEASE AND NOT OSQUERY_BUILD_SDK_ONLY)
+      set_target_properties(osquery_events_kernel
+        PROPERTIES COMPILE_DEFINITIONS "KERNEL_TEST=1")
+    endif()
+
+    file(GLOB OSQUERY_EVENTS_KERNEL_TESTS "kernel/tests/*.cpp")
+    ADD_OSQUERY_KERNEL_TEST(${OSQUERY_EVENTS_KERNEL_TESTS})
+
+    file(GLOB OSQUERY_EVENTS_KERNEL_BENCHMARKS "kernel/benchmarks/*.cpp")
+    ADD_OSQUERY_KERNEL_BENCHMARK(${OSQUERY_EVENTS_KERNEL_BENCHMARKS})
   endif()
+endif()
 
-  file(GLOB OSQUERY_EVENTS_KERNEL_TESTS "kernel/tests/*.cpp")
-  ADD_OSQUERY_KERNEL_TEST(${OSQUERY_EVENTS_KERNEL_TESTS})
-
-  file(GLOB OSQUERY_EVENTS_KERNEL_BENCHMARKS "kernel/benchmarks/*.cpp")
-  ADD_OSQUERY_KERNEL_BENCHMARK(${OSQUERY_EVENTS_KERNEL_BENCHMARKS})
-
-  if(APPLE)
-    file(GLOB OSQUERY_DARWIN_EVENTS_TESTS "darwin/tests/*.cpp")
-    ADD_OSQUERY_TEST(FALSE ${OSQUERY_DARWIN_EVENTS_TESTS})
-  elseif(LINUX)
-    file(GLOB OSQUERY_LINUX_EVENTS_TESTS "linux/tests/*.cpp")
-    ADD_OSQUERY_TEST(FALSE ${OSQUERY_LINUX_EVENTS_TESTS})
-  endif()
+if(APPLE)
+  file(GLOB OSQUERY_DARWIN_EVENTS_TESTS "darwin/tests/*.cpp")
+  ADD_OSQUERY_TEST(FALSE ${OSQUERY_DARWIN_EVENTS_TESTS})
+elseif(LINUX)
+  file(GLOB OSQUERY_LINUX_EVENTS_TESTS "linux/tests/*.cpp")
+  ADD_OSQUERY_TEST(FALSE ${OSQUERY_LINUX_EVENTS_TESTS})
+elseif(WINDOWS)
+  file(GLOB OSQUERY_WINDOWS_EVENTS_TESTS "windows/tests/*.cpp")
+  ADD_OSQUERY_TEST(FALSE ${OSQUERY_WINDOWS_EVENTS_TESTS})
 endif()

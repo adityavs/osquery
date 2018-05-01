@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <assert.h>
@@ -139,7 +139,7 @@ static void ip4StringToDecimalFunc(sqlite3_context* context,
 
   struct sockaddr sa;
   std::string address((char*)sqlite3_value_text(argv[0]));
-  if (address.find(":") != std::string::npos) {
+  if (address.find(':') != std::string::npos) {
     // Assume this is an IPv6 address.
     sqlite3_result_null(context);
   } else {

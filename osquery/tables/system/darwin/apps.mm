@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #import <Foundation/Foundation.h>
@@ -184,6 +184,24 @@ void genApplication(const pt::ptree& tree,
   r["name"] = path.parent_path().parent_path().filename().string();
   r["path"] = path.parent_path().parent_path().string();
 
+  NSString* filePath =
+      [NSString stringWithUTF8String:path.parent_path().parent_path().c_str()];
+  MDItemRef mdItem = MDItemCreate(NULL, (CFStringRef)filePath);
+
+  if (mdItem != nullptr) {
+    NSDate* lastOpened = static_cast<NSDate*>(
+        CFBridgingRelease(MDItemCopyAttribute(mdItem, kMDItemLastUsedDate)));
+    if (lastOpened != nullptr) {
+      r["last_opened_time"] = INTEGER([lastOpened timeIntervalSince1970]);
+    } else {
+      r["last_opened_time"] = INTEGER(-1);
+    }
+    CFRelease(mdItem);
+    mdItem = NULL;
+  } else {
+    r["last_opened_time"] = INTEGER(-1);
+  }
+
   // Loop through each column and its mapped Info.plist key name.
   for (const auto& item : kAppsInfoPlistTopLevelStringKeys) {
     r[item.second] = tree.get<std::string>(item.first, "");
@@ -220,12 +238,10 @@ Status genAppsFromLaunchServices(std::set<std::string>& apps) {
     return Status(1, "Could not list LaunchServices applications");
   }
 
-  @autoreleasepool {
-    for (id app in (__bridge NSArray*)ls_apps) {
-      if (app != nil && [app isKindOfClass:[NSURL class]]) {
-        apps.insert(std::string([[app path] UTF8String]) +
-                    "/Contents/Info.plist");
-      }
+  for (id app in (__bridge NSArray*)ls_apps) {
+    if (app != nil && [app isKindOfClass:[NSURL class]]) {
+      apps.insert(std::string([[app path] UTF8String]) +
+                  "/Contents/Info.plist");
     }
   }
 

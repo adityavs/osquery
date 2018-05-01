@@ -1,13 +1,14 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
+#include <errno.h>
 #include <signal.h>
 
 #include <sys/types.h>
@@ -19,6 +20,10 @@
 #include <osquery/system.h>
 
 #include "osquery/core/process.h"
+
+#ifndef NSIG
+#define NSIG 32
+#endif
 
 extern char** environ;
 
@@ -41,19 +46,35 @@ int PlatformProcess::pid() const {
 }
 
 bool PlatformProcess::kill() const {
-  if (id_ == kInvalidPid) {
+  if (!isValid()) {
     return false;
   }
 
-  int status = ::kill(id_, SIGKILL);
+  int status = ::kill(nativeHandle(), SIGKILL);
+  return (status == 0);
+}
+
+bool PlatformProcess::killGracefully() const {
+  if (!isValid()) {
+    return false;
+  }
+
+  int status = ::kill(nativeHandle(), SIGINT);
   return (status == 0);
 }
 
 ProcessState PlatformProcess::checkStatus(int& status) const {
   int process_status = 0;
+  if (!isValid()) {
+    return PROCESS_ERROR;
+  }
 
   pid_t result = ::waitpid(nativeHandle(), &process_status, WNOHANG);
   if (result < 0) {
+    if (errno == ECHILD) {
+      return PROCESS_EXITED;
+    }
+    process_status = -1;
     return PROCESS_ERROR;
   }
 
@@ -73,6 +94,10 @@ ProcessState PlatformProcess::checkStatus(int& status) const {
 std::shared_ptr<PlatformProcess> PlatformProcess::getCurrentProcess() {
   pid_t pid = ::getpid();
   return std::make_shared<PlatformProcess>(pid);
+}
+
+int PlatformProcess::getCurrentPid() {
+  return PlatformProcess::getCurrentProcess()->pid();
 }
 
 std::shared_ptr<PlatformProcess> PlatformProcess::getLauncherProcess() {
@@ -99,30 +124,52 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchWorker(
 
 std::shared_ptr<PlatformProcess> PlatformProcess::launchExtension(
     const std::string& exec_path,
-    const std::string& extension,
     const std::string& extensions_socket,
     const std::string& extensions_timeout,
     const std::string& extensions_interval,
-    const std::string& verbose) {
+    bool verbose) {
   auto ext_pid = ::fork();
   if (ext_pid < 0) {
     return std::shared_ptr<PlatformProcess>();
   } else if (ext_pid == 0) {
     setEnvVar("OSQUERY_EXTENSION", std::to_string(::getpid()).c_str());
-    ::execle(exec_path.c_str(),
-             ("osquery extension: " + extension).c_str(),
-             "--socket",
-             extensions_socket.c_str(),
-             "--timeout",
-             extensions_timeout.c_str(),
-             "--interval",
-             extensions_interval.c_str(),
-             (verbose == "true") ? "--verbose" : (char*)nullptr,
-             (char*)nullptr,
-             ::environ);
+
+    struct sigaction sig_action;
+    sig_action.sa_handler = SIG_DFL;
+    sig_action.sa_flags = 0;
+    sigemptyset(&sig_action.sa_mask);
+
+    for (auto i = NSIG; i >= 0; i--) {
+      sigaction(i, &sig_action, nullptr);
+    }
+
+    std::vector<const char*> arguments;
+    arguments.push_back(exec_path.c_str());
+    arguments.push_back(exec_path.c_str());
+
+    std::string arg_verbose("--verbose");
+    if (verbose) {
+      arguments.push_back(arg_verbose.c_str());
+    }
+
+    std::string arg_socket("--socket");
+    arguments.push_back(arg_socket.c_str());
+    arguments.push_back(extensions_socket.c_str());
+
+    std::string arg_timeout("--timeout");
+    arguments.push_back(arg_timeout.c_str());
+    arguments.push_back(extensions_timeout.c_str());
+
+    std::string arg_interval("--interval");
+    arguments.push_back(arg_interval.c_str());
+    arguments.push_back(extensions_interval.c_str());
+    arguments.push_back(nullptr);
+
+    char* const* argv = const_cast<char* const*>(&arguments[1]);
+    ::execve(arguments[0], argv, ::environ);
 
     // Code should never reach this point
-    VLOG(1) << "Could not start extension process: " << extension;
+    VLOG(1) << "Could not start extension process: " << exec_path;
     Initializer::shutdown(EXIT_FAILURE);
     return std::shared_ptr<PlatformProcess>();
   }
@@ -130,12 +177,24 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchExtension(
   return std::make_shared<PlatformProcess>(ext_pid);
 }
 
-std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
+std::shared_ptr<PlatformProcess> PlatformProcess::launchTestPythonScript(
     const std::string& args) {
+  std::string osquery_path;
+  auto osquery_path_option = getEnvVar("OSQUERY_DEPS");
+  if (osquery_path_option) {
+    osquery_path = *osquery_path_option;
+  } else {
+    if (!isPlatform(PlatformType::TYPE_FREEBSD)) {
+      osquery_path = "/usr/local/osquery";
+    } else {
+      osquery_path = "/usr/local";
+    }
+  }
+
+  // The whole-string, space-delimited, python process arguments.
+  auto argv = osquery_path + "/bin/python " + args;
+
   std::shared_ptr<PlatformProcess> process;
-
-  std::string argv = "/usr/local/osquery/bin/python " + args;
-
   int process_pid = ::fork();
   if (process_pid == 0) {
     // Start a Python script
@@ -147,4 +206,4 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
 
   return process;
 }
-}
+} // namespace osquery

@@ -1,15 +1,16 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/system.h>
 
 #include "osquery/events/kernel.h"
 
@@ -31,8 +32,8 @@ static const int kKernelEventsIterate = 10;
 REGISTER(KernelEventPublisher, "event_publisher", "kernel");
 
 Status KernelEventPublisher::setUp() {
-  // A daemon should attempt to autoload kernel extensions/modules.
-  if (kToolType == ToolType::DAEMON) {
+  // A daemon should attempt to autoload kernel extensions.
+  if (Initializer::isDaemon()) {
     loadKernelExtension();
   }
 
@@ -92,7 +93,7 @@ Status KernelEventPublisher::run() {
     int drops = 0;
     WriteLock lock(mutex_);
     if ((drops = queue_->kernelSync(OSQUERY_OPTIONS_NO_BLOCK)) > 0 &&
-        kToolType == ToolType::DAEMON) {
+        Initializer::isDaemon()) {
       LOG(WARNING) << "Dropping " << drops << " kernel events";
     }
   } catch (const CQueueException &e) {

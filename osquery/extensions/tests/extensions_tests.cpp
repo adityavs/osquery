@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #ifdef GTEST_HAS_TR1_TUPLE
@@ -25,8 +25,6 @@
 #include "osquery/filesystem/fileops.h"
 #include "osquery/tests/test_util.h"
 
-using namespace osquery::extensions;
-
 namespace osquery {
 
 const int kDelay = 20;
@@ -44,8 +42,8 @@ class ExtensionsTest : public testing::Test {
     socket_path += "testextmgr" + std::to_string(rand());
 
     if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
-      remove(socket_path);
-      if (pathExists(socket_path)) {
+      removePath(socket_path);
+      if (pathExists(socket_path).ok()) {
         throw std::domain_error("Cannot test sockets: " + socket_path);
       }
     }
@@ -56,18 +54,18 @@ class ExtensionsTest : public testing::Test {
     Dispatcher::joinServices();
 
     if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
-      remove(socket_path);
+      removePath(socket_path);
     }
   }
 
   bool ping(int attempts = 3) {
     // Calling open will except if the socket does not exist.
-    ExtensionStatus status;
     for (int i = 0; i < attempts; ++i) {
       try {
-        EXManagerClient client(socket_path);
-        client.get()->ping(status);
-        return (status.code == ExtensionCode::EXT_SUCCESS);
+        ExtensionManagerClient client(socket_path);
+
+        auto status = client.ping();
+        return (status.getCode() == (int)ExtensionCode::EXT_SUCCESS);
       } catch (const std::exception& /* e */) {
         sleepFor(kDelay);
       }
@@ -78,19 +76,15 @@ class ExtensionsTest : public testing::Test {
 
   QueryData query(const std::string& sql, int attempts = 3) {
     // Calling open will except if the socket does not exist.
-    ExtensionResponse response;
+    QueryData qd;
     for (int i = 0; i < attempts; ++i) {
       try {
-        EXManagerClient client(socket_path);
-        client.get()->query(response, sql);
+        ExtensionManagerClient client(socket_path);
+
+        client.query(sql, qd);
       } catch (const std::exception& /* e */) {
         sleepFor(kDelay);
       }
-    }
-
-    QueryData qd;
-    for (const auto& row : response.response) {
-      qd.push_back(row);
     }
 
     return qd;
@@ -147,12 +141,13 @@ TEST_F(ExtensionsTest, test_extension_start) {
   EXPECT_TRUE(status.ok());
   EXPECT_TRUE(socketExistsLocal(socket_path));
 
+  auto& rf = RegistryFactory::get();
   // Now allow duplicates (for testing, since EM/E are the same).
-  Registry::allowDuplicates(true);
+  rf.allowDuplicates(true);
   status = startExtension(socket_path, "test", "0.1", "0.0.0", "9.9.9");
-  // This will not be false since we are allowing deplicate items.
+  // This will not be false since we are allowing duplicate items.
   // Otherwise, starting an extension and extensionManager would fatal.
-  ASSERT_TRUE(status.ok());
+  ASSERT_NE(status.getCode(), (int)ExtensionCode::EXT_FAILED);
 
   // Checks for version comparisons (also used by packs).
   ASSERT_FALSE(versionAtLeast("1.1.1", "0.0.1"));
@@ -167,8 +162,8 @@ TEST_F(ExtensionsTest, test_extension_start) {
   EXPECT_TRUE(socketExistsLocal(socket_path + "." + std::to_string(uuid)));
 
   // Then clean up the registry modifications.
-  Registry::removeBroadcast(uuid);
-  Registry::allowDuplicates(false);
+  rf.removeBroadcast(uuid);
+  rf.allowDuplicates(false);
 }
 
 class ExtensionPlugin : public Plugin {
@@ -190,21 +185,23 @@ TEST_F(ExtensionsTest, test_extension_broadcast) {
   EXPECT_TRUE(status.ok());
   EXPECT_TRUE(socketExistsLocal(socket_path));
 
+  auto& rf = RegistryFactory::get();
   // This time we're going to add a plugin to the extension_test registry.
-  Registry::add<TestExtensionPlugin>("extension_test", "test_item");
+  rf.registry("extension_test")
+      ->add("test_item", std::make_shared<TestExtensionPlugin>());
 
   // Now we create a registry alias that will be broadcasted but NOT used for
   // internal call lookups. Aliasing was introduced for testing such that an
   // EM/E could exist in the same process (the same registry) without having
   // duplicate registry items in the internal registry list AND extension
   // registry route table.
-  Registry::addAlias("extension_test", "test_item", "test_alias");
-  Registry::allowDuplicates(true);
+  rf.addAlias("extension_test", "test_item", "test_alias");
+  rf.allowDuplicates(true);
 
   // Before registering the extension there is NO route to "test_alias" since
   // alias resolutions are performed by the EM.
-  EXPECT_TRUE(Registry::exists("extension_test", "test_item"));
-  EXPECT_FALSE(Registry::exists("extension_test", "test_alias"));
+  EXPECT_TRUE(rf.exists("extension_test", "test_item"));
+  EXPECT_FALSE(rf.exists("extension_test", "test_alias"));
 
   status = startExtension(socket_path, "test", "0.1", "0.0.0", "0.0.0");
   EXPECT_TRUE(status.ok());
@@ -232,9 +229,9 @@ TEST_F(ExtensionsTest, test_extension_broadcast) {
   // We are broadcasting to our own registry in the test, which internally has
   // a "test_item" aliased to "test_alias", "test_item" is internally callable
   // but "test_alias" can only be resolved by an EM call.
-  EXPECT_TRUE(Registry::exists("extension_test", "test_item"));
+  EXPECT_TRUE(rf.exists("extension_test", "test_item"));
   // Now "test_alias" exists since it is in the extensions route table.
-  EXPECT_TRUE(Registry::exists("extension_test", "test_alias"));
+  EXPECT_TRUE(rf.exists("extension_test", "test_alias"));
 
   PluginResponse response;
   // This registry call will fail, since "test_alias" cannot be resolved using
@@ -253,14 +250,12 @@ TEST_F(ExtensionsTest, test_extension_broadcast) {
   EXPECT_EQ(response.size(), 1U);
   EXPECT_EQ(response[0]["test_key"], "test_value");
 
-  Registry::removeBroadcast(uuid);
-  Registry::allowDuplicates(false);
+  rf.removeBroadcast(uuid);
+  rf.allowDuplicates(false);
 }
 
 TEST_F(ExtensionsTest, test_extension_module_search) {
   createMockFileStructure();
-  EXPECT_FALSE(loadModules(kFakeDirectory + "/root.txt"));
-  EXPECT_FALSE(loadModules("/dir/does/not/exist"));
   tearDownMockFileStructure();
 }
 }

@@ -4,7 +4,8 @@ schema([
     Column("action", TEXT, "Appear or disappear"),
     Column("path", TEXT, "Path of the DMG file accessed"),
     Column("name", TEXT, "Disk event name"),
-    Column("bsd_name", TEXT, "Disk event BSD name"),
+    Column("device", TEXT, "Disk event BSD name",
+        aliases=["bsd_name"]),
     Column("uuid", TEXT, "UUID of the volume inside DMG if available"),
     Column("size", BIGINT, "Size of partition in bytes"),
     Column("ejectable", INTEGER, "1 if ejectable, 0 if not"),
@@ -16,6 +17,7 @@ schema([
     Column("filesystem", TEXT, "Filesystem if available"),
     Column("checksum", TEXT, "UDIF Master checksum if available (CRC32)"),
     Column("time", BIGINT, "Time of appearance/disappearance in UNIX time"),
+    Column("eid", TEXT, "Event ID", hidden=True),
 ])
 attributes(event_subscriber=True)
 implementation("events/darwin/disk_events@disk_events::genTable")

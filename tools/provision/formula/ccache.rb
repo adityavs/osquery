@@ -5,13 +5,13 @@ class Ccache < AbstractOsqueryFormula
   homepage "https://ccache.samba.org/"
   url "https://www.samba.org/ftp/ccache/ccache-3.3.1.tar.xz"
   sha256 "c6d87a49cc6d7639636d289ed9a5f560bc2acf7ab698fe8ee14e9c9f15ba41c6"
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "7252af8fa4fe3b76281a4c330a737d583c5074fcb44119b5edc83332774b62e2" => :sierra
-    sha256 "de5a5e43ceb9b925a94fe0b5788fdca0ae58ae12eb48819a765cd3ad6c9a65f7" => :el_capitan
-    sha256 "7e2f7acbedf1466376a4cbe6ca90e0cc1ce1d3cebbd31bd0cd10447ffd333bb1" => :x86_64_linux
+    sha256 "e2cc1c707095c42674139bddbf5bc40562e3194ae7bd22bb402a096041349c67" => :sierra
+    sha256 "6232d274d9cb91b394e91ceb51b63261f5e5ca3ec355afd61a346b34c846300c" => :x86_64_linux
   end
 
   head do
@@ -38,7 +38,7 @@ class Ccache < AbstractOsqueryFormula
       c++ c++3 c++-3.3 c++-4.0 c++-4.2 c++-4.3 c++-4.4 c++-4.5 c++-4.6 c++-4.7 c++-4.8 c++-4.9 c++-5 c++-6
       g++ g++2 g++3 g++-3.3 g++-4.0 g++-4.2 g++-4.3 g++-4.4 g++-4.5 g++-4.6 g++-4.7 g++-4.8 g++-4.9 g++-5 g++-6
     ].each do |prog|
-      libexec.install_symlink bin/"ccache" => prog
+      libexec.install_symlink "#{bin}/ccache" => prog
     end
   end
 
@@ -52,11 +52,5 @@ class Ccache < AbstractOsqueryFormula
     NOTE: ccache can prevent some software from compiling.
     ALSO NOTE: The brew command, by design, will never use ccache.
     EOS
-  end
-
-  test do
-    ENV.prepend_path "PATH", opt_libexec
-    assert_equal "#{opt_libexec}/gcc", shell_output("which gcc").chomp
-    system "#{bin}/ccache", "-s"
   end
 end

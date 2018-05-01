@@ -3,13 +3,15 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 class Libiptables < AbstractOsqueryFormula
   desc "Device Mapper development"
   homepage "http://netfilter.samba.org/"
+  license "GPL-2.0+"
   url "https://osquery-packages.s3.amazonaws.com/deps/iptables-1.4.21.tar.gz"
   sha256 "ce1335c91764dc87a26978bd3725c510c2564853184c6e470e0a0f785f420f89"
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "a3be4342280da5a1755e469e51140389341f83a4f70ba3949e048b4554fa6114" => :x86_64_linux
+    sha256 "f39461e4549f49bacccbed6a28fd077177304328c2ed480679e6ff10363806e4" => :x86_64_linux
   end
 
   patch :DATA

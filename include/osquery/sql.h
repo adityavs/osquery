@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -14,8 +14,9 @@
 #include <string>
 #include <vector>
 
-#include <osquery/database.h>
 #include <osquery/flags.h>
+#include <osquery/query.h>
+#include <osquery/registry.h>
 #include <osquery/tables.h>
 
 namespace osquery {
@@ -26,7 +27,7 @@ DECLARE_int32(value_max);
  * @brief The core interface to executing osquery SQL commands.
  *
  * @code{.cpp}
- *   auto sql = SQL("SELECT * FROM time");
+ *   SQL sql("SELECT * FROM time");
  *   if (sql.ok()) {
  *     LOG(INFO) << "============================";
  *     for (const auto& row : sql.rows()) {
@@ -40,28 +41,50 @@ DECLARE_int32(value_max);
  *   }
  * @endcode
  */
-class SQL {
+class SQL : private only_movable {
  public:
   /**
    * @brief Instantiate an instance of the class with a query.
    *
-   * @param q An osquery SQL query.
+   * @param query An osquery SQL query.
+   * @param use_cache [optional] Set true to use the query cache.
    */
-  explicit SQL(const std::string& q);
+  explicit SQL(const std::string& query, bool use_cache = false);
 
+  /// Allow moving.
+  SQL(SQL&&) noexcept = default;
+
+  /// Allow move assignment.
+  SQL& operator=(SQL&&) = default;
+
+ public:
   /**
-   * @brief Accessor for the rows returned by the query.
+   * @brief Const accessor for the rows returned by the query.
    *
    * @return A QueryData object of the query results.
    */
   const QueryData& rows() const;
 
   /**
+   * @brief Accessor for the rows returned by the query.
+   *
+   * @return A QueryData object of the query results.
+   */
+  QueryData& rows();
+
+  /**
+   * @brief Column information for the query
+   *
+   * @return A ColumnNames object for the query
+   */
+  const ColumnNames& columns() const;
+
+  /**
    * @brief Accessor to switch off of when checking the success of a query.
    *
    * @return A bool indicating the success or failure of the operation.
    */
-  bool ok();
+  bool ok() const;
 
   /**
    * @brief Get the status returned by the query.
@@ -75,7 +98,7 @@ class SQL {
    *
    * @return The message string indicating the status of the query.
    */
-  std::string getMessageString();
+  std::string getMessageString() const;
 
   /// ASCII escape the results of the query.
   void escapeResults();
@@ -110,13 +133,17 @@ class SQL {
    *
    * The osquery::SQL class should only ever be instantiated with a query.
    */
-  SQL() {}
+  SQL() = default;
 
+ protected:
   /// The internal member which holds the results of the query.
   QueryData results_;
 
   /// The internal member which holds the status of the query.
   Status status_;
+
+  /// The internal member which holds the column names and order for the query
+  ColumnNames columns_;
 };
 
 /**
@@ -138,12 +165,18 @@ class SQL {
 class SQLPlugin : public Plugin {
  public:
   /// Run a SQL query string against the SQL implementation.
-  virtual Status query(const std::string& q, QueryData& results) const = 0;
+  virtual Status query(const std::string& query,
+                       QueryData& results,
+                       bool use_cache) const = 0;
 
   /// Use the SQL implementation to parse a query string and return details
   /// (name, type) about the columns.
-  virtual Status getQueryColumns(const std::string& q,
+  virtual Status getQueryColumns(const std::string& query,
                                  TableColumns& columns) const = 0;
+
+  /// Given a query, return the list of scanned tables.
+  virtual Status getQueryTables(const std::string& query,
+                                std::vector<std::string>& tables) const = 0;
 
   /**
    * @brief Attach a table at runtime.
@@ -152,15 +185,15 @@ class SQLPlugin : public Plugin {
    * attached at run time. In the case of SQLite where a single DB object is
    * managed, tables are enumerated and attached during initialization.
    */
-  virtual Status attach(const std::string& name) {
+  virtual Status attach(const std::string& /*name*/) {
     return Status(0, "Not used");
   }
 
   /// Tables may be detached by name.
-  virtual void detach(const std::string& name) {}
+  virtual void detach(const std::string& /*name*/) {}
 
  public:
-  Status call(const PluginRequest& request, PluginResponse& response);
+  Status call(const PluginRequest& request, PluginResponse& response) override;
 };
 
 /**
@@ -184,10 +217,13 @@ class SQLPlugin : public Plugin {
  * @endcode
  *
  * @param query the query to execute
- * @param results A QueryData structure to emit result rows on success.
+ * @param results [output] A QueryData structure to emit result rows on success.
+ * @param use_cache [optional] Set true to use the query cache.
  * @return A status indicating query success.
  */
-Status query(const std::string& query, QueryData& results);
+Status query(const std::string& query,
+             QueryData& results,
+             bool use_cache = false);
 
 /**
  * @brief Analyze a query, providing information about the result columns.
@@ -204,5 +240,16 @@ Status query(const std::string& query, QueryData& results);
  */
 Status getQueryColumns(const std::string& q, TableColumns& columns);
 
-CREATE_LAZY_REGISTRY(SQLPlugin, "sql");
-}
+/**
+ * @brief Extract table names from an input query.
+ *
+ * This should return the scanned virtual tables, not aliases or intermediate
+ * tables, from a given query.
+ *
+ * @param q the query to analyze.
+ * @param tables the output vector to fill with table names.
+ *
+ * @return status indicating success or failure of the operation.
+ */
+Status getQueryTables(const std::string& q, std::vector<std::string>& tables);
+} // namespace osquery

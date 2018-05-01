@@ -1,17 +1,19 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
+#include <set>
 #include <string>
 
+#include <osquery/core/json.h>
 #include <osquery/flags.h>
 #include <osquery/registry.h>
 
@@ -19,6 +21,14 @@ namespace osquery {
 
 /// Allow users to disable enrollment features.
 DECLARE_bool(disable_enrollment);
+
+/**
+ * @brief These tables populate the "host_details" content.
+ *
+ * Enrollment plugins should send 'default' host details to enroll request
+ * endpoints. This allows the enrollment service to identify the new node.
+ */
+extern const std::set<std::string> kEnrollHostDetails;
 
 /**
  * @brief Superclass for enroll plugins.
@@ -50,6 +60,17 @@ class EnrollPlugin : public Plugin {
    * @return An enrollment secret or key material or identifier.
    */
   virtual std::string enroll() = 0;
+
+  /**
+   * @brief Populate a JSON object with host details.
+   *
+   * This will use kEnrollHostDetails to select from each table and
+   * construct a JSON object from the results of the first row of each.
+   * The input JSON object will have a key set for each table.
+   *
+   * @param host_details An output JSON object containing each table.
+   */
+  void genHostDetails(JSON& host_details);
 };
 
 /**
@@ -85,13 +106,4 @@ Status clearNodeKey();
  * @return enroll_secret The trimmed content read from FLAGS_enroll_secret_path.
  */
 const std::string getEnrollSecret();
-
-/**
- * @brief Enroll plugin registry.
- *
- * This creates an osquery registry for "enroll" which may implement
- * EnrollPlugin. Only strings are logged in practice, and EnrollPlugin
- * provides a helper member for transforming PluginRequests to strings.
- */
-CREATE_LAZY_REGISTRY(EnrollPlugin, "enroll");
 }

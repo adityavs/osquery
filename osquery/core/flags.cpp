@@ -1,14 +1,17 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/flags.h>
+#include <osquery/registry.h>
+
+#include "osquery/core/conversions.h"
 
 namespace boost {
 template <>
@@ -61,9 +64,34 @@ bool Flag::isDefault(const std::string& name) {
 }
 
 std::string Flag::getValue(const std::string& name) {
+  const auto& custom = instance().custom_;
+  auto custom_flag = custom.find(name);
+  if (custom_flag != custom.end()) {
+    return custom_flag->second;
+  }
+
   std::string current_value;
-  flags::GetCommandLineOption(name.c_str(), &current_value);
+  auto found = flags::GetCommandLineOption(name.c_str(), &current_value);
+
+  // If this is an extension and the flag was not found, forward the request.
+  if (Registry::get().external() && !found) {
+    PluginResponse resp;
+    Registry::call("config", {{"name", name}, {"action", "option"}}, resp);
+    if (resp.size() != 0) {
+      auto value = resp[0].find("value");
+      if (value != resp[0].end()) {
+        return value->second;
+      }
+    }
+  }
+
   return current_value;
+}
+
+long int Flag::getInt32Value(const std::string& name) {
+  long int value = 0;
+  safeStrtol(Flag::getValue(name), 10, value);
+  return value;
 }
 
 std::string Flag::getType(const std::string& name) {
@@ -94,6 +122,8 @@ Status Flag::updateValue(const std::string& name, const std::string& value) {
     auto& real_name = instance().aliases_.at(name).description;
     flags::SetCommandLineOption(real_name.c_str(), value.c_str());
     return Status(0, "OK");
+  } else if (name.find("custom_") == 0) {
+    instance().custom_[name] = value;
   }
   return Status(1, "Flag not found");
 }
@@ -112,9 +142,14 @@ std::map<std::string, FlagInfo> Flag::flags() {
     // Set the flag info from the internal info kept by Gflags, except for
     // the stored description. Gflag keeps an "unknown" value if the flag
     // was declared without a definition.
-    flags[flag.name] = {flag.type, instance().flags_.at(flag.name).description,
-                        flag.default_value, flag.current_value,
+    flags[flag.name] = {flag.type,
+                        instance().flags_.at(flag.name).description,
+                        flag.default_value,
+                        flag.current_value,
                         instance().flags_.at(flag.name)};
+  }
+  for (const auto& flag : instance().custom_) {
+    flags[flag.first] = {"string", "", "", flag.second, {}};
   }
   return flags;
 }

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <gtest/gtest.h>
@@ -30,7 +30,7 @@ class DecoratorsConfigParserPluginTests : public testing::Test {
 
     // Construct a config map, the typical output from `Config::genConfig`.
     config_data_["awesome"] = content_;
-    Config::getInstance().reset();
+    Config::get().reset();
     clearDecorations("awesome");
 
     // Backup the current decorator status.
@@ -39,7 +39,7 @@ class DecoratorsConfigParserPluginTests : public testing::Test {
   }
 
   void TearDown() override {
-    Config::getInstance().reset();
+    Config::get().reset();
     FLAGS_disable_decorators = decorator_status_;
   }
 
@@ -51,7 +51,7 @@ class DecoratorsConfigParserPluginTests : public testing::Test {
 
 TEST_F(DecoratorsConfigParserPluginTests, test_decorators_list) {
   // Assume the decorators are disabled.
-  Config::getInstance().update(config_data_);
+  Config::get().update(config_data_);
   auto parser = Config::getParser("decorators");
   EXPECT_NE(parser, nullptr);
 
@@ -65,7 +65,7 @@ TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_load) {
   // Re-enable the decorators, then update the config.
   // The 'load' decorator set should run every time the config is updated.
   FLAGS_disable_decorators = false;
-  Config::getInstance().update(config_data_);
+  Config::get().update(config_data_);
 
   QueryLogItem item;
   getDecorations(item.decorations);
@@ -76,13 +76,15 @@ TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_load) {
 TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_interval) {
   // Prevent loads from executing.
   FLAGS_disable_decorators = true;
-  Config::getInstance().update(config_data_);
+  Config::get().update(config_data_);
 
   // Mimic the schedule's execution.
   FLAGS_disable_decorators = false;
   runDecorators(DECORATE_INTERVAL, 60);
 
   QueryLogItem item;
+  item.epoch = 0L;
+  item.counter = 0L;
   getDecorations(item.decorations);
   ASSERT_EQ(item.decorations.size(), 2U);
   EXPECT_EQ(item.decorations.at("internal_60_test"), "test");
@@ -90,9 +92,10 @@ TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_interval) {
   std::string log_line;
   serializeQueryLogItemJSON(item, log_line);
   std::string expected =
-      "{\"snapshot\":\"\",\"action\":\"snapshot\",\"name\":\"\","
-      "\"hostIdentifier\":\"\",\"calendarTime\":\"\",\"unixTime\":\"0\","
-      "\"decorations\":{\"internal_60_test\":\"test\",\"one\":\"1\"}}\n";
+      "{\"snapshot\":[],\"action\":\"snapshot\",\"name\":\"\","
+      "\"hostIdentifier\":\"\",\"calendarTime\":\"\",\"unixTime\":0,"
+      "\"epoch\":0,\"counter\":0,"
+      "\"decorations\":{\"internal_60_test\":\"test\",\"one\":\"1\"}}";
   EXPECT_EQ(log_line, expected);
 
   // Now clear and run again.
@@ -110,7 +113,7 @@ TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_load_top_level) {
   FLAGS_disable_decorators = false;
   // enable top level decorations for the test
   FLAGS_decorations_top_level = true;
-  Config::getInstance().update(config_data_);
+  Config::get().update(config_data_);
 
   // make sure decorations object still exists
   QueryLogItem item;
@@ -118,11 +121,11 @@ TEST_F(DecoratorsConfigParserPluginTests, test_decorators_run_load_top_level) {
   ASSERT_EQ(item.decorations.size(), 3U);
   EXPECT_EQ(item.decorations["load_test"], "test");
 
-  // searialize the QueryLogItem and make sure decorations go top level
-  pt::ptree tree;
-  auto status = serializeQueryLogItem(item, tree);
+  // serialize the QueryLogItem and make sure decorations go top level
+  auto doc = JSON::newObject();
+  auto status = serializeQueryLogItem(item, doc);
   std::string expected = "test";
-  std::string result = tree.get("load_test", "none");
+  std::string result = doc.doc()["load_test"].GetString();
   EXPECT_EQ(result, expected);
 
   // disable top level decorations

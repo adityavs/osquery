@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sys/mman.h>
@@ -35,7 +35,7 @@ Status readMem(int fd, size_t base, size_t length, uint8_t* buffer) {
   // Read from raw memory until an unrecoverable read error or the all of the
   // requested bytes are read.
   size_t total_read = 0;
-  ssize_t bytes_read = 0;
+  ssize_t bytes_read = -1;
   while (total_read != length && bytes_read != 0) {
     bytes_read = read(fd, buffer + total_read, length - total_read);
     if (bytes_read == -1) {

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -32,8 +32,8 @@ extern const size_t kExtensionInitializeLatency;
 struct ExtensionInfo {
   std::string name;
   std::string version;
-  std::string min_sdk_version;
   std::string sdk_version;
+  std::string min_sdk_version;
 };
 
 typedef std::map<RouteUUID, ExtensionInfo> ExtensionList;
@@ -47,18 +47,25 @@ inline std::string getExtensionSocket(
 Status queryExternal(const std::string& query, QueryData& results);
 
 /// External (extensions) SQL implementation of the osquery getQueryColumns API.
-Status getQueryColumnsExternal(const std::string& q, TableColumns& columns);
+Status getQueryColumnsExternal(const std::string& query, TableColumns& columns);
 
 /// External (extensions) SQL implementation plugin provider for "sql" registry.
-class ExternalSQLPlugin : SQLPlugin {
+class ExternalSQLPlugin : public SQLPlugin {
  public:
-  Status query(const std::string& q, QueryData& results) const override {
-    return queryExternal(q, results);
+  Status query(const std::string& query,
+               QueryData& results,
+               bool use_cache = false) const override {
+    return queryExternal(query, results);
   }
 
-  Status getQueryColumns(const std::string& q,
+  Status getQueryTables(const std::string& query,
+                        std::vector<std::string>& tables) const override {
+    return Status(0, "Not used");
+  }
+
+  Status getQueryColumns(const std::string& query,
                          TableColumns& columns) const override {
-    return getQueryColumnsExternal(q, columns);
+    return getQueryColumnsExternal(query, columns);
   }
 };
 
@@ -121,6 +128,17 @@ Status loadModules(const std::string& loadfile);
 
 /// Load all modules in a direcotry.
 Status loadModuleFile(const std::string& path);
+
+/**
+ * @brief Initialize the extensions socket path variable for osqueryi.
+ *
+ * If the shell is invoked with a default extensions_socket flag there is a
+ * chance the path is 'overloaded' by multiple shells, use this method to
+ * determine a unique user-local path.
+ *
+ * @param home to user's home directory.
+ */
+void initShellSocket(const std::string& home);
 
 /**
  * @brief Call a Plugin exposed by an Extension Registry route.

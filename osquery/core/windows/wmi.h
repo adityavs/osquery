@@ -1,22 +1,26 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
+#include <codecvt>
 #include <iostream>
 #include <string>
 #include <vector>
 
-#include <codecvt>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #define _WIN32_DCOM
-#define WIN32_LEAN_AND_MEAN
+
 #include <WbemIdl.h>
 #include <Windows.h>
 
@@ -55,7 +59,7 @@ std::string wstringToString(const wchar_t* src);
 std::string bstrToString(const BSTR src);
 
 /**
-* @breif Helper class to hold 1 result object from a WMI request
+* @brief Helper class to hold 1 result object from a WMI request
 *
 * This class is used to return to the user just the base type
 * and value requested from WMI. The class is largely used by
@@ -96,6 +100,22 @@ class WmiResultItem {
   * @returns Status indiciating the success of the query
   */
   Status GetUChar(const std::string& name, unsigned char& ret) const;
+
+  /**
+  * @brief Windows WMI Helper function to retrieve an unsigned Short from WMI
+  * query
+  *
+  * @returns Status indiciating the success of the query
+  */
+  Status GetUnsignedShort(const std::string& name, unsigned short& ret) const;
+
+  /**
+  * @brief Windows WMI Helper function to retrieve an unsigned 32 bit integer
+  * from a WMI query
+  *
+  * @returns Status indiciating the success of the query
+  */
+  Status GetUnsignedInt32(const std::string& name, unsigned int& ret) const;
 
   /**
   * @brief Windows WMI Helper function to retrieve a Long result from a WMI

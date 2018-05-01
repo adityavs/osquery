@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -16,9 +16,8 @@
 #include <vector>
 
 #include <boost/noncopyable.hpp>
-#include <boost/property_tree/ptree.hpp>
 
-#include <osquery/database.h>
+#include <osquery/query.h>
 
 namespace osquery {
 
@@ -31,24 +30,21 @@ struct PackStats {
 
 /**
  * @brief The programmatic representation of a query pack
- *
- * Instantiating a new Pack object parses JSON and may throw a
- * boost::property_tree::json_parser::json_parser_error exception
  */
 class Pack : private boost::noncopyable {
  public:
-  Pack(const std::string& name, const boost::property_tree::ptree& tree)
-      : Pack(name, "", tree) {}
+  Pack(const std::string& name, const rapidjson::Value& obj)
+      : Pack(name, "", obj) {}
 
   Pack(const std::string& name,
        const std::string& source,
-       const boost::property_tree::ptree& tree) {
-    initialize(name, source, tree);
+       const rapidjson::Value& obj) {
+    initialize(name, source, obj);
   }
 
   void initialize(const std::string& name,
                   const std::string& source,
-                  const boost::property_tree::ptree& tree);
+                  const rapidjson::Value& obj);
   /**
    * @brief Getter for the pack's discovery query
    *
@@ -84,6 +80,9 @@ class Pack : private boost::noncopyable {
 
   /// Returns the schedule dictated by the pack
   const std::map<std::string, ScheduledQuery>& getSchedule() const;
+
+  /// Returns the schedule dictated by the pack
+  std::map<std::string, ScheduledQuery>& getSchedule();
 
   /// Verify that the platform is compatible
   bool checkPlatform() const;

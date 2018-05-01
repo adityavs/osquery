@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <iostream>
@@ -64,10 +64,30 @@ TEST_F(SQLiteUtilTests, test_sqlite_instance) {
   EXPECT_EQ(internal_db, SQLiteDBManager::get()->db());
 }
 
+TEST_F(SQLiteUtilTests, test_reset) {
+  auto internal_db = SQLiteDBManager::get()->db();
+  ASSERT_NE(nullptr, internal_db);
+
+  sqlite3_exec(internal_db,
+               "create view test_view as select 'test';",
+               nullptr,
+               nullptr,
+               nullptr);
+
+  SQLiteDBManager::resetPrimary();
+  auto instance = SQLiteDBManager::get();
+
+  QueryData results;
+  queryInternal("select * from test_view", results, instance);
+
+  // Assume the internal (primary) database we reset and recreated.
+  EXPECT_EQ(results.size(), 0U);
+}
+
 TEST_F(SQLiteUtilTests, test_direct_query_execution) {
   auto dbc = getTestDBC();
   QueryData results;
-  auto status = queryInternal(kTestQuery, results, dbc->db());
+  auto status = queryInternal(kTestQuery, results, dbc);
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(results, getTestDBExpectedResults());
 }
@@ -85,7 +105,7 @@ TEST_F(SQLiteUtilTests, test_passing_callback_no_data_param) {
 TEST_F(SQLiteUtilTests, test_aggregate_query) {
   auto dbc = getTestDBC();
   QueryData results;
-  auto status = queryInternal(kTestQuery, results, dbc->db());
+  auto status = queryInternal(kTestQuery, results, dbc);
   EXPECT_TRUE(status.ok());
   EXPECT_EQ(results, getTestDBExpectedResults());
 }
@@ -103,7 +123,7 @@ TEST_F(SQLiteUtilTests, test_get_test_db_result_stream) {
     }
 
     QueryData expected;
-    auto status = queryInternal(kTestQuery, expected, dbc->db());
+    auto status = queryInternal(kTestQuery, expected, dbc);
     EXPECT_EQ(expected, r.second);
   }
 }
@@ -111,7 +131,7 @@ TEST_F(SQLiteUtilTests, test_get_test_db_result_stream) {
 TEST_F(SQLiteUtilTests, test_affected_tables) {
   auto dbc = getTestDBC();
   QueryData results;
-  auto status = queryInternal("SELECT * FROM time", results, dbc->db());
+  auto status = queryInternal("SELECT * FROM time", results, dbc);
 
   // Since the table scanned from "time", it should be recorded as affected.
   EXPECT_EQ(dbc->affected_tables_.count("time"), 1U);
@@ -120,15 +140,19 @@ TEST_F(SQLiteUtilTests, test_affected_tables) {
 }
 
 TEST_F(SQLiteUtilTests, test_table_attributes_event_based) {
-  auto sql_internal = SQLInternal("select * from process_events");
-  if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
-    EXPECT_TRUE(sql_internal.ok());
-    EXPECT_TRUE(sql_internal.eventBased());
+  {
+    SQLInternal sql_internal("select * from process_events");
+    if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+      EXPECT_TRUE(sql_internal.ok());
+      EXPECT_TRUE(sql_internal.eventBased());
+    }
   }
 
-  sql_internal = SQLInternal("select * from time");
-  EXPECT_TRUE(sql_internal.ok());
-  EXPECT_FALSE(sql_internal.eventBased());
+  {
+    SQLInternal sql_internal("select * from time");
+    EXPECT_TRUE(sql_internal.ok());
+    EXPECT_FALSE(sql_internal.eventBased());
+  }
 }
 
 TEST_F(SQLiteUtilTests, test_get_query_columns) {
@@ -136,7 +160,7 @@ TEST_F(SQLiteUtilTests, test_get_query_columns) {
   TableColumns results;
 
   std::string query = "SELECT seconds, version FROM time JOIN osquery_info";
-  auto status = getQueryColumnsInternal(query, results, dbc->db());
+  auto status = getQueryColumnsInternal(query, results, dbc);
   ASSERT_TRUE(status.ok());
   ASSERT_EQ(2U, results.size());
   EXPECT_EQ(std::make_tuple(
@@ -147,8 +171,19 @@ TEST_F(SQLiteUtilTests, test_get_query_columns) {
             results[1]);
 
   query = "SELECT * FROM foo";
-  status = getQueryColumnsInternal(query, results, dbc->db());
+  status = getQueryColumnsInternal(query, results, dbc);
   ASSERT_FALSE(status.ok());
+}
+
+TEST_F(SQLiteUtilTests, test_get_query_tables) {
+  std::string query =
+      "SELECT * FROM time, osquery_info, (SELECT * FROM file) ff GROUP BY pid";
+  std::vector<std::string> tables;
+  auto status = getQueryTables(query, tables);
+  EXPECT_TRUE(status.ok());
+
+  std::vector<std::string> expected = {"file", "time", "osquery_info"};
+  EXPECT_EQ(expected, tables);
 }
 
 std::vector<ColumnType> getTypes(const TableColumns& columns) {
@@ -166,60 +201,60 @@ TEST_F(SQLiteUtilTests, test_query_planner) {
   TableColumns columns;
 
   std::string query = "select path, path from file";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, TEXT_TYPE}));
 
   query = "select path, seconds from file, time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, INTEGER_TYPE}));
 
   query = "select path || path from file";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE}));
 
   query = "select seconds, path || path from file, time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, TEXT_TYPE}));
 
   query = "select seconds, seconds from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, INTEGER_TYPE}));
 
   query = "select count(*) from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
 
   query = "select count(*), count(seconds), seconds from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns),
             TypeList({BIGINT_TYPE, BIGINT_TYPE, INTEGER_TYPE}));
 
   query = "select 1, 'path', path from file";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({INTEGER_TYPE, TEXT_TYPE, TEXT_TYPE}));
 
   query = "select weekday, day, count(*), seconds from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns),
             TypeList({TEXT_TYPE, INTEGER_TYPE, BIGINT_TYPE, INTEGER_TYPE}));
 
   query = "select seconds + 1 from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
 
   query = "select seconds * seconds from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({BIGINT_TYPE}));
 
   query = "select seconds > 1, seconds, count(seconds) from time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns),
             TypeList({INTEGER_TYPE, INTEGER_TYPE, BIGINT_TYPE}));
 
   query =
       "select f1.*, seconds, f2.directory from (select path || path from file) "
       "f1, file as f2, time";
-  getQueryColumnsInternal(query, columns, dbc->db());
+  getQueryColumnsInternal(query, columns, dbc);
   EXPECT_EQ(getTypes(columns), TypeList({TEXT_TYPE, INTEGER_TYPE, TEXT_TYPE}));
 }
 }

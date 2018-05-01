@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sstream>
@@ -14,8 +14,11 @@
 #include <signal.h>
 
 #include <boost/algorithm/string.hpp>
+#include <boost/filesystem.hpp>
 
 #include "osquery/core/process.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
 
@@ -54,7 +57,7 @@ PlatformProcess::PlatformProcess(PlatformProcess&& src) noexcept {
 }
 
 PlatformProcess::~PlatformProcess() {
-  if (id_ != kInvalidPid) {
+  if (isValid()) {
     ::CloseHandle(id_);
     id_ = kInvalidPid;
   }
@@ -71,20 +74,29 @@ bool PlatformProcess::operator!=(const PlatformProcess& process) const {
 }
 
 int PlatformProcess::pid() const {
-  return static_cast<int>(::GetProcessId(id_));
+  auto pid = (id_ == INVALID_HANDLE_VALUE) ? -1 : GetProcessId(id_);
+  return static_cast<int>(pid);
 }
 
 bool PlatformProcess::kill() const {
-  if (id_ == kInvalidPid) {
+  if (!isValid()) {
     return false;
   }
 
-  return (::TerminateProcess(id_, 0) != FALSE);
+  return (::TerminateProcess(nativeHandle(), 0) != FALSE);
+}
+
+bool PlatformProcess::killGracefully() const {
+  return kill();
 }
 
 ProcessState PlatformProcess::checkStatus(int& status) const {
   unsigned long exit_code = 0;
   if (!::GetExitCodeProcess(nativeHandle(), &exit_code)) {
+    unsigned long last_error = GetLastError();
+    if (last_error == ERROR_WAIT_NO_CHILDREN) {
+      return PROCESS_EXITED;
+    }
     return PROCESS_ERROR;
   }
 
@@ -102,8 +114,13 @@ std::shared_ptr<PlatformProcess> PlatformProcess::getCurrentProcess() {
   if (handle == nullptr) {
     return std::make_shared<PlatformProcess>();
   }
+  auto res = std::make_shared<PlatformProcess>(handle);
+  CloseHandle(handle);
+  return res;
+}
 
-  return std::make_shared<PlatformProcess>(handle);
+int PlatformProcess::getCurrentPid() {
+  return PlatformProcess::getCurrentProcess()->pid();
 }
 
 std::shared_ptr<PlatformProcess> PlatformProcess::getLauncherProcess() {
@@ -191,7 +208,7 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchWorker(
   // backing memory as modifiable.
   for (size_t i = 0; i < argc; i++) {
     std::string component(argv[i]);
-    if (component.find(" ") != std::string::npos) {
+    if (component.find(' ') != std::string::npos) {
       boost::replace_all(component, "\"", "\\\"");
       argv_stream << "\"" << component << "\" ";
     } else {
@@ -230,11 +247,10 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchWorker(
 
 std::shared_ptr<PlatformProcess> PlatformProcess::launchExtension(
     const std::string& exec_path,
-    const std::string& extension,
     const std::string& extensions_socket,
     const std::string& extensions_timeout,
     const std::string& extensions_interval,
-    const std::string& verbose) {
+    bool verbose) {
   ::STARTUPINFOA si = {0};
   ::PROCESS_INFORMATION pi = {nullptr};
 
@@ -243,15 +259,13 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchExtension(
   // To prevent errant double quotes from altering the intended arguments for
   // argv, we strip them out completely.
   std::stringstream argv_stream;
-  argv_stream << "\"osquery extension: "
-              << boost::replace_all_copy(extension, "\"", "") << "\" ";
+  argv_stream << "\"" << boost::replace_all_copy(exec_path, "\"", "") << "\" ";
+  if (verbose) {
+    argv_stream << "--verbose ";
+  }
   argv_stream << "--socket \"" << extensions_socket << "\" ";
   argv_stream << "--timeout " << extensions_timeout << " ";
   argv_stream << "--interval " << extensions_interval << " ";
-
-  if (verbose == "true") {
-    argv_stream << "--verbose";
-  }
 
   // We don't directly use argv.c_str() as the value for lpCommandLine in
   // CreateProcess since that argument requires a modifiable buffer. So,
@@ -268,33 +282,39 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchExtension(
     return std::shared_ptr<PlatformProcess>();
   }
 
-  auto status = ::CreateProcessA(exec_path.c_str(),
-                                 mutable_argv.data(),
-                                 nullptr,
-                                 nullptr,
-                                 TRUE,
-                                 0,
-                                 nullptr,
-                                 nullptr,
-                                 &si,
-                                 &pi);
-  unsetEnvVar("OSQUERY_EXTENSION");
+  auto ext_path = fs::path(exec_path);
 
-  if (!status) {
-    return std::shared_ptr<PlatformProcess>();
+  // We are autoloading a Python extension, so pass off to our helper
+  if (ext_path.extension().string() == ".ext") {
+    return launchTestPythonScript(
+        std::string(mutable_argv.begin(), mutable_argv.end()));
+  } else {
+    auto status = ::CreateProcessA(exec_path.c_str(),
+                                   mutable_argv.data(),
+                                   nullptr,
+                                   nullptr,
+                                   TRUE,
+                                   0,
+                                   nullptr,
+                                   nullptr,
+                                   &si,
+                                   &pi);
+    unsetEnvVar("OSQUERY_EXTENSION");
+
+    if (!status) {
+      return std::shared_ptr<PlatformProcess>();
+    }
+
+    auto process = std::make_shared<PlatformProcess>(pi.hProcess);
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+
+    return process;
   }
-
-  auto process = std::make_shared<PlatformProcess>(pi.hProcess);
-  ::CloseHandle(pi.hThread);
-  ::CloseHandle(pi.hProcess);
-
-  return process;
 }
 
-std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
+std::shared_ptr<PlatformProcess> PlatformProcess::launchTestPythonScript(
     const std::string& args) {
-  std::shared_ptr<PlatformProcess> process;
-
   STARTUPINFOA si = {0};
   PROCESS_INFORMATION pi = {nullptr};
 
@@ -304,7 +324,7 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
   si.cb = sizeof(si);
 
   auto pythonEnv = getEnvVar("OSQUERY_PYTHON_PATH");
-  std::string pythonPath("");
+  std::string pythonPath;
   if (pythonEnv.is_initialized()) {
     pythonPath = *pythonEnv;
   }
@@ -314,6 +334,7 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
   // environment variable.
   pythonPath += "\\python.exe";
 
+  std::shared_ptr<PlatformProcess> process;
   if (::CreateProcessA(pythonPath.c_str(),
                        mutable_argv.data(),
                        nullptr,
@@ -331,4 +352,4 @@ std::shared_ptr<PlatformProcess> PlatformProcess::launchPythonScript(
 
   return process;
 }
-}
+} // namespace osquery

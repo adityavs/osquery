@@ -1,17 +1,15 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
-#include <csignal>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -19,6 +17,12 @@
 #include <boost/filesystem/path.hpp>
 
 #include <osquery/core.h>
+
+#ifdef WIN32
+#include <osquery/windows/system.h>
+#else
+#include <osquery/posix/system.h>
+#endif
 
 namespace osquery {
 
@@ -31,6 +35,8 @@ namespace osquery {
  * that will continue the shutdown process.
  */
 extern volatile std::sig_atomic_t kExitCode;
+
+using ModuleHandle = void*;
 
 class Initializer : private boost::noncopyable {
  public:
@@ -80,9 +86,18 @@ class Initializer : private boost::noncopyable {
    */
   void initWorkerWatcher(const std::string& name = "") const;
 
+  /**
+   * @brief Move a function callable into the initializer to be called.
+   *
+   * Install an optional platform method to call when waiting for shutdown.
+   * This exists for Windows when the daemon must wait for the service to stop.
+   */
+  void installShutdown(std::function<void()>& handler);
+
   /// Assume initialization finished, start work.
   void start() const;
 
+ public:
   /**
    * @brief Forcefully request the application to stop.
    *
@@ -127,13 +142,22 @@ class Initializer : private boost::noncopyable {
   static void platformSetup();
 
   /**
-  * @brief Before ending, tear down any platform specific setup
-  *
-  * On windows, we require the COM libraries be initialized just once
-  */
+   * @brief Before ending, tear down any platform specific setup
+   *
+   * On windows, we require the COM libraries be initialized just once
+   */
   static void platformTeardown();
 
- public:
+  /// Check the program is the osquery daemon.
+  static bool isDaemon() {
+    return kToolType == ToolType::DAEMON;
+  }
+
+  /// Check the program is the osquery shell.
+  static bool isShell() {
+    return kToolType == ToolType::SHELL;
+  }
+
   /**
    * @brief Check if a process is an osquery worker.
    *
@@ -145,12 +169,23 @@ class Initializer : private boost::noncopyable {
    */
   static bool isWorker();
 
+  /**
+   * @brief Check is a process is an osquery watcher.
+   *
+   * Is watcher is different from the opposite of isWorker. An osquery process
+   * may have disabled the watchdog so the parent could be doing the work or
+   * the worker child.
+   */
+  static bool isWatcher();
+
+ public:
   /// Initialize this process as an osquery daemon worker.
   void initWorker(const std::string& name) const;
 
   /// Initialize the osquery watcher, optionally spawn a worker.
   void initWatcher() const;
 
+  /// This pauses the watchdog process until the watcher thread stops.
   void waitForWatcher() const;
 
  private:
@@ -164,88 +199,15 @@ class Initializer : private boost::noncopyable {
   /// A saved, mutable, reference to the process's argv.
   char*** argv_{nullptr};
 
-  /// The deduced tool type, determined by initializer construction.
-  ToolType tool_;
-
   /// The deduced program name determined by executing path.
   std::string binary_;
+
+  /// A platform specific callback to wait for shutdown.
+  static std::function<void()> shutdown_;
+
+  /// Mutex to protect use of the shutdown callable.
+  static RecursiveMutex shutdown_mutex_;
 };
-
-#ifndef WIN32
-class DropPrivileges;
-typedef std::shared_ptr<DropPrivileges> DropPrivilegesRef;
-
-class DropPrivileges : private boost::noncopyable {
- public:
-  /// Make call sites use 'dropTo' booleans to improve the UI.
-  static DropPrivilegesRef get() {
-    DropPrivilegesRef handle = DropPrivilegesRef(new DropPrivileges());
-    return handle;
-  }
-
-  /**
-   * @brief Attempt to drop privileges to that of the parent of a given path.
-   *
-   * This will return false if privileges could not be dropped or there was
-   * an previous, and still active, request for dropped privileges.
-   *
-   * @return success if privileges were dropped, otherwise false.
-   */
-  bool dropToParent(const boost::filesystem::path& path);
-
-  /// See DropPrivileges::dropToParent but explicitly set the UID and GID.
-  bool dropTo(uid_t uid, gid_t gid);
-
-  /// See DropPrivileges::dropToParent but for a user's UID and GID.
-  bool dropTo(const std::string& user);
-
-  /// Check if effective privileges do not match real.
-  bool dropped() {
-    return (getuid() != geteuid() || getgid() != getegid());
-  }
-
-  /**
-   * @brief The privilege/permissions dropper deconstructor will restore
-   * effective permissions.
-   *
-   * There should only be a single drop of privilege/permission active.
-   */
-  virtual ~DropPrivileges();
-
- private:
-  DropPrivileges() : dropped_(false), to_user_(0), to_group_(0) {}
-
-  /// Restore groups if dropping consecutively.
-  void restoreGroups();
-
- private:
-  /// Boolean to track if this instance needs to restore privileges.
-  bool dropped_;
-
-  /// The user this instance dropped privileges to.
-  uid_t to_user_;
-
-  /// The group this instance dropped privileges to.
-  gid_t to_group_;
-
-  /**
-   * @brief If dropping explicitly to a user and group also drop groups.
-   *
-   * Original process groups before explicitly dropping privileges.
-   * On restore, if there are any groups in this list, they will be added
-   * to the processes group list.
-   */
-  gid_t* original_groups_{nullptr};
-
-  /// The size of the original groups to backup when restoring privileges.
-  size_t group_size_{0};
-
- private:
-  FRIEND_TEST(PermissionsTests, test_explicit_drop);
-  FRIEND_TEST(PermissionsTests, test_path_drop);
-  FRIEND_TEST(PermissionsTests, test_nobody_drop);
-};
-#endif
 
 /**
  * @brief Getter for a host's current hostname
@@ -253,6 +215,37 @@ class DropPrivileges : private boost::noncopyable {
  * @return a string representing the host's current hostname
  */
 std::string getHostname();
+
+/**
+ * @brief Getter for a host's fully qualified domain name
+ *
+ * @return a string representation of the hosts fully qualified domain name
+ * if the host is joined to a domain, otherwise it simply returns the hostname
+ */
+std::string getFqdn();
+
+/**
+ * @brief Generate a new generic UUID
+ *
+ * @return a string containing a random UUID
+ */
+std::string generateNewUUID();
+
+/**
+ * @brief Getter for an instance uuid
+ *
+ * @return ok on success and ident is set to the instance uuid, otherwise
+ * failure.
+ */
+Status getInstanceUUID(std::string& ident);
+
+/**
+ * @brief Getter for an ephemeral uuid
+ *
+ * @return ok on success and ident is set to the ephemeral uuid, otherwise
+ * failure.
+ */
+Status getEphemeralUUID(std::string& ident);
 
 /**
  * @brief Getter for a host's uuid.
@@ -276,11 +269,40 @@ std::string generateHostUUID();
 std::string getHostIdentifier();
 
 /**
+ * @brief Converts struct tm to a size_t
+ *
+ * @param tm_time the time/date to convert to UNIX epoch time
+ *
+ * @return an int representing the UNIX epoch time of the struct tm
+ */
+size_t toUnixTime(const struct tm* tm_time);
+
+/**
  * @brief Getter for the current UNIX time.
  *
  * @return an int representing the amount of seconds since the UNIX epoch
  */
 size_t getUnixTime();
+
+/**
+ * @brief Converts a struct tm into a human-readable format. This expected the
+ * struct tm to be already in UTC time/
+ *
+ * @param tm_time the time/date to convert to ASCII
+ *
+ * @return the data/time of tm_time in the format: "Wed Sep 21 10:27:52 2011"
+ */
+std::string toAsciiTime(const struct tm* tm_time);
+
+/**
+ * @brief Converts a struct tm to ASCII time UTC by converting the tm_time to
+ * epoch and then running gmtime() on the new epoch
+ *
+ * @param tm_time the local time/date to covert to UTC ASCII time
+ *
+ * @return the data/time of tm_time in the format: "Wed Sep 21 10:27:52 2011"
+ */
+std::string toAsciiTimeUTC(const struct tm* tm_time);
 
 /**
  * @brief Getter for the current time, in a human-readable format.
@@ -297,17 +319,9 @@ std::string getAsciiTime();
 Status createPidFile();
 
 /**
-* @brief Getter for determining Admin status
-*
-* @return A bool indicating if the current process is running as admin
-*/
+ * @brief Getter for determining Admin status
+ *
+ * @return A bool indicating if the current process is running as admin
+ */
 bool isUserAdmin();
-
-#ifdef WIN32
-// Microsoft provides FUNCTION_s with more or less the same parameters.
-// Notice that they are swapped when compared to POSIX FUNCTION_r.
-struct tm* gmtime_r(time_t* t, struct tm* result);
-
-struct tm* localtime_r(time_t* t, struct tm* result);
-#endif
-}
+} // namespace osquery

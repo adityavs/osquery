@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -16,6 +16,7 @@
 
 #include <osquery/core.h>
 #include <osquery/filesystem.h>
+#include <osquery/logger.h>
 #include <osquery/tables.h>
 
 namespace fs = boost::filesystem;
@@ -27,7 +28,7 @@ namespace tables {
 #define kCbSensorIdFile "/var/lib/cb/sensor.id"
 // Path to the Carbon Black sensor settings file
 #define kCbSensorSettingsFile "/var/lib/cb/sensorsettings.ini"
-// Path to Carbon Black direcotry
+// Path to Carbon Black directory
 #define kCbDir "/var/lib/cb/"
 
 // Get the Carbon Black sensor ID
@@ -54,7 +55,14 @@ void getSensorSettings(Row& r) {
     return;
   }
   boost::property_tree::ptree pt;
-  boost::property_tree::ini_parser::read_ini(kCbSensorSettingsFile, pt);
+  try {
+    boost::property_tree::ini_parser::read_ini(kCbSensorSettingsFile, pt);
+  } catch (const boost::property_tree::ini_parser::ini_parser_error& e) {
+    LOG(ERROR) << "Error parsing ini file: " << e.what();
+    return;
+  }
+
+  // After successful parsing, the values are extracted
   std::string config_name = pt.get<std::string>("CB.ConfigName");
   boost::replace_all(config_name, "%20", " ");
   r["config_name"] = SQL_TEXT(config_name);

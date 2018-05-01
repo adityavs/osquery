@@ -1,14 +1,12 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
-
-#include <chrono>
 
 #include <osquery/dispatcher.h>
 #include <osquery/flags.h>
@@ -24,7 +22,7 @@ FLAG(int32, worker_threads, 4, "Number of work dispatch threads");
 
 /// Cancel the pause request.
 void RunnerInterruptPoint::cancel() {
-  WriteLock lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   stop_ = true;
   condition_.notify_all();
 }
@@ -90,8 +88,10 @@ Status Dispatcher::addService(InternalRunnableRef service) {
   auto thread = std::make_shared<std::thread>(
       std::bind(&InternalRunnable::run, &*service));
   WriteLock lock(self.mutex_);
-  DLOG(INFO) << "Adding new service: " << service.get()
-             << " to thread: " << thread.get();
+  DLOG(INFO) << "Adding new service: " << service->name() << " ("
+             << service.get() << ") to thread: " << thread->get_id() << " ("
+             << thread.get() << ") in process " << platformGetPid();
+
   self.service_threads_.push_back(thread);
   self.services_.push_back(std::move(service));
   return Status(0, "OK");
@@ -155,4 +155,4 @@ void Dispatcher::stopServices() {
     DLOG(INFO) << "Service: " << service.get() << " has been interrupted";
   }
 }
-}
+} // namespace osquery

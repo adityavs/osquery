@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <gtest/gtest.h>
@@ -55,7 +55,8 @@ class TestTablePlugin : public TablePlugin {
 };
 
 TEST_F(SQLTests, test_raw_access_context) {
-  Registry::add<TestTablePlugin>("table", "test");
+  auto tables = RegistryFactory::get().registry("table");
+  tables->add("test", std::make_shared<TestTablePlugin>());
   auto results = SQL::selectAllFrom("test");
 
   EXPECT_EQ(results.size(), 1U);
@@ -104,5 +105,53 @@ TEST_F(SQLTests, test_sql_escape) {
   input = "The quick brown fox jumps over the lazy dog.";
   escapeNonPrintableBytesEx(input);
   EXPECT_EQ(input, "The quick brown fox jumps over the lazy dog.");
+}
+
+TEST_F(SQLTests, test_sql_base64_encode) {
+  QueryData d;
+  query("select to_base64('test') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"], "dGVzdA==");
+}
+
+TEST_F(SQLTests, test_sql_base64_decode) {
+  QueryData d;
+  query("select from_base64('dGVzdA==') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"], "test");
+}
+
+TEST_F(SQLTests, test_sql_base64_conditional_encode) {
+  QueryData d;
+  query("select conditional_to_base64('test') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"], "test");
+
+  QueryData d2;
+  query("select conditional_to_base64('悪因悪果') as test;", d2);
+  EXPECT_EQ(d2.size(), 1U);
+  EXPECT_EQ(d2[0]["test"], "5oKq5Zug5oKq5p6c");
+}
+
+TEST_F(SQLTests, test_sql_md5) {
+  QueryData d;
+  query("select md5('test') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"], "098f6bcd4621d373cade4e832627b4f6");
+}
+
+TEST_F(SQLTests, test_sql_sha1) {
+  QueryData d;
+  query("select sha1('test') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"], "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3");
+}
+
+TEST_F(SQLTests, test_sql_sha256) {
+  QueryData d;
+  query("select sha256('test') as test;", d);
+  EXPECT_EQ(d.size(), 1U);
+  EXPECT_EQ(d[0]["test"],
+            "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08");
 }
 }

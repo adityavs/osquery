@@ -1,36 +1,51 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
-#include <deque>
 #include <map>
-#include <memory>
 #include <set>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
+#ifdef WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
+#ifndef WIN32
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-variable"
+#endif
+
+/// Wrap this include with the above and below ignored warnings for FreeBSD.
+#include <boost/coroutine2/coroutine.hpp>
+
+#ifndef WIN32
+#pragma clang diagnostic pop
+#endif
+
 #include <boost/lexical_cast.hpp>
-#include <boost/property_tree/ptree.hpp>
 
 #include <osquery/core.h>
-#include <osquery/database.h>
+#include <osquery/query.h>
 #include <osquery/registry.h>
 #include <osquery/status.h>
 
 /// Allow Tables to use "tracked" deprecated OS APIs.
 #define OSQUERY_USE_DEPRECATED(expr)                                           \
   do {                                                                         \
-    _Pragma("clang diagnostic push")                                           \
-        _Pragma("clang diagnostic ignored \"-Wdeprecated-declarations\"")      \
-            expr;                                                              \
+    _Pragma("clang diagnostic push") _Pragma(                                  \
+        "clang diagnostic ignored \"-Wdeprecated-declarations\"")(expr);       \
     _Pragma("clang diagnostic pop")                                            \
   } while (0)
 
@@ -95,9 +110,9 @@ inline std::string __sqliteField(const Type& source) noexcept {
 /// See the literal type documentation for TEXT_LITERAL.
 #define INTEGER_LITERAL int
 /// See the literal type documentation for TEXT_LITERAL.
-#define BIGINT_LITERAL long long int
+#define BIGINT_LITERAL int64_t
 /// See the literal type documentation for TEXT_LITERAL.
-#define UNSIGNED_BIGINT_LITERAL unsigned long long int
+#define UNSIGNED_BIGINT_LITERAL uint64_t
 /// See the literal type documentation for TEXT_LITERAL.
 #define DOUBLE_LITERAL double
 /// Cast an SQLite affinity type to the literal type.
@@ -136,7 +151,7 @@ enum ConstraintOperator : unsigned char {
 };
 
 /// Type for flags for what constraint operators are admissible.
-typedef unsigned char ConstraintOperatorFlag;
+using ConstraintOperatorFlag = unsigned char;
 
 /// Flag for any operator type.
 #define ANY_OP 0xFFU
@@ -156,8 +171,8 @@ struct Constraint {
   }
 
   // A constraint list in a context knows only the operator at creation.
-  explicit Constraint(unsigned char _op, const std::string& _expr)
-      : op(_op), expr(_expr) {}
+  explicit Constraint(unsigned char _op, std::string _expr)
+      : op(_op), expr(std::move(_expr)) {}
 };
 
 /*
@@ -287,10 +302,8 @@ struct QueryContext;
  */
 struct ConstraintList : private boost::noncopyable {
  public:
-  ConstraintList() : affinity(TEXT_TYPE) {}
-
   /// The SQLite affinity type.
-  ColumnType affinity;
+  ColumnType affinity{TEXT_TYPE};
 
   /**
    * @brief Check if an expression matches the query constraints.
@@ -332,7 +345,7 @@ struct ConstraintList : private boost::noncopyable {
    * @param ops (Optional: default ANY_OP) The operators types to look for.
    * @return true if any constraint exists.
    */
-  bool exists(const ConstraintOperatorFlag ops = ANY_OP) const;
+  bool exists(ConstraintOperatorFlag ops = ANY_OP) const;
 
   /**
    * @brief Check if a constraint exists AND matches the type expression.
@@ -415,10 +428,10 @@ struct ConstraintList : private boost::noncopyable {
    *   ]
    * }
    */
-  void serialize(boost::property_tree::ptree& tree) const;
+  void serialize(JSON& doc, rapidjson::Value& obj) const;
 
   /// See ConstraintList::unserialize.
-  void unserialize(const boost::property_tree::ptree& tree);
+  void deserialize(const rapidjson::Value& obj);
 
  private:
   /// List of constraint operator/expressions.
@@ -492,24 +505,34 @@ struct VirtualTableContent {
   std::map<std::string, Row> cache;
 };
 
+using RowGenerator = boost::coroutines2::coroutine<Row&>;
+using RowYield = RowGenerator::push_type;
+
 /**
  * @brief A QueryContext is provided to every table generator for optimization
  * on query components like predicate constraints and limits.
  */
-struct QueryContext : private boost::noncopyable {
+struct QueryContext : private only_movable {
   /// Construct a context without cache support.
-  QueryContext() : enable_cache_(false), table_(new VirtualTableContent()) {}
+  QueryContext() : table_(new VirtualTableContent()) {}
 
   /// If the context was created without content, it is ephemeral.
   ~QueryContext() {
     if (!enable_cache_ && table_ != nullptr) {
       delete table_;
+      table_ = nullptr;
     }
   }
 
   /// Construct a context and set the table content for caching.
   explicit QueryContext(VirtualTableContent* content)
       : enable_cache_(true), table_(content) {}
+
+  /// Allow moving.
+  QueryContext(QueryContext&&) = default;
+
+  /// Allow move assignment.
+  QueryContext& operator=(QueryContext&&) = delete;
 
   /**
    * @brief Check if a constraint exists for a given column operator pair.
@@ -542,9 +565,9 @@ struct QueryContext : private boost::noncopyable {
    * @param predicate A predicate receiving each expression.
    */
   template <typename T>
-  void forEachConstraint(const std::string& column,
-                         ConstraintOperator op,
-                         std::function<void(const T& expr)> predicate) const {
+  void iteritems(const std::string& column,
+                 ConstraintOperator op,
+                 std::function<void(const T& expr)> predicate) const {
     if (constraints.count(column) > 0) {
       const auto& list = constraints.at(column);
       if (list.affinity == TEXT_TYPE) {
@@ -563,11 +586,10 @@ struct QueryContext : private boost::noncopyable {
   }
 
   /// Helper for string type (most all types are TEXT/VARCHAR).
-  void forEachConstraint(
-      const std::string& column,
-      ConstraintOperator op,
-      std::function<void(const std::string& expr)> predicate) const {
-    return forEachConstraint<std::string>(column, op, predicate);
+  void iteritems(const std::string& column,
+                 ConstraintOperator op,
+                 std::function<void(const std::string& expr)> predicate) const {
+    return iteritems<std::string>(column, op, std::move(predicate));
   }
 
   /**
@@ -595,39 +617,37 @@ struct QueryContext : private boost::noncopyable {
                            std::set<std::string>& output)> predicate);
 
   /// Check if a table-defined index exists within the query cache.
-  bool isCached(const std::string& index) {
-    return (table_->cache.count(index) != 0);
-  }
+  bool isCached(const std::string& index) const;
 
   /// Retrieve an index within the query cache.
-  const Row& getCache(const std::string& index) {
-    return table_->cache[index];
-  }
+  const Row& getCache(const std::string& index);
 
   /// Helper to retrieve a keyed element within the query cache.
-  const std::string& getCache(const std::string& index,
-                              const std::string& key) {
-    return table_->cache[index][key];
-  }
+  const std::string& getCache(const std::string& index, const std::string& key);
+
+  /// Request the context use the warm query cache.
+  void useCache(bool use_cache);
+
+  /// Check if the query requested use of the warm query cache.
+  bool useCache() const;
 
   /// Set the entire cache for an index.
-  void setCache(const std::string& index, Row _cache) {
-    table_->cache[index] = std::move(_cache);
-  }
+  void setCache(const std::string& index, Row _cache);
 
   /// Helper to set a keyed element within the query cache.
   void setCache(const std::string& index,
                 const std::string& key,
-                std::string _item) {
-    table_->cache[index][key] = std::move(_item);
-  }
+                std::string _item);
 
   /// The map of column name to constraint list.
   ConstraintMap constraints;
 
  private:
-  /// If false then the context is maintaining a ephemeral cache.
+  /// If false then the context is maintaining an ephemeral cache.
   bool enable_cache_{false};
+
+  /// If the context is allowed to use the warm query cache.
+  bool use_cache_{false};
 
   /// Persistent table content for table caching.
   VirtualTableContent* table_{nullptr};
@@ -650,7 +670,7 @@ using Constraint = struct Constraint;
  * in osquery/tables/templates/default.cpp.in
  */
 class TablePlugin : public Plugin {
- protected:
+ public:
   /**
    * @brief Table name aliases create full-scan VIEWs for tables.
    *
@@ -692,11 +712,42 @@ class TablePlugin : public Plugin {
    * virtual table APIs. In the best case this context include a limit or
    * constraints organized by each possible column.
    *
-   * @param request A query context filled in by SQLite's virtual table API.
+   * @param context A query context filled in by SQLite's virtual table API.
    * @return The result rows for this table, given the query context.
    */
-  virtual QueryData generate(QueryContext& request) {
+  virtual QueryData generate(QueryContext& context) {
+    (void)context;
     return QueryData();
+  }
+
+  /**
+   * @brief Generate a table representation by yielding each row.
+   *
+   * For tables that set generator=True in their spec's implementation, this
+   * generator will be bound to an asymmetric coroutine. It should call the
+   * provided yield function for each Row returned. Treat this like Python's
+   * generator-type methods where the only difference is yield is not reserved
+   * but rather provided with some boilerplate syntax.
+   *
+   * This implementation uses nearly %5 more cycles than the generate method
+   * when the table content is small (less than 100 rows) and has a disadvantage
+   * of not being cachable since the entire contents are not available before
+   * post-filter aggregations. This implementation prevents the need for
+   * multiple representations of table content existing simultaneously and is
+   * always more memory efficient. It can be more compute efficient for tables
+   * with over 1000 rows.
+   *
+   * @param yield a callable that takes a single Row as input.
+   * @param context a query context filled in by SQLite's virtual table API.
+   */
+  virtual void generator(RowYield& yield, QueryContext& context) {
+    (void)yield;
+    (void)context;
+  }
+
+  /// Override and return true to use the generator and yield method.
+  virtual bool usesGenerator() const {
+    return false;
   }
 
  protected:
@@ -726,9 +777,10 @@ class TablePlugin : public Plugin {
    * practice this does not perform well and is explicitly disabled.
    *
    * @param interval The interval this query expects the tables results.
+   * @param ctx The query context.
    * @return True if the cache contains fresh results, otherwise false.
    */
-  bool isCached(size_t interval);
+  bool isCached(size_t interval, const QueryContext& ctx) const;
 
   /**
    * @brief Perform a database lookup of cached results and deserialize.
@@ -741,8 +793,17 @@ class TablePlugin : public Plugin {
    */
   QueryData getCache() const;
 
-  /// Similar to TablePlugin::getCache, if TablePlugin::generate is called.
-  void setCache(size_t step, size_t interval, const QueryData& results);
+  /**
+   * @brief Similar to getCache, stores the results from generate.
+   *
+   * Set will serialize and save the results as JSON to be retrieved later.
+   * It will inspect the query context, if any required/indexed/optimized or
+   * additional columns are used then the cache will not be saved.
+   */
+  void setCache(size_t step,
+                size_t interval,
+                const QueryContext& ctx,
+                const QueryData& results);
 
  private:
   /// The last time in seconds the table data results were saved to cache.
@@ -810,6 +871,8 @@ class TablePlugin : public Plugin {
   FRIEND_TEST(VirtualTableTests, test_tableplugin_columndefinition);
   FRIEND_TEST(VirtualTableTests, test_tableplugin_statement);
   FRIEND_TEST(VirtualTableTests, test_indexing_costs);
+  FRIEND_TEST(VirtualTableTests, test_table_results_cache);
+  FRIEND_TEST(VirtualTableTests, test_yield_generator);
 };
 
 /// Helper method to generate the virtual table CREATE statement.
@@ -826,6 +889,4 @@ inline const std::string& columnTypeName(ColumnType type) {
 
 /// Get the column type from the string representation.
 ColumnType columnTypeName(const std::string& type);
-
-CREATE_LAZY_REGISTRY(TablePlugin, "table");
-}
+} // namespace osquery

@@ -2,14 +2,16 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 
 class GlibcLegacy < AbstractOsqueryFormula
   desc "The GNU C Library"
-  homepage "https://www.gnu.org/software/libc/download.html"
-  url "https://ftp.heanet.ie/mirrors/gnu/glibc/glibc-2.13.tar.bz2"
+  homepage "https://www.gnu.org/software/libc"
+  license "GPL-2.0+"
+  url "ftp.gnu.org/gnu/glibc/glibc-2.13.tar.bz2"
   sha256 "0173c92a0545e6d99a46a4fbed2da00ba26556f5c6198e2f9f1631ed5318dbb2"
+  revision 201
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "57535af3eadc4fe7158f2f2a1f721b113d88ffd825ace3ccbc96f95600657f17" => :x86_64_linux
+    sha256 "830479008c2c95055eac05d4954e5f3890154a553a518487dc4eb4a2e37f4f4a" => :x86_64_linux
   end
 
   # Must apply patches to allow compiling with newer versions of GCC/gmake.
@@ -18,10 +20,10 @@ class GlibcLegacy < AbstractOsqueryFormula
   patch :DATA
 
   # binutils 2.20 or later is required
-  depends_on "binutils" => [:build, :recommended]
+  depends_on "binutils"
 
   # Linux kernel headers 2.6.19 or later are required
-  depends_on "linux-headers" => [:build, :recommended]
+  depends_on "linux-headers"
 
   # This package is provided for legacy headers and linking to maintain ABI
   # compatibility for the deploy-targets.
@@ -47,8 +49,8 @@ class GlibcLegacy < AbstractOsqueryFormula
         "--without-selinux",
         "--disable-sanity-checks",
       ] # Fix error: selinux/selinux.h: No such file or directory
-      args << "--with-binutils=#{Formula["binutils"].bin}" if build.with? "binutils" or true
-      args << "--with-headers=#{Formula["linux-headers"].include}" if build.with? "linux-headers" or true
+      args << "--with-binutils=#{Formula["binutils"].bin}"
+      args << "--with-headers=#{Formula["linux-headers"].include}"
       system "../configure", *args
 
       system "make" # Fix No rule to make target libdl.so.2 needed by sprof
@@ -63,12 +65,6 @@ class GlibcLegacy < AbstractOsqueryFormula
   def post_install
     # Fix permissions
     chmod 0755, [lib/"ld-#{version}.so", lib/"libc-#{version}.so"]
-  end
-
-  test do
-    system "#{lib}/ld-#{version}.so 2>&1 |grep Usage"
-    system "#{lib}/libc-#{version}.so", "--version"
-    system "#{bin}/locale", "--version"
   end
 end
 
@@ -125,3 +121,16 @@ diff -Nur glibc-2.12.2/math/bits/mathcalls.h glibc-2.12.2-patched/math/bits/math
 
  /* Bessel functions.  */
  __MATHCALL (j0,, (_Mdouble_));
+diff --git a/include/features.h b/include/features.h
+index d9b6de9..05677a9 100644
+--- a/include/features.h
++++ b/include/features.h
+@@ -338,7 +338,7 @@
+ /* Major and minor version number of the GNU C library package.  Use
+    these macros to test for features in specific releases.  */
+ #define	__GLIBC__	2
+-#define	__GLIBC_MINOR__	13
++#define	__GLIBC_MINOR__	12
+ 
+ #define __GLIBC_PREREQ(maj, min) \
+	((__GLIBC__ << 16) + __GLIBC_MINOR__ >= ((maj) << 16) + (min))

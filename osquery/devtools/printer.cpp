@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <iostream>
@@ -20,7 +20,7 @@
 
 namespace osquery {
 
-SHELL_FLAG(string, nullvalue, "", "Set string for NULL values, default ''");
+DECLARE_string(nullvalue);
 
 static std::vector<char> kOffset = {0, 0};
 static std::string kToken = "|";
@@ -137,7 +137,6 @@ void jsonPrint(const QueryData& q) {
     std::string row_string;
 
     if (serializeRowJSON(q[i], row_string).ok()) {
-      row_string.pop_back();
       printf("  %s", row_string.c_str());
       if (i < q.size() - 1) {
         printf(",\n");

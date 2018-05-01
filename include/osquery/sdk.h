@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -21,7 +21,6 @@
 #include <osquery/extensions.h>
 #include <osquery/filesystem.h>
 #include <osquery/flags.h>
-#include <osquery/hash.h>
 #include <osquery/logger.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
@@ -54,19 +53,10 @@ REGISTER_INTERNAL(ExternalSQLPlugin, "sql", "sql");
  * module call-in well defined symbol, declare their SDK constraints, then
  * use the REGISTER_MODULE call within `initModule`.
  */
-#define REGISTER_EXTERNAL(type, registry, name)                                \
-  struct type##ExtensionRegistryItem : public InitializerInterface {           \
-    type##ExtensionRegistryItem(void) {                                        \
-      registerPlugin(this);                                                    \
-    }                                                                          \
-    const char *id() const override {                                          \
-      return registry "." name;                                                \
-    }                                                                          \
-    void run() const override {                                                \
-      Registry::add<type>(registry, name);                                     \
-    }                                                                          \
-  };                                                                           \
-  static type##ExtensionRegistryItem type##instance_;
+#define REGISTER_EXTERNAL(t, r, n)                                             \
+  namespace registries {                                                       \
+  const ::osquery::registries::PI<t> k##ExtensionRegistryItem##t(r, n, false); \
+  }
 
 /**
  * @brief Create an osquery extension 'module'.
@@ -88,7 +78,7 @@ REGISTER_INTERNAL(ExternalSQLPlugin, "sql", "sql");
   extern "C" EXPORT_FUNCTION void initModule(void);                            \
   struct osquery_InternalStructCreateModule {                                  \
     osquery_InternalStructCreateModule(void) {                                 \
-      Registry::declareModule(                                                 \
+      Registry::get().declareModule(                                           \
           name, version, min_sdk_version, OSQUERY_SDK_VERSION);                \
     }                                                                          \
   };                                                                           \
@@ -109,7 +99,7 @@ REGISTER_INTERNAL(ExternalSQLPlugin, "sql", "sql");
   struct osquery_InternalStructCreateModule {                                  \
     osquery_InternalStructCreateModule(void) {                                 \
       if ((expr)) {                                                            \
-        Registry::declareModule(                                               \
+        Registry::get().declareModule(                                         \
             name, version, min_sdk_version, OSQUERY_SDK_VERSION);              \
       }                                                                        \
     }                                                                          \
@@ -117,8 +107,8 @@ REGISTER_INTERNAL(ExternalSQLPlugin, "sql", "sql");
   static osquery_InternalStructCreateModule osquery_internal_module_instance_;
 
 /// Helper replacement for REGISTER, used within extension modules.
-#define REGISTER_MODULE(type, registry, name)                                  \
-  auto type##ModuleRegistryItem = Registry::add<type>(registry, name)
+#define REGISTER_MODULE(t, r, n)                                               \
+  auto t##Module = Registry::get().registry(r)->add(n, std::make_shared<t>());
 
 // Remove registry-helper macros from the SDK.
 #undef REGISTER
@@ -130,4 +120,3 @@ REGISTER_INTERNAL(ExternalSQLPlugin, "sql", "sql");
 #undef CREATE_LAZY_REGISTRY
 #define CREATE_LAZY_REGISTRY "Do not CREATE_LAZY_REGISTRY in the osquery SDK"
 }
-

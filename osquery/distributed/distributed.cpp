@@ -1,17 +1,17 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sstream>
 #include <utility>
 
-#include <osquery/core.h>
+#include <osquery/database.h>
 #include <osquery/distributed.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
@@ -20,7 +20,7 @@
 #include "osquery/core/conversions.h"
 #include "osquery/core/json.h"
 
-namespace pt = boost::property_tree;
+namespace rj = rapidjson;
 
 namespace osquery {
 
@@ -35,31 +35,33 @@ FLAG(bool,
 
 const std::string kDistributedQueryPrefix{"distributed."};
 
+std::string Distributed::currentRequestId_{""};
+
 Status DistributedPlugin::call(const PluginRequest& request,
                                PluginResponse& response) {
   if (request.count("action") == 0) {
     return Status(1, "Distributed plugins require an action in PluginRequest");
   }
 
-  if (request.at("action") == "getQueries") {
+  auto& action = request.at("action");
+  if (action == "getQueries") {
     std::string queries;
     getQueries(queries);
     response.push_back({{"results", queries}});
     return Status(0, "OK");
-  } else if (request.at("action") == "writeResults") {
+  } else if (action == "writeResults") {
     if (request.count("results") == 0) {
       return Status(1, "Missing results field");
     }
     return writeResults(request.at("results"));
   }
 
-  return Status(1,
-                "Distributed plugin action unknown: " + request.at("action"));
+  return Status(1, "Distributed plugin action unknown: " + action);
 }
 
 Status Distributed::pullUpdates() {
-  auto& distributed_plugin = Registry::getActive("distributed");
-  if (!Registry::exists("distributed", distributed_plugin)) {
+  auto distributed_plugin = RegistryFactory::get().getActive("distributed");
+  if (!RegistryFactory::get().exists("distributed", distributed_plugin)) {
     return Status(1, "Missing distributed plugin: " + distributed_plugin);
   }
 
@@ -88,31 +90,22 @@ size_t Distributed::getCompletedCount() {
 }
 
 Status Distributed::serializeResults(std::string& json) {
-  pt::ptree queries;
-  pt::ptree statuses;
+  auto doc = JSON::newObject();
+  auto queries_obj = doc.getObject();
+  auto statuses_obj = doc.getObject();
   for (const auto& result : results_) {
-    pt::ptree qd;
-    auto s = serializeQueryData(result.results, qd);
+    auto arr = doc.getArray();
+    auto s = serializeQueryData(result.results, result.columns, doc, arr);
     if (!s.ok()) {
       return s;
     }
-    queries.add_child(result.request.id, qd);
-    statuses.put(result.request.id, result.status.getCode());
-    }
-
-  pt::ptree results;
-  results.add_child("queries", queries);
-  results.add_child("statuses", statuses);
-
-  std::stringstream ss;
-  try {
-    pt::write_json(ss, results, false);
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error writing JSON: " + std::string(e.what()));
+    doc.add(result.request.id, arr, queries_obj);
+    doc.add(result.request.id, result.status.getCode(), statuses_obj);
   }
-  json = ss.str();
 
-  return Status(0, "OK");
+  doc.add("queries", queries_obj);
+  doc.add("statuses", statuses_obj);
+  return doc.toString(json);
 }
 
 void Distributed::addResult(const DistributedQueryResult& result) {
@@ -125,13 +118,17 @@ Status Distributed::runQueries() {
     LOG(INFO) << "Executing distributed query: " << request.id << ": "
               << request.query;
 
-    auto sql = SQL(request.query);
+    // Keep track of the currently executing request
+    Distributed::setCurrentRequestId(request.id);
+
+    SQL sql(request.query);
     if (!sql.getStatus().ok()) {
       LOG(ERROR) << "Error executing distributed query: " << request.id << ": "
                  << sql.getMessageString();
     }
 
-    DistributedQueryResult result(request, sql.rows(), sql.getStatus());
+    DistributedQueryResult result(
+        request, sql.rows(), sql.columns(), sql.getStatus());
     addResult(result);
   }
   return flushCompleted();
@@ -142,8 +139,8 @@ Status Distributed::flushCompleted() {
     return Status(0, "OK");
   }
 
-  auto& distributed_plugin = Registry::getActive("distributed");
-  if (!Registry::exists("distributed", distributed_plugin)) {
+  auto distributed_plugin = RegistryFactory::get().getActive("distributed");
+  if (!RegistryFactory::get().exists("distributed", distributed_plugin)) {
     return Status(1, "Missing distributed plugin " + distributed_plugin);
   }
 
@@ -164,40 +161,76 @@ Status Distributed::flushCompleted() {
 }
 
 Status Distributed::acceptWork(const std::string& work) {
-  pt::ptree tree;
-  std::stringstream ss(work);
-  try {
-    pt::read_json(ss, tree);
-
-    auto& queries = tree.get_child("queries");
-    for (const auto& node : queries) {
-      auto query = queries.get<std::string>(node.first, "");
-      if (query.empty() || node.first.empty()) {
-        return Status(1, "Distributed query does not have complete attributes");
-      }
-      setDatabaseValue(kQueries, kDistributedQueryPrefix + node.first, query);
-    }
-
-    if (tree.count("accelerate") > 0) {
-      auto new_time = tree.get<std::string>("accelerate", "");
-      unsigned long duration;
-      Status conversion = safeStrtoul(new_time, 10, duration);
-      if (conversion.ok()) {
-        LOG(INFO) << "Accelerating distributed query checkins for " << duration
-                  << " seconds";
-        setDatabaseValue(kPersistentSettings,
-                         "distributed_accelerate_checkins_expire",
-                         std::to_string(getUnixTime() + duration));
-      } else {
-        LOG(WARNING) << "Failed to Accelerate: Timeframe is not an integer";
-      }
-    }
-
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error parsing JSON: " + std::string(e.what()));
+  auto doc = JSON::newObject();
+  if (!doc.fromString(work) || !doc.doc().IsObject()) {
+    return Status(1, "Error Parsing JSON");
   }
 
-  return Status(0, "OK");
+  std::set<std::string> queries_to_run;
+  // Check for and run discovery queries first
+  if (doc.doc().HasMember("discovery")) {
+    const auto& queries = doc.doc()["discovery"];
+    assert(queries.IsObject());
+
+    if (queries.IsObject()) {
+      for (const auto& query_entry : queries.GetObject()) {
+        if (!query_entry.name.IsString() || !query_entry.value.IsString()) {
+          return Status(1, "Distributed discovery query is not a string");
+        }
+
+        auto name = std::string(query_entry.name.GetString());
+        auto query = std::string(query_entry.value.GetString());
+        if (query.empty() || name.empty()) {
+          return Status(1, "Distributed discovery query is not a string");
+        }
+
+        SQL sql(query);
+        if (!sql.getStatus().ok()) {
+          return Status(1, "Distributed discovery query has an SQL error");
+        }
+        if (sql.rows().size() > 0) {
+          queries_to_run.insert(name);
+        }
+      }
+    }
+  }
+
+  if (doc.doc().HasMember("queries")) {
+    const auto& queries = doc.doc()["queries"];
+    assert(queries.IsObject());
+
+    if (queries.IsObject()) {
+      for (const auto& query_entry : queries.GetObject()) {
+        if (!query_entry.name.IsString() || !query_entry.value.IsString()) {
+          return Status(1, "Distributed query is not a string");
+        }
+
+        auto name = std::string(query_entry.name.GetString());
+        auto query = std::string(query_entry.value.GetString());
+        if (name.empty() || query.empty()) {
+          return Status(1, "Distributed query is not a string");
+        }
+
+        if (queries_to_run.empty() || queries_to_run.count(name)) {
+          setDatabaseValue(kQueries, kDistributedQueryPrefix + name, query);
+        }
+      }
+    }
+  }
+  if (doc.doc().HasMember("accelerate")) {
+    const auto& accelerate = doc.doc()["accelerate"];
+    if (accelerate.IsInt()) {
+      auto duration = accelerate.GetInt();
+      LOG(INFO) << "Accelerating distributed query checkins for " << duration
+                << " seconds";
+      setDatabaseValue(kPersistentSettings,
+                       "distributed_accelerate_checkins_expire",
+                       std::to_string(getUnixTime() + duration));
+    } else {
+      VLOG(1) << "Falied to Accelerate: Timeframe is not an integer";
+    }
+  }
+  return Status();
 }
 
 DistributedQueryRequest Distributed::popRequest() {
@@ -214,101 +247,96 @@ DistributedQueryRequest Distributed::popRequest() {
   return request;
 }
 
+std::string Distributed::getCurrentRequestId() {
+  return currentRequestId_;
+}
+
+void Distributed::setCurrentRequestId(const std::string& cReqId) {
+  currentRequestId_ = cReqId;
+}
+
 Status serializeDistributedQueryRequest(const DistributedQueryRequest& r,
-                                        pt::ptree& tree) {
-  tree.put("query", r.query);
-  tree.put("id", r.id);
-  return Status(0, "OK");
+                                        JSON& doc,
+                                        rj::Value& obj) {
+  assert(obj.IsObject());
+  doc.addCopy("query", r.query, obj);
+  doc.addCopy("id", r.id, obj);
+  return Status();
 }
 
 Status serializeDistributedQueryRequestJSON(const DistributedQueryRequest& r,
                                             std::string& json) {
-  pt::ptree tree;
-  auto s = serializeDistributedQueryRequest(r, tree);
+  auto doc = JSON::newObject();
+  auto s = serializeDistributedQueryRequest(r, doc, doc.doc());
   if (!s.ok()) {
     return s;
   }
 
-  std::stringstream ss;
-  try {
-    pt::write_json(ss, tree, false);
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error serializing JSON: " + std::string(e.what()));
-  }
-  json = ss.str();
-
-  return Status(0, "OK");
+  return doc.toString(json);
 }
 
-Status deserializeDistributedQueryRequest(const pt::ptree& tree,
+Status deserializeDistributedQueryRequest(const rj::Value& obj,
                                           DistributedQueryRequest& r) {
-  r.query = tree.get<std::string>("query", "");
-  r.id = tree.get<std::string>("id", "");
-  return Status(0, "OK");
+  if (!obj.HasMember("query") || !obj.HasMember("id") ||
+      !obj["query"].IsString() || !obj["id"].IsString()) {
+    return Status(1, "Malformed distributed query request");
+  }
+
+  r.query = obj["query"].GetString();
+  r.id = obj["id"].GetString();
+  return Status();
 }
 
 Status deserializeDistributedQueryRequestJSON(const std::string& json,
                                               DistributedQueryRequest& r) {
-  std::stringstream ss(json);
-  pt::ptree tree;
-  try {
-    pt::read_json(ss, tree);
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error serializing JSON: " + std::string(e.what()));
+  auto doc = JSON::newObject();
+  if (!doc.fromString(json) || !doc.doc().IsObject()) {
+    return Status(1, "Error Parsing JSON");
   }
-  return deserializeDistributedQueryRequest(tree, r);
+  return deserializeDistributedQueryRequest(doc.doc(), r);
 }
 
 Status serializeDistributedQueryResult(const DistributedQueryResult& r,
-                                       pt::ptree& tree) {
-  pt::ptree request;
-  auto s = serializeDistributedQueryRequest(r.request, request);
+                                       JSON& doc,
+                                       rj::Value& obj) {
+  auto request_obj = doc.getObject();
+  auto s = serializeDistributedQueryRequest(r.request, doc, request_obj);
   if (!s.ok()) {
     return s;
   }
 
-  pt::ptree results;
-  s = serializeQueryData(r.results, results);
+  auto results_arr = doc.getArray();
+  s = serializeQueryData(r.results, r.columns, doc, results_arr);
   if (!s.ok()) {
     return s;
   }
 
-  tree.add_child("request", request);
-  tree.add_child("results", results);
-
-  return Status(0, "OK");
+  doc.add("request", request_obj);
+  doc.add("results", results_arr);
+  return Status();
 }
 
 Status serializeDistributedQueryResultJSON(const DistributedQueryResult& r,
                                            std::string& json) {
-  pt::ptree tree;
-  auto s = serializeDistributedQueryResult(r, tree);
+  auto doc = JSON::newObject();
+  auto s = serializeDistributedQueryResult(r, doc, doc.doc());
   if (!s.ok()) {
     return s;
   }
 
-  std::stringstream ss;
-  try {
-    pt::write_json(ss, tree, false);
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error serializing JSON: " + std::string(e.what()));
-  }
-  json = ss.str();
-
-  return Status(0, "OK");
+  return doc.toString(json);
 }
 
-Status deserializeDistributedQueryResult(const pt::ptree& tree,
+Status deserializeDistributedQueryResult(const rj::Value& obj,
                                          DistributedQueryResult& r) {
   DistributedQueryRequest request;
-  auto s =
-      deserializeDistributedQueryRequest(tree.get_child("request"), request);
+  auto s = deserializeDistributedQueryRequest(obj["request"], request);
   if (!s.ok()) {
     return s;
   }
 
   QueryData results;
-  s = deserializeQueryData(tree.get_child("results"), results);
+  s = deserializeQueryData(obj["results"], results);
   if (!s.ok()) {
     return s;
   }
@@ -316,18 +344,15 @@ Status deserializeDistributedQueryResult(const pt::ptree& tree,
   r.request = request;
   r.results = results;
 
-  return Status(0, "OK");
+  return Status();
 }
 
 Status deserializeDistributedQueryResultJSON(const std::string& json,
                                              DistributedQueryResult& r) {
-  pt::ptree tree;
-  try {
-    std::stringstream ss(json);
-    pt::read_json(ss, tree);
-  } catch (const pt::ptree_error& e) {
-    return Status(1, "Error serializing JSON: " + std::string(e.what()));
+  auto doc = JSON::newObject();
+  if (!doc.fromString(json) || !doc.doc().IsObject()) {
+    return Status(1, "Error Parsing JSON");
   }
-  return deserializeDistributedQueryResult(tree, r);
+  return deserializeDistributedQueryResult(doc.doc(), r);
 }
 }

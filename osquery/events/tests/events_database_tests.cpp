@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/algorithm/string.hpp>
@@ -23,6 +23,8 @@
 
 #include <osquery/logger.h>
 
+#include "osquery/tests/test_util.h"
+
 namespace osquery {
 
 DECLARE_uint64(events_expiry);
@@ -31,7 +33,7 @@ DECLARE_bool(events_optimize);
 
 class EventsDatabaseTests : public ::testing::Test {
   void SetUp() override {
-    Registry::registry("config_parser")->setUp();
+    RegistryFactory::get().registry("config_parser")->setUp();
     optimize_ = FLAGS_events_optimize;
     FLAGS_events_optimize = false;
 
@@ -59,15 +61,39 @@ class DBFakeEventSubscriber : public EventSubscriber<DBFakeEventPublisher> {
  public:
   DBFakeEventSubscriber() {
     setName("DBFakeSubscriber");
+    setEventsMax(FLAGS_events_max);
+    setEventsExpiry(FLAGS_events_expiry);
   }
+
   /// Add a fake event at time t
-  Status testAdd(int t) {
+  Status testAdd(size_t t) {
     Row r;
     r["testing"] = "hello from space";
     r["time"] = INTEGER(t);
     r["uptime"] = INTEGER(10);
     return add(r, t);
   }
+
+  size_t getEventsMax() override {
+    return max_;
+  }
+
+  void setEventsMax(size_t max) {
+    max_ = max;
+  }
+
+  size_t getEventsExpiry() override {
+    return expiry_;
+  }
+
+  void setEventsExpiry(size_t expiry) {
+    expiry_ = expiry;
+  }
+
+ private:
+  size_t max_;
+
+  size_t expiry_;
 };
 
 TEST_F(EventsDatabaseTests, test_event_module_id) {
@@ -76,9 +102,9 @@ TEST_F(EventsDatabaseTests, test_event_module_id) {
 
   // Not normally available outside of EventSubscriber->Add().
   auto event_id1 = sub->getEventID();
-  EXPECT_EQ(event_id1, "1");
+  EXPECT_EQ(event_id1, "0000000001");
   auto event_id2 = sub->getEventID();
-  EXPECT_EQ(event_id2, "2");
+  EXPECT_EQ(event_id2, "0000000002");
 }
 
 TEST_F(EventsDatabaseTests, test_event_add) {
@@ -153,7 +179,7 @@ TEST_F(EventsDatabaseTests, test_record_range) {
 
   for (size_t j = 0; j < 30; j++) {
     // 110 is 10 below an index (60.2).
-    sub->testAdd(110 + j);
+    sub->testAdd(110 + static_cast<int>(j));
   }
 
   indexes = sub->getIndexes(110, 0);
@@ -214,6 +240,7 @@ TEST_F(EventsDatabaseTests, test_gentable) {
 
   ASSERT_EQ(0U, sub->optimize_time_);
   ASSERT_EQ(0U, sub->expire_time_);
+  ASSERT_EQ(0U, sub->min_expiration_);
 
   auto t = getUnixTime();
   sub->testAdd(t - 1);
@@ -221,30 +248,29 @@ TEST_F(EventsDatabaseTests, test_gentable) {
   sub->testAdd(t + 1);
 
   // Test the expire workflow by creating a short expiration time.
-  FLAGS_events_expiry = 10;
+  sub->setEventsExpiry(10);
 
   std::vector<std::string> keys;
   scanDatabaseKeys("events", keys);
   // 9 data records, 1 eid counter, 3 indexes, 15 index records.
-  // Depending on the moment, an additional 3 indexs may be introduced.
+  // Depending on the moment, an additional 3 indexes may be introduced.
   EXPECT_LE(16U, keys.size());
 
   // Perform a "select" equivalent.
-  QueryContext context;
-  auto results = sub->genTable(context);
+  auto results = genRows(sub.get());
 
   // Expect all non-expired results: 11, +
   EXPECT_EQ(9U, results.size());
-  // The expiration time is now - events_expiry.
-  EXPECT_LT(t - (FLAGS_events_expiry * 2), sub->expire_time_);
+  // The expiration time is now - events_expiry +/ 60.
+  EXPECT_LT(t - (sub->getEventsExpiry() * 2), sub->expire_time_ + 60);
   EXPECT_GT(t, sub->expire_time_);
   // The optimize time will not be changed.
   ASSERT_EQ(0U, sub->optimize_time_);
 
-  results = sub->genTable(context);
+  results = genRows(sub.get());
   EXPECT_EQ(3U, results.size());
 
-  results = sub->genTable(context);
+  results = genRows(sub.get());
   EXPECT_EQ(3U, results.size());
 
   keys.clear();
@@ -266,9 +292,8 @@ TEST_F(EventsDatabaseTests, test_optimize) {
   // Must also define an executing query.
   setDatabaseValue(kPersistentSettings, kExecutingQuery, "events_db_test");
 
-  QueryContext context;
   auto t = getUnixTime();
-  auto results = sub->genTable(context);
+  auto results = genRows(sub.get());
   EXPECT_EQ(10U, results.size());
   // Optimization will set the time NOW as the minimum event time.
   // Thus it is not possible to set event in past.
@@ -280,7 +305,8 @@ TEST_F(EventsDatabaseTests, test_optimize) {
   for (size_t i = t + 800; i < t + 800 + 10; ++i) {
     sub->testAdd(i);
   }
-  results = sub->genTable(context);
+
+  results = genRows(sub.get());
   EXPECT_EQ(10U, results.size());
 
   // The optimize time should have been written to the database.
@@ -296,8 +322,8 @@ TEST_F(EventsDatabaseTests, test_optimize) {
 TEST_F(EventsDatabaseTests, test_expire_check) {
   auto sub = std::make_shared<DBFakeEventSubscriber>();
   // Set the max number of buffered events to something reasonably small.
-  FLAGS_events_max = 10;
-  auto t = 10000;
+  sub->setEventsMax(50);
+  size_t t = 10000;
 
   // We are still at the mercy of the opaque EVENTS_CHECKPOINT define.
   for (size_t x = 0; x < 3; x++) {
@@ -307,8 +333,7 @@ TEST_F(EventsDatabaseTests, test_expire_check) {
     }
 
     // Since events tests are dependent, expect 257 + 3 events.
-    QueryContext context;
-    auto results = sub->genTable(context);
+    auto results = genRows(sub.get());
     if (x == 0) {
       // The first iteration is dependent on previous test state.
       continue;

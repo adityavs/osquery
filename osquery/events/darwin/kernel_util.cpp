@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/regex.hpp>
@@ -49,8 +49,7 @@ void loadKernelExtension() {
 
   // Find the panic log file for the last panic if we are booting out of panic.
   results =
-      SQL::SQL(
-          "SELECT f.path AS path FROM (SELECT * FROM nvram WHERE name like "
+      SQL("SELECT f.path AS path FROM (SELECT * FROM nvram WHERE name like "
           "'%panic%') AS nv JOIN (SELECT * FROM file WHERE "
           "directory='/Library/Logs/DiagnosticReports/' AND path like "
           "'%/Kernel%' ORDER BY ctime DESC LIMIT 1) as f;")
@@ -89,7 +88,7 @@ void loadKernelExtension() {
       CFArrayCreate(nullptr, (const void**)urls, 1, &kCFTypeArrayCallBacks);
   if (KextManagerLoadKextWithIdentifier(kKernelBundleId, directoryArray) !=
       kOSReturnSuccess) {
-    LOG(INFO) << "Could not autoload kernel extension";
+    VLOG(1) << "Could not autoload kernel extension";
   } else {
     VLOG(1) << "Autoloaded osquery kernel extension";
   }

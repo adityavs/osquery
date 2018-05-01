@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <mutex>
@@ -25,9 +25,12 @@ namespace osquery {
 DECLARE_string(database_path);
 
 const std::map<std::string, std::string> kDBSettings = {
-    {"synchronous", "OFF"},      {"count_changes", "OFF"},
-    {"default_temp_store", "2"}, {"auto_vacuum", "FULL"},
-    {"journal_mode", "OFF"},     {"cache_size", "1000"},
+    {"synchronous", "OFF"},
+    {"count_changes", "OFF"},
+    {"default_temp_store", "2"},
+    {"auto_vacuum", "FULL"},
+    {"journal_mode", "OFF"},
+    {"cache_size", "1000"},
     {"page_count", "1000"},
 };
 
@@ -46,21 +49,30 @@ class SQLiteDatabasePlugin : public DatabasePlugin {
   /// Data removal method.
   Status remove(const std::string& domain, const std::string& k) override;
 
+  /// Data range removal method.
+  Status removeRange(const std::string& domain,
+                     const std::string& low,
+                     const std::string& high) override;
+
   /// Key/index lookup method.
   Status scan(const std::string& domain,
               std::vector<std::string>& results,
               const std::string& prefix,
-              size_t max = 0) const override;
+              size_t max) const override;
 
  public:
   /// Database workflow: open and setup.
   Status setUp() override;
 
   /// Database workflow: close and cleanup.
-  void tearDown() override { close(); }
+  void tearDown() override {
+    close();
+  }
 
   /// Need to tear down open resources,
-  virtual ~SQLiteDatabasePlugin() { close(); }
+  virtual ~SQLiteDatabasePlugin() {
+    close();
+  }
 
  private:
   void close();
@@ -70,15 +82,15 @@ class SQLiteDatabasePlugin : public DatabasePlugin {
   sqlite3* db_{nullptr};
 
   /// Deconstruction mutex.
-  std::mutex close_mutex_;
+  Mutex close_mutex_;
 };
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(SQLiteDatabasePlugin, "database", "sqlite");
 
 Status SQLiteDatabasePlugin::setUp() {
-  if (!DatabasePlugin::kDBHandleOptionAllowOpen) {
-    LOG(WARNING) << RLOG(1629) << "Not allowed to create DBHandle instance";
+  if (!DatabasePlugin::kDBAllowOpen) {
+    LOG(WARNING) << RLOG(1629) << "Not allowed to set up database plugin";
   }
 
   // Consume the current settings.
@@ -89,7 +101,7 @@ Status SQLiteDatabasePlugin::setUp() {
     return Status(1, "Cannot read database path: " + path_);
   }
 
-  if (!DatabasePlugin::kCheckingDB) {
+  if (!DatabasePlugin::kDBChecking) {
     VLOG(1) << "Opening database handle: " << path_;
   }
 
@@ -104,13 +116,13 @@ Status SQLiteDatabasePlugin::setUp() {
       nullptr);
 
   if (result != SQLITE_OK || db_ == nullptr) {
-    if (DatabasePlugin::kDBHandleOptionRequireWrite) {
+    if (DatabasePlugin::kDBRequireWrite) {
       close();
       // A failed open in R/W mode is a runtime error.
       return Status(1, "Cannot open database: " + std::to_string(result));
     }
 
-    if (!DatabasePlugin::kCheckingDB) {
+    if (!DatabasePlugin::kDBChecking) {
       VLOG(1) << "Opening database failed: Continuing with read-only support";
     }
 
@@ -144,7 +156,7 @@ Status SQLiteDatabasePlugin::setUp() {
 }
 
 void SQLiteDatabasePlugin::close() {
-  std::unique_lock<std::mutex> lock(close_mutex_);
+  WriteLock lock(close_mutex_);
   if (db_ != nullptr) {
     sqlite3_close(db_);
     db_ = nullptr;
@@ -237,6 +249,31 @@ Status SQLiteDatabasePlugin::remove(const std::string& domain,
   sqlite3_prepare_v2(db_, q.c_str(), -1, &stmt, nullptr);
 
   sqlite3_bind_text(stmt, 1, key.c_str(), -1, SQLITE_STATIC);
+  auto rc = sqlite3_step(stmt);
+  if (rc != SQLITE_DONE) {
+    return Status(1);
+  }
+
+  sqlite3_finalize(stmt);
+  if (rand() % 10 == 0) {
+    tryVacuum(db_);
+  }
+  return Status(0);
+}
+
+Status SQLiteDatabasePlugin::removeRange(const std::string& domain,
+                                         const std::string& low,
+                                         const std::string& high) {
+  if (read_only_) {
+    return Status(0, "Database in readonly mode");
+  }
+
+  sqlite3_stmt* stmt = nullptr;
+  std::string q = "delete from " + domain + " where key >= ?1 and key <= ?2;";
+  sqlite3_prepare_v2(db_, q.c_str(), -1, &stmt, nullptr);
+
+  sqlite3_bind_text(stmt, 1, low.c_str(), -1, SQLITE_STATIC);
+  sqlite3_bind_text(stmt, 2, high.c_str(), -1, SQLITE_STATIC);
   auto rc = sqlite3_step(stmt);
   if (rc != SQLITE_DONE) {
     return Status(1);

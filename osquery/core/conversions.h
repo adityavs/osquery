@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -13,12 +13,14 @@
 #include <limits.h>
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
 #include <boost/bind.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <osquery/logger.h>
 #include <osquery/status.h>
 
 #ifdef DARWIN
@@ -109,6 +111,16 @@ inline void replaceAll(std::string& str,
 std::string join(const std::vector<std::string>& s, const std::string& tok);
 
 /**
+ * @brief Join a set of strings inserting a token string between elements
+ *
+ * @param s the set of strings to be joined.
+ * @param tok a token glue string to be inserted between elements.
+ *
+ * @return the joined string.
+ */
+std::string join(const std::set<std::string>& s, const std::string& tok);
+
+/**
  * @brief Decode a base64 encoded string.
  *
  * @param encoded The encode base64 string.
@@ -169,6 +181,20 @@ inline Status safeStrtoll(const std::string& rep, size_t base, long long& out) {
   return Status(0);
 }
 
+/// Safely convert a string representation of an integer base.
+inline Status safeStrtoull(const std::string& rep,
+                           size_t base,
+                           unsigned long long& out) {
+  char* end{nullptr};
+  out = strtoull(rep.c_str(), &end, static_cast<int>(base));
+  if (end == nullptr || end == rep.c_str() || *end != '\0' ||
+      (out == ULLONG_MAX && errno == ERANGE)) {
+    out = 0;
+    return Status(1);
+  }
+  return Status(0);
+}
+
 /// Safely convert unicode escaped ASCII.
 inline std::string unescapeUnicode(const std::string& escaped) {
   if (escaped.size() < 6) {
@@ -183,6 +209,8 @@ inline std::string unescapeUnicode(const std::string& escaped) {
       long value{0};
       Status stat = safeStrtol(escaped.substr(i + 2, 4), 16, value);
       if (!stat.ok()) {
+        LOG(WARNING) << "Unescaping a string with length: " << escaped.size()
+                     << " failed at: " << i;
         return "";
       }
       if (value < 255) {
@@ -190,6 +218,13 @@ inline std::string unescapeUnicode(const std::string& escaped) {
         i += 5;
         continue;
       }
+    } else if (i < escaped.size() - 1 && '\\' == escaped[i] &&
+               '\\' == escaped[i + 1]) {
+      // In the case of \\users 'sers' is not a unicode character
+      // If we see \\ we should skip them and we do this by adding
+      // an extra jump forward.
+      unescaped += escaped[i];
+      ++i;
     }
     unescaped += escaped[i];
   }
@@ -232,6 +267,15 @@ inline size_t utf8StringSize(const std::string& str) {
 
   return res;
 }
+
+/*
+ * @brief Request a SHA1 hash from the contents of a buffer.
+ *
+ * @param buffer A caller-controlled buffer (already allocated).
+ * @param size The length of the controlled buffer.
+ * @return A string (hex) representation of the hash digest.
+ */
+std::string getBufferSHA1(const char* buffer, size_t size);
 
 #ifdef DARWIN
 /**

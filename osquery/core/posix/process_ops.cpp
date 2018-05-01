@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <string>
@@ -21,9 +21,13 @@
 
 #include <boost/optional.hpp>
 
+#include <osquery/flags.h>
+
 #include "osquery/core/process.h"
 
 namespace osquery {
+
+DECLARE_uint64(alarm_timeout);
 
 int platformGetUid() {
   return ::getuid();
@@ -31,7 +35,7 @@ int platformGetUid() {
 
 bool isLauncherProcessDead(PlatformProcess& launcher) {
   if (!launcher.isValid()) {
-    return false;
+    return true;
   }
 
   return (::getppid() != launcher.nativeHandle());
@@ -71,10 +75,6 @@ bool platformModuleClose(ModuleHandle module) {
   return (::dlclose(module) == 0);
 }
 
-void cleanupDefunctProcesses() {
-  ::waitpid(-1, nullptr, WNOHANG);
-}
-
 void setToBackgroundPriority() {
   setpriority(PRIO_PGRP, 0, 10);
 }
@@ -85,10 +85,10 @@ bool isUserAdmin() {
 }
 
 int platformGetPid() {
-  return (int)getpid();
+  return static_cast<int>(getpid());
 }
 
 int platformGetTid() {
-  return (int)syscall(SYS_gettid);
+  return std::hash<std::thread::id>()(std::this_thread::get_id());
 }
 }

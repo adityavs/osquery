@@ -1,22 +1,30 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <locale>
 #include <string>
+
+#include <osquery/logger.h>
 
 #include "osquery/core/windows/wmi.h"
 
 namespace osquery {
 
 std::wstring stringToWstring(const std::string& src) {
-  std::wstring utf16le_str = converter.from_bytes(src);
+  std::wstring utf16le_str;
+  try {
+    utf16le_str = converter.from_bytes(src);
+  } catch (std::exception /* e */) {
+    LOG(WARNING) << "Failed to convert string to wstring " << src;
+  }
+
   return utf16le_str;
 }
 
@@ -92,6 +100,42 @@ Status WmiResultItem::GetUChar(const std::string& name,
     return Status(-1, "Invalid data type returned.");
   }
   ret = value.bVal;
+  VariantClear(&value);
+  return Status(0);
+}
+
+Status WmiResultItem::GetUnsignedShort(const std::string& name,
+                                       unsigned short& ret) const {
+  std::wstring property_name = stringToWstring(name);
+  VARIANT value;
+  HRESULT hr = result_->Get(property_name.c_str(), 0, &value, nullptr, nullptr);
+
+  if (hr != S_OK) {
+    return Status(-1, "Error retrieving data from WMI query.");
+  }
+  if (value.vt != VT_UI2) {
+    VariantClear(&value);
+    return Status(-1, "Invalid data type returned.");
+  }
+  ret = value.uiVal;
+  VariantClear(&value);
+  return Status(0);
+}
+
+Status WmiResultItem::GetUnsignedInt32(const std::string& name,
+                                       unsigned int& ret) const {
+  std::wstring property_name = stringToWstring(name);
+  VARIANT value;
+  HRESULT hr = result_->Get(property_name.c_str(), 0, &value, nullptr, nullptr);
+
+  if (hr != S_OK) {
+    return Status(-1, "Error retrieving data from WMI query.");
+  }
+  if (value.vt != VT_UINT) {
+    VariantClear(&value);
+    return Status(-1, "Invalid data type returned.");
+  }
+  ret = value.uiVal;
   VariantClear(&value);
   return Status(0);
 }

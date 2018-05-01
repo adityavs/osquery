@@ -3,20 +3,17 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 class BerkeleyDb < AbstractOsqueryFormula
   desc "High performance key/value database"
   homepage "https://www.oracle.com/technology/products/berkeley-db/index.html"
-  url "http://download.oracle.com/berkeley-db/db-6.1.26.tar.gz"
-  sha256 "dd1417af5443f326ee3998e40986c3c60e2a7cfb5bfa25177ef7cadb2afb13a6"
-  revision 1
+  license "Sleepycat"
+  url "http://pkgs.fedoraproject.org/repo/pkgs/libdb/db-5.3.28.tar.gz/b99454564d5b4479750567031d66fe24/db-5.3.28.tar.gz"
+  sha256 "e0a992d740709892e81f9d93f06daf305cf73fb81b545afe72478043172c3628"
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "8d9643e47b1f1ebe2eaba8f72ec10a7ae3c6032eff70786d59078ecad65ad162" => :x86_64_linux
+    sha256 "6088259904f7633200facfc9953ea974f67ec7f7a823c646590819085abfe2b8" => :sierra
+    sha256 "eeafab9caee4cd85d5220f28497955c629af669442396770a583c99eff033db9" => :x86_64_linux
   end
-
-  option "with-java", "Compile with Java support."
-  option "with-sql", "Compile with SQL support."
-
-  deprecated_option "enable-sql" => "with-sql"
 
   def install
     # BerkeleyDB dislikes parallel builds
@@ -29,9 +26,18 @@ class BerkeleyDb < AbstractOsqueryFormula
       --mandir=#{man}
       --enable-cxx
       --enable-compat185
+      --disable-shared
+      --enable-static
     ]
-    args << "--enable-java" if build.with? "java"
-    args << "--enable-sql" if build.with? "sql"
+
+    inreplace "src/dbinc/atomic.h", "__atomic_compare_exchange", "__atomic_compare_exchange_db"
+    inreplace [
+      "src/dbinc/atomic.h",
+      "src/mutex/mut_tas.c",
+      "src/mp/mp_fget.c",
+      "src/mp/mp_mvcc.c",
+      "src/mp/mp_region.c"
+    ], "atomic_init", "atomic_init_db"
 
     # BerkeleyDB requires you to build everything from the build_unix subdirectory
     cd "build_unix" do
@@ -39,8 +45,9 @@ class BerkeleyDb < AbstractOsqueryFormula
       system "make", "install"
 
       # use the standard docs location
-      doc.parent.mkpath
-      mv prefix/"docs", doc
+      # doc.parent.mkpath
+      # mv prefix/"docs", doc
+      rm_rf prefix/"docs"
     end
   end
 end

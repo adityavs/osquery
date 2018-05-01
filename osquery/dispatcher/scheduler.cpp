@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <ctime>
@@ -15,29 +15,42 @@
 #include <osquery/database.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/query.h>
 #include <osquery/system.h>
 
 #include "osquery/config/parsers/decorators.h"
 #include "osquery/core/process.h"
-#include "osquery/database/query.h"
 #include "osquery/dispatcher/scheduler.h"
+#include "osquery/sql/sqlite_util.h"
 
 namespace osquery {
 
-FLAG(bool, enable_monitor, true, "Enable the schedule monitor");
+FLAG(uint64, schedule_timeout, 0, "Limit the schedule, 0 for no limit");
 
-FLAG(uint64, schedule_timeout, 0, "Limit the schedule, 0 for no limit")
+FLAG(uint64,
+     schedule_reload,
+     300,
+     "Interval in seconds to reload database arenas");
+
+FLAG(uint64, schedule_epoch, 0, "Epoch for scheduled queries");
+
+HIDDEN_FLAG(bool, enable_monitor, true, "Enable the schedule monitor");
+
+HIDDEN_FLAG(bool,
+            schedule_reload_sql,
+            false,
+            "Reload the SQL implementation during schedule reload");
 
 /// Used to bypass (optimize-out) the set-differential of query results.
 DECLARE_bool(events_optimize);
 
 SQLInternal monitor(const std::string& name, const ScheduledQuery& query) {
   // Snapshot the performance and times for the worker before running.
-  auto pid = std::to_string(PlatformProcess::getCurrentProcess()->pid());
+  auto pid = std::to_string(PlatformProcess::getCurrentPid());
   auto r0 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
   auto t0 = getUnixTime();
-  Config::getInstance().recordQueryStart(name);
-  auto sql = SQLInternal(query.query);
+  Config::get().recordQueryStart(name);
+  SQLInternal sql(query.query, true);
   // Snapshot the performance after, and compare.
   auto t1 = getUnixTime();
   auto r1 = SQL::selectAllFrom("processes", "pid", EQUALS, pid);
@@ -52,21 +65,19 @@ SQLInternal monitor(const std::string& name, const ScheduledQuery& query) {
       }
     }
     // Always called while processes table is working.
-    Config::getInstance().recordQueryPerformance(
-        name, t1 - t0, size, r0[0], r1[0]);
+    Config::get().recordQueryPerformance(name, t1 - t0, size, r0[0], r1[0]);
   }
   return sql;
 }
 
 inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   // Execute the scheduled query and create a named query object.
-  LOG(INFO) << "Executing scheduled query: " << name << ": " << query.query;
+  LOG(INFO) << "Executing scheduled query " << name << ": " << query.query;
   runDecorators(DECORATE_ALWAYS);
-  auto sql =
-      (FLAGS_enable_monitor) ? monitor(name, query) : SQLInternal(query.query);
 
+  auto sql = monitor(name, query);
   if (!sql.ok()) {
-    LOG(ERROR) << "Error executing scheduled query: " << name << ": "
+    LOG(ERROR) << "Error executing scheduled query " << name << ": "
                << sql.getMessageString();
     return;
   }
@@ -79,7 +90,9 @@ inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   QueryLogItem item;
   item.name = name;
   item.identifier = ident;
+  item.columns = sql.columns();
   item.time = osquery::getUnixTime();
+  item.epoch = FLAGS_schedule_epoch;
   item.calendar_time = osquery::getAsciiTime();
   getDecorations(item.decorations);
 
@@ -96,12 +109,13 @@ inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
   sql.escapeResults();
 
   Status status;
-  DiffResults diff_results;
+  DiffResults& diff_results = item.results;
   // Add this execution's set of results to the database-tracked named query.
   // We can then ask for a differential from the last time this named query
   // was executed by exact matching each row.
   if (!FLAGS_events_optimize || !sql.eventBased()) {
-    status = dbQuery.addNewResults(sql.rows(), diff_results);
+    status = dbQuery.addNewResults(
+        std::move(sql.rows()), item.epoch, item.counter, diff_results);
     if (!status.ok()) {
       std::string line =
           "Error adding new results to database: " + status.what();
@@ -114,16 +128,16 @@ inline void launchQuery(const std::string& name, const ScheduledQuery& query) {
     diff_results.added = std::move(sql.rows());
   }
 
+  if (query.options.count("removed") && !query.options.at("removed")) {
+    diff_results.removed.clear();
+  }
+
   if (diff_results.added.empty() && diff_results.removed.empty()) {
     // No diff results or events to emit.
     return;
   }
 
   VLOG(1) << "Found results for query: " << name;
-  item.results = diff_results;
-  if (query.options.count("removed") && !query.options.at("removed")) {
-    item.results.removed.clear();
-  }
 
   status = logQueryLogItem(item);
   if (!status.ok()) {
@@ -139,7 +153,7 @@ void SchedulerRunner::start() {
   // Start the counter at the second.
   auto i = osquery::getUnixTime();
   for (; (timeout_ == 0) || (i <= timeout_); ++i) {
-    Config::getInstance().scheduledQueries(
+    Config::get().scheduledQueries(
         ([&i](const std::string& name, const ScheduledQuery& query) {
           if (query.splayed_interval > 0 && i % query.splayed_interval == 0) {
             TablePlugin::kCacheInterval = query.splayed_interval;
@@ -148,9 +162,21 @@ void SchedulerRunner::start() {
           }
         }));
     // Configuration decorators run on 60 second intervals only.
-    if (i % 60 == 0) {
+    if ((i % 60) == 0) {
       runDecorators(DECORATE_INTERVAL, i);
     }
+    if (FLAGS_schedule_reload > 0 && (i % FLAGS_schedule_reload) == 0) {
+      if (FLAGS_schedule_reload_sql) {
+        SQLiteDBManager::resetPrimary();
+      }
+      resetDatabase();
+    }
+
+    // GLog is not re-entrant, so logs must be flushed in a dedicated thread.
+    if ((i % 3) == 0) {
+      relayStatusLogs(true);
+    }
+
     // Put the thread into an interruptible sleep without a config instance.
     pauseMilli(interval_ * 1000);
     if (interrupted()) {
@@ -166,4 +192,4 @@ void startScheduler() {
 void startScheduler(unsigned long int timeout, size_t interval) {
   Dispatcher::addService(std::make_shared<SchedulerRunner>(timeout, interval));
 }
-}
+} // namespace osquery

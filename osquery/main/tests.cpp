@@ -1,15 +1,15 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #ifdef WIN32
-#define WIN32_LEAN_AND_MEAN
+
 #include <Shlwapi.h>
 #include <Windows.h>
 #endif
@@ -18,10 +18,13 @@
 
 #include <gtest/gtest.h>
 
+#ifdef FBTHRIFT
+#include <folly/init/Init.h>
+#endif
+
 #include <osquery/logger.h>
 
 #include "osquery/core/process.h"
-#include "osquery/core/testing.h"
 #include "osquery/tests/test_util.h"
 
 namespace osquery {
@@ -36,19 +39,19 @@ const char* kOsqueryTestModuleName = "osquery_tests.exe";
 
 /// These are the expected arguments for our test worker process.
 const char* kExpectedWorkerArgs[] = {
-    "worker-test", "--socket", "fake-socket", nullptr};
+    nullptr, "--socket", "fake-socket", nullptr};
 const size_t kExpectedWorkerArgsCount =
     (sizeof(osquery::kExpectedWorkerArgs) / sizeof(char*)) - 1;
 
 /// These are the expected arguments for our test extensions process.
-const char* kExpectedExtensionArgs[] = {"osquery extension: extension-test",
+const char* kExpectedExtensionArgs[] = {nullptr,
+                                        "--verbose",
                                         "--socket",
                                         "socket-name",
                                         "--timeout",
                                         "100",
                                         "--interval",
                                         "5",
-                                        "--verbose",
                                         nullptr};
 const size_t kExpectedExtensionArgsCount =
     (sizeof(osquery::kExpectedExtensionArgs) / sizeof(char*)) - 1;
@@ -73,7 +76,7 @@ static bool compareArguments(char* result[],
 
   return true;
 }
-}
+} // namespace osquery
 
 int workerMain(int argc, char* argv[]) {
   if (!osquery::compareArguments(argv,
@@ -84,7 +87,7 @@ int workerMain(int argc, char* argv[]) {
   }
 
   auto process = osquery::PlatformProcess::getLauncherProcess();
-  if (process.get() == nullptr) {
+  if (process == nullptr) {
     return ERROR_LAUNCHER_PROCESS;
   }
 
@@ -122,13 +125,19 @@ int extensionMain(int argc, char* argv[]) {
 }
 
 int main(int argc, char* argv[]) {
+  osquery::kProcessTestExecPath = argv[0];
+  osquery::kExpectedExtensionArgs[0] = argv[0];
+  osquery::kExpectedWorkerArgs[0] = argv[0];
+
+#ifdef FBTHRIFT
+  ::folly::init(&argc, &argv, false);
+#endif
+
   if (auto val = osquery::getEnvVar("OSQUERY_WORKER")) {
     return workerMain(argc, argv);
   } else if ((val = osquery::getEnvVar("OSQUERY_EXTENSION"))) {
     return extensionMain(argc, argv);
   }
-  osquery::registryAndPluginInit();
-  osquery::kProcessTestExecPath = argv[0];
 
   osquery::initTesting();
   testing::InitGoogleTest(&argc, argv);

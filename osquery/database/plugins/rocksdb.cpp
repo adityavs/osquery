@@ -1,115 +1,44 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
-#include <mutex>
-
 #include <sys/stat.h>
-
-#include <snappy.h>
 
 #include <rocksdb/db.h>
 #include <rocksdb/env.h>
 #include <rocksdb/options.h>
 
-#include <osquery/database.h>
 #include <osquery/filesystem.h>
 #include <osquery/logger.h>
 
+#include "osquery/database/plugins/rocksdb.h"
 #include "osquery/filesystem/fileops.h"
+
+namespace fs = boost::filesystem;
 
 namespace osquery {
 
+/// Hidden flags created for internal stress testing.
+HIDDEN_FLAG(int32, rocksdb_write_buffer, 16, "Max write buffer number");
+HIDDEN_FLAG(int32, rocksdb_merge_number, 4, "Min write buffer number to merge");
+HIDDEN_FLAG(int32, rocksdb_background_flushes, 4, "Max background flushes");
+HIDDEN_FLAG(uint64, rocksdb_buffer_blocks, 256, "Write buffer blocks (4k)");
+
 DECLARE_string(database_path);
 
-class GlogRocksDBLogger : public rocksdb::Logger {
- public:
-  // We intend to override a virtual method that is overloaded.
-  using rocksdb::Logger::Logv;
-  void Logv(const char* format, va_list ap) override;
-};
-
-class RocksDBDatabasePlugin : public DatabasePlugin {
- public:
-  /// Data retrieval method.
-  Status get(const std::string& domain,
-             const std::string& key,
-             std::string& value) const override;
-
-  /// Data storage method.
-  Status put(const std::string& domain,
-             const std::string& key,
-             const std::string& value) override;
-
-  /// Data removal method.
-  Status remove(const std::string& domain, const std::string& k) override;
-
-  /// Key/index lookup method.
-  Status scan(const std::string& domain,
-              std::vector<std::string>& results,
-              const std::string& prefix,
-              size_t max = 0) const override;
-
- public:
-  /// Database workflow: open and setup.
-  Status setUp() override;
-
-  /// Database workflow: close and cleanup.
-  void tearDown() override {
-    close();
-  }
-
-  /// Need to tear down open resources,
-  virtual ~RocksDBDatabasePlugin() {
-    close();
-  }
-
- private:
-  /// Obtain a close lock and release resources.
-  void close();
-
-  /**
-   * @brief Private helper around accessing the column family handle for a
-   * specific column family, based on its name
-   */
-  rocksdb::ColumnFamilyHandle* getHandleForColumnFamily(
-      const std::string& cf) const;
-
-  /**
-   * @brief Helper method which can be used to get a raw pointer to the
-   * underlying RocksDB database handle
-   *
-   * @return a pointer to the underlying RocksDB database handle
-   */
-  rocksdb::DB* getDB() const;
-
- private:
-  bool initialized_{false};
-
-  /// The database handle
-  rocksdb::DB* db_{nullptr};
-
-  /// RocksDB logger instance.
-  std::shared_ptr<GlogRocksDBLogger> logger_{nullptr};
-
-  /// Column family descriptors which are used to connect to RocksDB
-  std::vector<rocksdb::ColumnFamilyDescriptor> column_families_;
-
-  /// A vector of pointers to column family handles
-  std::vector<rocksdb::ColumnFamilyHandle*> handles_;
-
-  /// The RocksDB connection options that are used to connect to RocksDB
-  rocksdb::Options options_;
-
-  /// Deconstruction mutex.
-  std::mutex close_mutex_;
-};
+/**
+ * @brief Track external systems marking the RocksDB database as corrupted.
+ *
+ * This can be set using the RocksDBDatabasePlugin's static methods.
+ * The two primary external systems are the RocksDB logger plugin and tests.
+ */
+std::atomic<bool> kRocksDBCorruptionIndicator{false};
 
 /// Backing-storage provider for osquery internal/core.
 REGISTER_INTERNAL(RocksDBDatabasePlugin, "database", "rocksdb");
@@ -130,18 +59,22 @@ void GlogRocksDBLogger::Logv(const char* format, va_list ap) {
 
   // There is a spurious warning on first open.
   if (log_line.find("Error when reading") == std::string::npos) {
-    // Rocksdb calls are non-reentrant. Since this callback is made in the
-    // context of a rocksdb api call, turn log forwarding off to prevent the
-    // logger from trying to make a call back into rocksdb and causing a
-    // deadlock
-    LoggerForwardingDisabler forwarding_disabler;
+    // RocksDB calls are non-reentrant. Since this callback is made in the
+    // context of a RocksDB API call, turn log forwarding off to prevent the
+    // logger from trying to make a call back into RocksDB and causing a
+    // deadlock.
     LOG(INFO) << "RocksDB: " << log_line;
+  }
+
+  // If the callback includes 'Corruption' then set the corruption indicator.
+  if (log_line.find("Corruption:") != std::string::npos) {
+    RocksDBDatabasePlugin::setCorrupted();
   }
 }
 
 Status RocksDBDatabasePlugin::setUp() {
-  if (!kDBHandleOptionAllowOpen) {
-    LOG(WARNING) << RLOG(1629) << "Not allowed to create DBHandle instance";
+  if (!DatabasePlugin::kDBAllowOpen) {
+    LOG(WARNING) << RLOG(1629) << "Not allowed to set up database plugin";
   }
 
   if (!initialized_) {
@@ -155,18 +88,22 @@ Status RocksDBDatabasePlugin::setUp() {
     options_.log_file_time_to_roll = 0;
     options_.keep_log_file_num = 10;
     options_.max_log_file_size = 1024 * 1024 * 1;
+    options_.max_open_files = 128;
     options_.stats_dump_period_sec = 0;
+    options_.max_manifest_file_size = 1024 * 500;
 
     // Performance and optimization settings.
+    // Use rocksdb::kZSTD to use ZSTD database compression
     options_.compression = rocksdb::kNoCompression;
     options_.compaction_style = rocksdb::kCompactionStyleLevel;
     options_.arena_block_size = (4 * 1024);
-    options_.write_buffer_size = (4 * 1024) * 100; // 100 blocks.
-    options_.max_write_buffer_number = 4;
-    options_.min_write_buffer_number_to_merge = 1;
-    // Before adding the OptimizeForSmallDB API call we used:
-    //   options_.max_background_compactions = 2;
-    //   options_.max_background_flushes = 2;
+    options_.write_buffer_size = (4 * 1024) * FLAGS_rocksdb_buffer_blocks;
+    options_.max_write_buffer_number =
+        static_cast<int>(FLAGS_rocksdb_write_buffer);
+    options_.min_write_buffer_number_to_merge =
+        static_cast<int>(FLAGS_rocksdb_merge_number);
+    options_.max_background_flushes =
+        static_cast<int>(FLAGS_rocksdb_background_flushes);
 
     // Create an environment to replace the default logger.
     if (logger_ == nullptr) {
@@ -191,8 +128,8 @@ Status RocksDBDatabasePlugin::setUp() {
     return Status(1, "Cannot read RocksDB path: " + path_);
   }
 
-  if (!DatabasePlugin::kCheckingDB) {
-    LOG(INFO) << "Opening RocksDB handle: " << path_;
+  if (!DatabasePlugin::kDBChecking) {
+    VLOG(1) << "Opening RocksDB handle: " << path_;
   }
 
   // Tests may trash calls to setUp, make sure subsequent calls do not leak.
@@ -201,23 +138,24 @@ Status RocksDBDatabasePlugin::setUp() {
   // Attempt to create a RocksDB instance and handles.
   auto s =
       rocksdb::DB::Open(options_, path_, column_families_, &handles_, &db_);
+
+  if (s.IsCorruption()) {
+    // The database is corrupt - try to repair it
+    repairDB();
+    s = rocksdb::DB::Open(options_, path_, column_families_, &handles_, &db_);
+  }
+
   if (!s.ok() || db_ == nullptr) {
-    if (kDBHandleOptionRequireWrite) {
+    LOG(INFO) << "Rocksdb open failed (" << s.code() << ":" << s.subcode()
+              << ") " << s.ToString();
+    if (kDBRequireWrite) {
       // A failed open in R/W mode is a runtime error.
       return Status(1, s.ToString());
     }
 
-    if (!DatabasePlugin::kCheckingDB) {
+    if (!DatabasePlugin::kDBChecking) {
       LOG(INFO) << "Opening RocksDB failed: Continuing with read-only support";
     }
-#if !defined(ROCKSDB_LITE)
-    // RocksDB LITE does not support readonly mode.
-    // The database was readable but could not be opened, either (1) it is not
-    // writable or (2) it is already opened by another process.
-    // Try to open the database in a ReadOnly mode.
-    rocksdb::DB::OpenForReadOnly(
-        options_, path_, column_families_, &handles_, &db_);
-#endif
     // Also disable event publishers.
     Flag::updateValue("disable_events", "true");
     read_only_ = true;
@@ -230,8 +168,12 @@ Status RocksDBDatabasePlugin::setUp() {
   return Status(0);
 }
 
+void RocksDBDatabasePlugin::tearDown() {
+  close();
+}
+
 void RocksDBDatabasePlugin::close() {
-  std::unique_lock<std::mutex> lock(close_mutex_);
+  WriteLock lock(close_mutex_);
   for (auto handle : handles_) {
     delete handle;
   }
@@ -241,6 +183,42 @@ void RocksDBDatabasePlugin::close() {
     delete db_;
     db_ = nullptr;
   }
+
+  if (isCorrupted()) {
+    repairDB();
+    setCorrupted(false);
+  }
+}
+
+bool RocksDBDatabasePlugin::isCorrupted() {
+  return kRocksDBCorruptionIndicator;
+}
+
+void RocksDBDatabasePlugin::setCorrupted(bool corrupted) {
+  kRocksDBCorruptionIndicator = corrupted;
+}
+
+void RocksDBDatabasePlugin::repairDB() {
+  // Try to backup the existing database.
+  auto bpath = path_ + ".backup";
+  if (pathExists(bpath).ok()) {
+    if (!removePath(bpath).ok()) {
+      LOG(ERROR) << "Cannot remove previous RocksDB database backup: " << bpath;
+      return;
+    } else {
+      LOG(WARNING) << "Removed previous RocksDB database backup: " << bpath;
+    }
+  }
+
+  if (movePath(path_, bpath).ok()) {
+    LOG(WARNING) << "Backing up RocksDB database: " << bpath;
+  } else {
+    LOG(ERROR) << "Cannot backup the RocksDB database: " << bpath;
+    return;
+  }
+
+  // ROCKSDB_LITE does not have a RepairDB method.
+  LOG(WARNING) << "Destroying RocksDB database due to corruption";
 }
 
 rocksdb::DB* RocksDBDatabasePlugin::getDB() const {
@@ -323,6 +301,31 @@ Status RocksDBDatabasePlugin::remove(const std::string& domain,
     options.sync = true;
   }
   auto s = getDB()->Delete(options, cfh, key);
+  return Status(s.code(), s.ToString());
+}
+
+Status RocksDBDatabasePlugin::removeRange(const std::string& domain,
+                                          const std::string& low,
+                                          const std::string& high) {
+  if (read_only_) {
+    return Status(0, "Database in readonly mode");
+  }
+
+  auto cfh = getHandleForColumnFamily(domain);
+  if (cfh == nullptr) {
+    return Status(1, "Could not get column family for " + domain);
+  }
+  auto options = rocksdb::WriteOptions();
+
+  // We could sync here, but large deletes will cause multi-syncs.
+  // For example: event record expirations found in an expired index.
+  if (kEvents != domain) {
+    options.sync = true;
+  }
+  auto s = getDB()->DeleteRange(options, cfh, low, high);
+  if (low <= high) {
+    s = getDB()->Delete(options, cfh, high);
+  }
   return Status(s.code(), s.ToString());
 }
 

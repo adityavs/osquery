@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <assert.h>
@@ -128,20 +128,16 @@ static void expFunc(sqlite3_context *context, int argc, sqlite3_value **argv) {
 static void powerFunc(sqlite3_context *context,
                       int argc,
                       sqlite3_value **argv) {
-  double r1 = 0.0;
-  double r2 = 0.0;
-  double val;
-
   assert(argc == 2);
 
   if (sqlite3_value_type(argv[0]) == SQLITE_NULL ||
       sqlite3_value_type(argv[1]) == SQLITE_NULL) {
     sqlite3_result_null(context);
   } else {
-    r1 = sqlite3_value_double(argv[0]);
-    r2 = sqlite3_value_double(argv[1]);
+    double r1 = sqlite3_value_double(argv[0]);
+    double r2 = sqlite3_value_double(argv[1]);
     errno = 0;
-    val = pow(r1, r2);
+    double val = pow(r1, r2);
     if (errno == 0) {
       sqlite3_result_double(context, val);
     } else {

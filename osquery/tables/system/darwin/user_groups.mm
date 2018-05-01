@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #import <OpenDirectory/OpenDirectory.h>
@@ -17,41 +17,39 @@ namespace osquery {
 namespace tables {
 
 void genODEntries(ODRecordType type, std::set<std::string> &names) {
-  @autoreleasepool {
-    ODSession *s = [ODSession defaultSession];
-    NSError *err = nullptr;
-    ODNode *root = [ODNode nodeWithSession:s name:@"/Local/Default" error:&err];
-    if (err != nullptr) {
-      TLOG << "Error with OpenDirectory node: "
-           << std::string([[err localizedDescription] UTF8String]);
-      return;
-    }
+  ODSession* s = [ODSession defaultSession];
+  NSError* err = nullptr;
+  ODNode* root = [ODNode nodeWithSession:s name:@"/Local/Default" error:&err];
+  if (err != nullptr) {
+    TLOG << "Error with OpenDirectory node: "
+         << std::string([[err localizedDescription] UTF8String]);
+    return;
+  }
 
-    ODQuery *q = [ODQuery queryWithNode:root
-                         forRecordTypes:type
-                              attribute:kODAttributeTypeUniqueID
-                              matchType:kODMatchEqualTo
-                            queryValues:nil
-                       returnAttributes:kODAttributeTypeStandardOnly
-                         maximumResults:0
-                                  error:&err];
-    if (err != nullptr) {
-      TLOG << "Error with OpenDirectory query: "
-           << std::string([[err localizedDescription] UTF8String]);
-      return;
-    }
+  ODQuery* q = [ODQuery queryWithNode:root
+                       forRecordTypes:type
+                            attribute:kODAttributeTypeUniqueID
+                            matchType:kODMatchEqualTo
+                          queryValues:nil
+                     returnAttributes:kODAttributeTypeStandardOnly
+                       maximumResults:0
+                                error:&err];
+  if (err != nullptr) {
+    TLOG << "Error with OpenDirectory query: "
+         << std::string([[err localizedDescription] UTF8String]);
+    return;
+  }
 
-    // Obtain the results synchronously, not good for very large sets.
-    NSArray *od_results = [q resultsAllowingPartial:NO error:&err];
-    if (err != nullptr) {
-      TLOG << "Error with OpenDirectory results: "
-           << std::string([[err localizedDescription] UTF8String]);
-      return;
-    }
+  // Obtain the results synchronously, not good for very large sets.
+  NSArray* od_results = [q resultsAllowingPartial:NO error:&err];
+  if (err != nullptr) {
+    TLOG << "Error with OpenDirectory results: "
+         << std::string([[err localizedDescription] UTF8String]);
+    return;
+  }
 
-    for (ODRecord *re in od_results) {
-      names.insert([[re recordName] UTF8String]);
-    }
+  for (ODRecord* re in od_results) {
+    names.insert([[re recordName] UTF8String]);
   }
 }
 

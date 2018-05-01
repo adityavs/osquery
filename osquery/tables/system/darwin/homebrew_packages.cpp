@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/algorithm/string/join.hpp>
@@ -79,7 +79,13 @@ Status getHomebrewCellar(fs::path& cellarPath) {
 
   // Note that the first `parent_path` call is to remove the filename, and the
   // next to actually move up a directory.
-  auto path = brewExecutable.parent_path().parent_path() / "Cellar";
+  auto path = brewExecutable.parent_path().parent_path();
+  // Newer versions of Homebrew may include a 'Homebrew' directory.
+  if ("Homebrew" == path.leaf().string()) {
+    path = path.parent_path();
+  }
+
+  path /= "Cellar";
   if (!pathExists(path).ok()) {
     return Status(1, "No Homebrew Cellar found");
   }

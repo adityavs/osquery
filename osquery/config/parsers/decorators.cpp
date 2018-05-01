@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/config.h>
@@ -15,7 +15,7 @@
 
 #include "osquery/config/parsers/decorators.h"
 
-namespace pt = boost::property_tree;
+namespace rj = rapidjson;
 
 namespace osquery {
 
@@ -27,7 +27,7 @@ FLAG(bool,
      "Add decorators as top level JSON objects");
 
 /// Statically define the parser name to avoid mistakes.
-#define PARSER_NAME "decorators"
+const std::string kDecorationsName{"decorators"};
 
 const std::map<DecorationPoint, std::string> kDecorationPointKeys = {
     {DECORATE_LOAD, "load"},
@@ -65,15 +65,16 @@ namespace {
  */
 class DecoratorsConfigParserPlugin : public ConfigParserPlugin {
  public:
-  std::vector<std::string> keys() const override { return {PARSER_NAME}; }
+  std::vector<std::string> keys() const override {
+    return {kDecorationsName};
+  }
 
   Status setUp() override;
 
   Status update(const std::string& source, const ParserConfig& config) override;
 
   /// Update the set of decorators for a given source.
-  void updateDecorations(const std::string& source,
-                         const pt::ptree& decorators);
+  void updateDecorations(const std::string& source, const JSON& doc);
 
   /// Clear the decorations created from decorators for the given source.
   void clearSources(const std::string& source);
@@ -97,11 +98,15 @@ class DecoratorsConfigParserPlugin : public ConfigParserPlugin {
 
   /// Protect additions to the decorator set.
   static Mutex kDecorationsMutex;
+
+  /// Protect the configuration controlled content.
+  static Mutex kDecorationsConfigMutex;
 };
 }
 
 DecorationStore DecoratorsConfigParserPlugin::kDecorations;
 Mutex DecoratorsConfigParserPlugin::kDecorationsMutex;
+Mutex DecoratorsConfigParserPlugin::kDecorationsConfigMutex;
 
 Status DecoratorsConfigParserPlugin::setUp() {
   // Decorators are kept within customized data structures.
@@ -113,11 +118,12 @@ Status DecoratorsConfigParserPlugin::update(const std::string& source,
                                             const ParserConfig& config) {
   clearSources(source);
   clearDecorations(source);
-  if (config.count(PARSER_NAME) > 0) {
+  auto decorations = config.find(kDecorationsName);
+  if (decorations != config.end()) {
     // Each of these methods acquires the decorator lock separately.
     // The run decorators method is designed to have call sites throughout
     // the code base.
-    updateDecorations(source, config.at(PARSER_NAME));
+    updateDecorations(source, decorations->second);
     runDecorators(DECORATE_LOAD, 0, source);
   }
 
@@ -126,7 +132,7 @@ Status DecoratorsConfigParserPlugin::update(const std::string& source,
 
 void DecoratorsConfigParserPlugin::clearSources(const std::string& source) {
   // Reset the internal data store.
-  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
+  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsConfigMutex);
   if (intervals_.count(source) > 0) {
     intervals_[source].clear();
   }
@@ -148,42 +154,59 @@ void DecoratorsConfigParserPlugin::reset() {
   }
 }
 
-void DecoratorsConfigParserPlugin::updateDecorations(
-    const std::string& source, const pt::ptree& decorators) {
-  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
+void DecoratorsConfigParserPlugin::updateDecorations(const std::string& source,
+                                                     const JSON& doc) {
+  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsConfigMutex);
   // Assign load decorators.
   auto& load_key = kDecorationPointKeys.at(DECORATE_LOAD);
-  if (decorators.count(load_key) > 0) {
-    for (const auto& item : decorators.get_child(load_key)) {
-      load_[source].push_back(item.second.data());
+  if (doc.doc().HasMember(load_key)) {
+    auto& load = doc.doc()[load_key];
+    if (load.IsArray()) {
+      for (const auto& item : load.GetArray()) {
+        if (item.IsString()) {
+          load_[source].push_back(item.GetString());
+        }
+      }
     }
   }
 
   // Assign always decorators.
   auto& always_key = kDecorationPointKeys.at(DECORATE_ALWAYS);
-  if (decorators.count(always_key) > 0) {
-    for (const auto& item : decorators.get_child(always_key)) {
-      always_[source].push_back(item.second.data());
+  if (doc.doc().HasMember(always_key)) {
+    auto& always = doc.doc()[always_key];
+    if (always.IsArray()) {
+      for (const auto& item : always.GetArray()) {
+        if (item.IsString()) {
+          always_[source].push_back(item.GetString());
+        }
+      }
     }
   }
 
   // Check if intervals are defined.
   auto& interval_key = kDecorationPointKeys.at(DECORATE_INTERVAL);
-  if (decorators.count(interval_key) > 0) {
-    auto& interval = decorators.get_child(interval_key);
-    for (const auto& item : interval) {
-      size_t rate = std::stoll(item.first);
-      if (rate % 60 != 0) {
-        LOG(WARNING) << "Invalid decorator interval rate " << rate
-                     << " in config source: " << source;
-        continue;
-      }
+  if (doc.doc().HasMember(interval_key)) {
+    const auto& interval = doc.doc()[interval_key];
+    if (interval.IsObject()) {
+      for (const auto& item : interval.GetObject()) {
+        auto rate = doc.valueToSize(item.name);
+        //      size_t rate = std::stoll(item.name.GetString());
+        if (rate % 60 != 0) {
+          LOG(WARNING) << "Invalid decorator interval rate " << rate
+                       << " in config source: " << source;
+          continue;
+        }
 
-      // This is a valid interval, update the set of intervals to include
-      // this value. When intervals are checked this set is scanned, if a
-      // match is found, then the associated config data is executed.
-      for (const auto& interval_query : item.second) {
-        intervals_[source][rate].push_back(interval_query.second.data());
+        // This is a valid interval, update the set of intervals to include
+        // this value. When intervals are checked this set is scanned, if a
+        // match is found, then the associated config data is executed.
+        if (item.value.IsArray()) {
+          for (const auto& interval_query : item.value.GetArray()) {
+            if (interval_query.IsString()) {
+              intervals_[source][rate].push_back(interval_query.GetString());
+            }
+          }
+        }
       }
     }
   }
@@ -192,13 +215,14 @@ void DecoratorsConfigParserPlugin::updateDecorations(
 inline void addDecoration(const std::string& source,
                           const std::string& name,
                           const std::string& value) {
+  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
   DecoratorsConfigParserPlugin::kDecorations[source][name] = value;
 }
 
 inline void runDecorators(const std::string& source,
                           const std::vector<std::string>& queries) {
   for (const auto& query : queries) {
-    auto results = SQL(query);
+    SQL results(query);
     if (results.rows().size() > 0) {
       // Notice the warning above about undefined behavior when:
       // 1: You include decorators that emit the same column name
@@ -227,15 +251,15 @@ void runDecorators(DecorationPoint point,
     return;
   }
 
-  auto parser = Config::getParser(PARSER_NAME);
+  auto parser = Config::getParser(kDecorationsName);
   if (parser == nullptr) {
     // The decorators parser does not exist.
     return;
   }
 
   // Abstract the use of the decorator parser API.
+  ReadLock lock(DecoratorsConfigParserPlugin::kDecorationsConfigMutex);
   auto dp = std::dynamic_pointer_cast<DecoratorsConfigParserPlugin>(parser);
-  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
   if (point == DECORATE_LOAD) {
     for (const auto& target_source : dp->load_) {
       if (source.empty() || target_source.first == source) {
@@ -266,7 +290,7 @@ void getDecorations(std::map<std::string, std::string>& results) {
     return;
   }
 
-  WriteLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
+  ReadLock lock(DecoratorsConfigParserPlugin::kDecorationsMutex);
   // Copy the decorations into the log_item.
   for (const auto& source : DecoratorsConfigParserPlugin::kDecorations) {
     for (const auto& decoration : source.second) {
@@ -275,5 +299,7 @@ void getDecorations(std::map<std::string, std::string>& results) {
   }
 }
 
-REGISTER_INTERNAL(DecoratorsConfigParserPlugin, "config_parser", PARSER_NAME);
+REGISTER_INTERNAL(DecoratorsConfigParserPlugin,
+                  "config_parser",
+                  kDecorationsName.c_str());
 }

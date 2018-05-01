@@ -1,22 +1,21 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/algorithm/string.hpp>
 #include <boost/uuid/uuid.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
-#include <osquery/hash.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/events/darwin/iokit.h"
+#include "osquery/core/darwin/iokit.hpp"
 #include "osquery/tables/system/efi_misc.h"
 
 namespace osquery {
@@ -141,7 +140,7 @@ QueryData genKernelInfo(QueryContext& context) {
       auto signature = stringFromCFString((CFStringRef)property);
       CFRelease(property);
 
-      r["version"] = signature.substr(22, signature.find(":") - 22);
+      r["version"] = signature.substr(22, signature.find(':') - 22);
     }
   }
 

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <iomanip>
@@ -526,12 +526,11 @@ QueryData genSMCKeys(QueryContext &context) {
 
   // If the query is requesting an SMC key by name within the predicate.
   if (context.hasConstraint("key", EQUALS)) {
-    context.forEachConstraint("key",
-                              EQUALS,
-                              ([&smc, &results](const std::string &expr) {
-                                bool hidden = (kSMCHiddenKeys.count(expr) > 0);
-                                genSMCKey(expr, smc, results, hidden);
-                              }));
+    context.iteritems(
+        "key", EQUALS, ([&smc, &results](const std::string& expr) {
+          bool hidden = (kSMCHiddenKeys.count(expr) > 0);
+          genSMCKey(expr, smc, results, hidden);
+        }));
     return results;
   }
 
@@ -575,7 +574,7 @@ inline QueryData getSMCKeysUsingPredicate(
   });
 
   if (context.hasConstraint("key", EQUALS)) {
-    context.forEachConstraint("key", EQUALS, wrapped);
+    context.iteritems("key", EQUALS, wrapped);
   } else {
     // Perform a full scan of the keys category.
     for (const auto &key : keys) {
@@ -711,21 +710,21 @@ QueryData genFanSpeedSensors(QueryContext &context) {
       std::stringstream key;
       key << boost::format(smcFanSpeedKey.first) % fanIdx;
 
-      QueryData key_data;
-      genSMCKey(key.str(), smc, key_data);
-      if (key_data.empty()) {
+      QueryData fan_data;
+      genSMCKey(key.str(), smc, fan_data);
+      if (fan_data.empty()) {
         continue;
       }
 
-      auto &smcRow = key_data.back();
-      if (smcRow["value"].empty()) {
+      auto& fdb = fan_data.back();
+      if (fdb["value"].empty()) {
         continue;
       }
 
       if (smcFanSpeedKey.second == "name") {
-        r[smcFanSpeedKey.second] = getFanName(smcRow["value"]);
+        r[smcFanSpeedKey.second] = getFanName(fdb["value"]);
       } else {
-        float fanSpeed = getConvertedValue(smcRow["type"], smcRow["value"]);
+        float fanSpeed = getConvertedValue(fdb["type"], fdb["value"]);
         r[smcFanSpeedKey.second] = INTEGER(fanSpeed);
       }
     }

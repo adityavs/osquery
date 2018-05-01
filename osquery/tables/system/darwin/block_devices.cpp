@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <DiskArbitration/DASession.h>
@@ -16,7 +16,7 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/events/darwin/iokit.h"
+#include "osquery/core/darwin/iokit.hpp"
 
 namespace osquery {
 namespace tables {
@@ -35,8 +35,10 @@ void genIOMediaDevice(const io_service_t& device,
 
   r["uuid"] = getIOKitProperty(properties, "UUID");
   r["name"] = "/dev/" + getIOKitProperty(properties, "BSD Name");
-  r["size"] = getIOKitProperty(properties, "Size");
-
+  r["block_size"] = getIOKitProperty(properties, "Preferred Block Size");
+  auto disk_size = getNumIOKitProperty(properties, "Size");
+  auto block_size = getNumIOKitProperty(properties, "Preferred Block Size");
+  r["size"] = boost::lexical_cast<std::string>(disk_size / block_size);
   auto type = getIOKitProperty(properties, "Whole");
   if (type == "1") {
     // The "Whole" property applies to the entire disk entry, not partitions.

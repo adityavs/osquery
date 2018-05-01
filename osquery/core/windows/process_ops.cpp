@@ -1,40 +1,128 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
-#define _WIN32_DCOM
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-// clang-format off
-#include <LM.h>
-// clang-format on
-
-#include <string>
-#include <vector>
-
-#include <boost/optional.hpp>
-
-#include <osquery/system.h>
-
-#include "osquery/core/process.h"
-#include "osquery/core/windows/wmi.h"
+#include "osquery/core/windows/process_ops.h"
+#include "osquery/core/conversions.h"
 
 namespace osquery {
 
-int platformGetUid() {
-  DWORD nbytes = 0;
-  HANDLE token = INVALID_HANDLE_VALUE;
+std::string psidToString(PSID sid) {
+  LPTSTR sidOut = nullptr;
+  auto ret = ConvertSidToStringSidA(sid, &sidOut);
+  if (ret == 0) {
+    VLOG(1) << "ConvertSidToString failed with " << GetLastError();
+    return std::string("");
+  }
+  return std::string(sidOut);
+}
 
+int getUidFromSid(PSID sid) {
+  auto eUse = SidTypeUnknown;
+  unsigned long unameSize = 0;
+  unsigned long domNameSize = 1;
+
+  // LookupAccountSid first gets the size of the username buff required.
+  LookupAccountSidW(
+      nullptr, sid, nullptr, &unameSize, nullptr, &domNameSize, &eUse);
+  std::vector<wchar_t> uname(unameSize);
+  std::vector<wchar_t> domName(domNameSize);
+  auto ret = LookupAccountSidW(nullptr,
+                               sid,
+                               uname.data(),
+                               &unameSize,
+                               domName.data(),
+                               &domNameSize,
+                               &eUse);
+
+  if (ret == 0) {
+    return -1;
+  }
+  // USER_INFO_3 struct contains the RID (uid) of our user
+  unsigned long userInfoLevel = 3;
+  unsigned char* userBuff = nullptr;
+  unsigned long uid = -1;
+  ret = NetUserGetInfo(nullptr, uname.data(), userInfoLevel, &userBuff);
+  if (ret != NERR_Success && ret != NERR_UserNotFound) {
+    return uid;
+  }
+
+  // SID belongs to a domain user, so we return the relative identifier (RID)
+  if (ret == NERR_UserNotFound) {
+    LPTSTR sidString;
+    ConvertSidToStringSid(sid, &sidString);
+    auto toks = osquery::split(sidString, "-");
+    safeStrtoul(toks.at(toks.size() - 1), 10, uid);
+    LocalFree(sidString);
+  } else if (ret == NERR_Success) {
+    uid = LPUSER_INFO_3(userBuff)->usri3_user_id;
+  }
+
+  NetApiBufferFree(userBuff);
+  return uid;
+}
+
+int getGidFromSid(PSID sid) {
+  auto eUse = SidTypeUnknown;
+  unsigned long unameSize = 0;
+  unsigned long domNameSize = 1;
+
+  // LookupAccountSid first gets the size of the username buff required.
+  LookupAccountSidW(
+      nullptr, sid, nullptr, &unameSize, nullptr, &domNameSize, &eUse);
+  std::vector<wchar_t> uname(unameSize);
+  std::vector<wchar_t> domName(domNameSize);
+  auto ret = LookupAccountSidW(nullptr,
+                               sid,
+                               uname.data(),
+                               &unameSize,
+                               domName.data(),
+                               &domNameSize,
+                               &eUse);
+
+  if (ret == 0) {
+    return -1;
+  }
+  // USER_INFO_3 struct contains the RID (uid) of our user
+  unsigned long userInfoLevel = 3;
+  unsigned char* userBuff = nullptr;
+  unsigned long gid = -1;
+  ret = NetUserGetInfo(nullptr, uname.data(), userInfoLevel, &userBuff);
+
+  if (ret == NERR_UserNotFound) {
+    LPTSTR sidString;
+    ConvertSidToStringSid(sid, &sidString);
+    auto toks = osquery::split(sidString, "-");
+    safeStrtoul(toks.at(toks.size() - 1), 10, gid);
+    LocalFree(sidString);
+  } else if (ret == NERR_Success) {
+    gid = LPUSER_INFO_3(userBuff)->usri3_primary_group_id;
+  }
+
+  NetApiBufferFree(userBuff);
+  return gid;
+}
+
+unsigned long getRidFromSid(PSID sid) {
+  BYTE* countPtr = GetSidSubAuthorityCount(sid);
+  unsigned long indexOfRid = static_cast<unsigned long>(*countPtr - 1);
+  unsigned long* ridPtr = GetSidSubAuthority(sid, indexOfRid);
+  return *ridPtr;
+}
+
+int platformGetUid() {
+  auto token = INVALID_HANDLE_VALUE;
   if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) {
     return -1;
   }
 
+  unsigned long nbytes = 0;
   ::GetTokenInformation(token, TokenUser, nullptr, 0, &nbytes);
   if (nbytes == 0) {
     ::CloseHandle(token);
@@ -43,9 +131,8 @@ int platformGetUid() {
 
   std::vector<char> tu_buffer;
   tu_buffer.assign(nbytes, '\0');
-  PTOKEN_USER tu = nullptr;
 
-  BOOL status = ::GetTokenInformation(token,
+  auto status = ::GetTokenInformation(token,
                                       TokenUser,
                                       tu_buffer.data(),
                                       static_cast<DWORD>(tu_buffer.size()),
@@ -55,53 +142,21 @@ int platformGetUid() {
     return -1;
   }
 
-  LPSTR sid = nullptr;
-  tu = (PTOKEN_USER)tu_buffer.data();
-  SID_NAME_USE eUse = SidTypeUnknown;
-  DWORD unameSize = 0;
-  DWORD domNameSize = 1;
-
-  // LookupAccountSid first gets the size of the username buff required.
-  LookupAccountSid(
-      nullptr, tu->User.Sid, nullptr, &unameSize, nullptr, &domNameSize, &eUse);
-
-  std::vector<char> uname(unameSize);
-  std::vector<char> domName(domNameSize);
-  auto ret = LookupAccountSid(nullptr,
-                              tu->User.Sid,
-                              uname.data(),
-                              &unameSize,
-                              domName.data(),
-                              &domNameSize,
-                              &eUse);
-
-  if (ret == 0) {
-    return -1;
-  }
-
-  // USER_INFO_3 struct contains the RID (uid) of our user
-  DWORD userInfoLevel = 3;
-  LPUSER_INFO_3 userBuff = nullptr;
-  std::wstring wideUserName = stringToWstring(std::string(uname.data()));
-  ret = NetUserGetInfo(
-      nullptr, wideUserName.c_str(), userInfoLevel, (LPBYTE*)&userBuff);
-
-  if (ret != NERR_Success) {
-    return -1;
-  }
-
-  ::LocalFree(sid);
-  return userBuff->usri3_user_id;
+  auto tu = PTOKEN_USER(tu_buffer.data());
+  return getUidFromSid(tu->User.Sid);
 }
 
 bool isLauncherProcessDead(PlatformProcess& launcher) {
-  DWORD code = 0;
-  if (!::GetExitCodeProcess(launcher.nativeHandle(), &code)) {
-    // TODO(#1991): If an error occurs with GetExitCodeProcess, do we want to
-    // return a Status object to describe the error with more granularity?
-    return false;
+  unsigned long code = 0;
+  if (launcher.nativeHandle() == INVALID_HANDLE_VALUE) {
+    return true;
   }
 
+  if (!::GetExitCodeProcess(launcher.nativeHandle(), &code)) {
+    LOG(WARNING) << "GetExitCodeProcess did not return a value, error code ("
+                 << GetLastError() << ")";
+    return false;
+  }
   return (code != STILL_ACTIVE);
 }
 
@@ -114,15 +169,13 @@ bool unsetEnvVar(const std::string& name) {
 }
 
 boost::optional<std::string> getEnvVar(const std::string& name) {
-  const int kInitialBufferSize = 1024;
+  const auto kInitialBufferSize = 1024;
   std::vector<char> buf;
   buf.assign(kInitialBufferSize, '\0');
 
-  DWORD value_len =
+  auto value_len =
       ::GetEnvironmentVariableA(name.c_str(), buf.data(), kInitialBufferSize);
   if (value_len == 0) {
-    // TODO(#1991): Do we want figure out a way to be more granular in terms of
-    // the error to return?
     return boost::none;
   }
 
@@ -149,7 +202,7 @@ ModuleHandle platformModuleOpen(const std::string& path) {
 }
 
 void* platformModuleGetSymbol(ModuleHandle module, const std::string& symbol) {
-  return ::GetProcAddress(module, symbol.c_str());
+  return ::GetProcAddress(static_cast<HMODULE>(module), symbol.c_str());
 }
 
 std::string platformModuleGetError() {
@@ -157,10 +210,8 @@ std::string platformModuleGetError() {
 }
 
 bool platformModuleClose(ModuleHandle module) {
-  return (::FreeLibrary(module) != 0);
+  return (::FreeLibrary(static_cast<HMODULE>(module)) != 0);
 }
-
-void cleanupDefunctProcesses() {}
 
 void setToBackgroundPriority() {}
 
@@ -185,10 +236,10 @@ bool isUserAdmin() {
 }
 
 int platformGetPid() {
-  return (int)GetCurrentProcessId();
+  return static_cast<int>(GetCurrentProcessId());
 }
 
 int platformGetTid() {
-  return (int)GetCurrentThreadId();
+  return static_cast<int>(GetCurrentThreadId());
 }
 }

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -20,6 +20,8 @@
 
 #include <osquery/events.h>
 #include <osquery/status.h>
+
+#include "osquery/events/pathset.h"
 
 namespace osquery {
 
@@ -76,6 +78,8 @@ struct FSEventsEventContext : public EventContext {
 using FSEventsEventContextRef = std::shared_ptr<FSEventsEventContext>;
 using FSEventsSubscriptionContextRef =
     std::shared_ptr<FSEventsSubscriptionContext>;
+
+using ExcludePathSet = PathSet<patternedPath>;
 
 /**
  * @brief An osquery EventPublisher for the Apple FSEvents notification API.
@@ -135,6 +139,9 @@ class FSEventsEventPublisher
   std::set<std::string> transformSubscription(
       FSEventsSubscriptionContextRef& sc) const;
 
+  /// Build the set of excluded paths for which events are not to be propogated.
+  void buildExcludePathsSet();
+
  private:
   /// Check if the stream (and run loop) are running.
   bool isStreamRunning() const;
@@ -151,6 +158,9 @@ class FSEventsEventPublisher
 
   /// Set of paths to monitor, determined by a configure step.
   std::set<std::string> paths_;
+
+  /// Events pertaining to these paths not to be propagated.
+  ExcludePathSet exclude_paths_;
 
   /// Reference to the run loop for this thread.
   CFRunLoopRef run_loop_{nullptr};
@@ -174,5 +184,6 @@ class FSEventsEventPublisher
   FRIEND_TEST(FSEventsTests, test_fsevents_fire_event);
   FRIEND_TEST(FSEventsTests, test_fsevents_event_action);
   FRIEND_TEST(FSEventsTests, test_fsevents_embedded_wildcards);
+  FRIEND_TEST(FSEventsTests, test_fsevents_match_subscription);
 };
 }

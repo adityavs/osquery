@@ -1,25 +1,29 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 
-#ifdef WIN32
+#include <boost/noncopyable.hpp>
+#include <boost/optional.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 
-#define WIN32_LEAN_AND_MEAN
+#ifdef WIN32
+
 #include <windows.h>
 
 // Suppressing unexpected token following preprocessor directive warning
@@ -29,28 +33,16 @@
 #pragma warning(pop)
 #endif
 
-#include <boost/noncopyable.hpp>
-#include <boost/optional.hpp>
-
 #include <osquery/core.h>
+#include <osquery/system.h>
 
 namespace osquery {
 
-#ifdef WIN32
-
-/// Unfortunately, pid_t is not defined in Windows, however, DWORD is the
-/// most appropriate alternative since process ID on Windows are stored in
-/// a DWORD.
-using pid_t = DWORD;
-using PlatformPidType = HANDLE;
-using ModuleHandle = HMODULE;
-#else
-using PlatformPidType = pid_t;
-using ModuleHandle = void*;
-#endif
-
 /// Constant for an invalid process
-const PlatformPidType kInvalidPid = (PlatformPidType)-1;
+const auto kInvalidPid = (PlatformPidType)-1;
+
+/// The saved thread ID for shutdown to short-circuit raising a signal.
+extern std::thread::id kMainThreadId;
 
 /**
  * @brief Categories of process states adapted to be platform agnostic
@@ -106,7 +98,7 @@ class PlatformProcess : private boost::noncopyable {
    * nativeHandle() do not differ).
    *
    * NOTE: In most situations, this should ideally not be used on Windows when
-   * dealing when tracking process lifetimes.
+   * dealing with tracking process lifetimes.
    */
   int pid() const;
 
@@ -123,6 +115,21 @@ class PlatformProcess : private boost::noncopyable {
   /// Hard terminates the process
   bool kill() const;
 
+  /**
+   * @brief Attempt to kill a process gracefully, usually a child process.
+   */
+  bool killGracefully() const;
+
+  /**
+   * @brief Wait or cleanup a process, usually a child process.
+   *
+   * This will wait for a process to cleanup. Use this after requesting a
+   * graceful shutdown.
+   *
+   * @return true if the process was cleaned, otherwise false.
+   */
+  bool cleanup() const;
+
   /// Returns whether the PlatformProcess object is valid
   bool isValid() const {
     return (id_ != kInvalidPid);
@@ -132,6 +139,9 @@ class PlatformProcess : private boost::noncopyable {
 
   /// Returns the current process
   static std::shared_ptr<PlatformProcess> getCurrentProcess();
+
+  /// Returns the pid of the current process
+  static int getCurrentPid();
 
   /// Returns the launcher process (only works for worker processes)
   static std::shared_ptr<PlatformProcess> getLauncherProcess();
@@ -154,19 +164,19 @@ class PlatformProcess : private boost::noncopyable {
    */
   static std::shared_ptr<PlatformProcess> launchExtension(
       const std::string& exec_path,
-      const std::string& extension,
       const std::string& extensions_socket,
       const std::string& extensions_timeout,
       const std::string& extensions_interval,
-      const std::string& verbose);
+      bool verbose = false);
 
   /**
-   * @brief Launches a new Python script
+   * @brief Launches a new test Python script.
    *
    * This will launch a new Python process to run the specified script and
-   * script arguments
+   * script arguments. This is used within the test harnesses to run example
+   * TLS server scripts.
    */
-  static std::shared_ptr<PlatformProcess> launchPythonScript(
+  static std::shared_ptr<PlatformProcess> launchTestPythonScript(
       const std::string& args);
 
  private:
@@ -211,8 +221,10 @@ class SecurityDescriptor {
 /// Returns the current user's ID (UID on POSIX systems and RID for Windows)
 int platformGetUid();
 
-/// Causes the current thread to sleep for a specified time in milliseconds.
-void sleepFor(size_t msec);
+inline void sleepFor(size_t msec) {
+  std::chrono::milliseconds mduration(msec);
+  std::this_thread::sleep_for(mduration);
+}
 
 /// Set the enviroment variable name with value value.
 bool setEnvVar(const std::string& name, const std::string& value);
@@ -262,25 +274,22 @@ bool platformModuleClose(ModuleHandle module);
  */
 bool isLauncherProcessDead(PlatformProcess& launcher);
 
-/// Waits for defunct processes to terminate.
-void cleanupDefunctProcesses();
-
 /// Sets the current process to run with background scheduling priority.
 void setToBackgroundPriority();
 
 /**
-* @brief Returns the current processes pid
-*
-* On Windows, returns the value of GetCurrentProcessId
-* and on posix platforms returns getpid()
-*/
+ * @brief Returns the current processes pid
+ *
+ * On Windows, returns the value of GetCurrentProcessId
+ * and on posix platforms returns getpid()
+ */
 int platformGetPid();
 
 /**
-* @brief Returns the current thread id
-*
-* On Windows, returns the value of GetCurrentThreadId
-* and on posix platforms returns gettid()
-*/
+ * @brief Returns the current thread id
+ *
+ * On Windows, returns the value of GetCurrentThreadId
+ * and on posix platforms returns gettid()
+ */
 int platformGetTid();
-}
+} // namespace osquery

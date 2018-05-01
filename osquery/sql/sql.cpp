@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sstream>
@@ -16,19 +16,38 @@
 #include <osquery/sql.h>
 #include <osquery/tables.h>
 
+#include "osquery/core/conversions.h"
+
 namespace osquery {
 
 FLAG(int32, value_max, 512, "Maximum returned row value size");
 
-SQL::SQL(const std::string& q) {
-  status_ = query(q, results_);
+CREATE_LAZY_REGISTRY(SQLPlugin, "sql");
+
+SQL::SQL(const std::string& query, bool use_cache) {
+  TableColumns table_columns;
+  status_ = getQueryColumns(query, table_columns);
+  if (status_.ok()) {
+    for (auto c : table_columns) {
+      columns_.push_back(std::get<0>(c));
+    }
+    status_ = osquery::query(query, results_, use_cache);
+  }
 }
 
 const QueryData& SQL::rows() const {
   return results_;
 }
 
-bool SQL::ok() {
+QueryData& SQL::rows() {
+  return results_;
+}
+
+const ColumnNames& SQL::columns() const {
+  return columns_;
+}
+
+bool SQL::ok() const {
   return status_.ok();
 }
 
@@ -36,7 +55,7 @@ const Status& SQL::getStatus() const {
   return status_;
 }
 
-std::string SQL::getMessageString() {
+std::string SQL::getMessageString() const {
   return status_.toString();
 }
 
@@ -109,7 +128,8 @@ Status SQLPlugin::call(const PluginRequest& request, PluginResponse& response) {
   }
 
   if (request.at("action") == "query") {
-    return this->query(request.at("query"), response);
+    bool use_cache = (request.count("cache") && request.at("cache") == "1");
+    return this->query(request.at("query"), response, use_cache);
   } else if (request.at("action") == "columns") {
     TableColumns columns;
     auto status = this->getQueryColumns(request.at("query"), columns);
@@ -127,13 +147,25 @@ Status SQLPlugin::call(const PluginRequest& request, PluginResponse& response) {
   } else if (request.at("action") == "detach") {
     this->detach(request.at("table"));
     return Status(0, "OK");
+  } else if (request.at("action") == "tables") {
+    std::vector<std::string> tables;
+    auto status = this->getQueryTables(request.at("query"), tables);
+    if (status.ok()) {
+      for (const auto& table : tables) {
+        response.push_back({{"t", table}});
+      }
+    }
+    return status;
   }
   return Status(1, "Unknown action");
 }
 
-Status query(const std::string& q, QueryData& results) {
+Status query(const std::string& q, QueryData& results, bool use_cache) {
   return Registry::call(
-      "sql", "sql", {{"action", "query"}, {"query", q}}, results);
+      "sql",
+      "sql",
+      {{"action", "query"}, {"cache", (use_cache) ? "1" : "0"}, {"query", q}},
+      results);
 }
 
 Status getQueryColumns(const std::string& q, TableColumns& columns) {
@@ -145,6 +177,37 @@ Status getQueryColumns(const std::string& q, TableColumns& columns) {
   for (const auto& item : response) {
     columns.push_back(make_tuple(
         item.at("n"), columnTypeName(item.at("t")), ColumnOptions::DEFAULT));
+  }
+  return status;
+}
+
+Status mockGetQueryTables(std::string copy_q,
+                          std::vector<std::string>& tables) {
+  std::transform(copy_q.begin(), copy_q.end(), copy_q.begin(), ::tolower);
+  auto offset_from = copy_q.find("from ");
+  if (offset_from == std::string::npos) {
+    return Status(1);
+  }
+
+  auto simple_tables = osquery::split(copy_q.substr(offset_from + 5), ",");
+  for (const auto& table : simple_tables) {
+    tables.push_back(table);
+  }
+  return Status(0);
+}
+
+Status getQueryTables(const std::string& q, std::vector<std::string>& tables) {
+  if (!Registry::get().exists("sql", "sql") && kToolType == ToolType::TEST) {
+    // We 'mock' this functionality for internal tests.
+    return mockGetQueryTables(q, tables);
+  }
+
+  PluginResponse response;
+  auto status = Registry::call(
+      "sql", "sql", {{"action", "tables"}, {"query", q}}, response);
+
+  for (const auto& table : response) {
+    tables.push_back(table.at("t"));
   }
   return status;
 }

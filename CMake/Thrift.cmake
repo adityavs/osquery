@@ -1,6 +1,14 @@
-# Target for generating osquery thirft (extensions) code.
+#  Copyright (c) 2014-present, Facebook, Inc.
+#  All rights reserved.
+#
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
+
+set(THRIFT_NAME "thrift")
 set(OSQUERY_THRIFT_DIR "${CMAKE_BINARY_DIR}/generated/gen-cpp")
-set(OSQUERY_THRIFT_GENERATED_FILES
+set(THRIFT_GENERATED_FILES
   ${OSQUERY_THRIFT_DIR}/Extension.cpp
   ${OSQUERY_THRIFT_DIR}/Extension.h
   ${OSQUERY_THRIFT_DIR}/ExtensionManager.cpp
@@ -9,13 +17,27 @@ set(OSQUERY_THRIFT_GENERATED_FILES
   ${OSQUERY_THRIFT_DIR}/osquery_types.h
 )
 
-# Allow targets to warn if the thrift interface code is not defined.
-add_definitions(
-  -DOSQUERY_THRIFT_LIB=thrift
-  -DOSQUERY_THRIFT_SERVER_LIB=thrift/server
-  -DOSQUERY_THRIFT_POINTER=boost
-  -DOSQUERY_THRIFT=
-)
+if(DEFINED ENV{FBTHRIFT})
+  set(THRIFT_NAME "thrift1")
+  set(OSQUERY_THRIFT_DIR "${CMAKE_BINARY_DIR}/generated/gen-cpp2")
+  set(THRIFT_GENERATED_FILES
+    ${OSQUERY_THRIFT_DIR}/Extension_client.cpp
+    ${OSQUERY_THRIFT_DIR}/Extension.cpp
+    ${OSQUERY_THRIFT_DIR}/ExtensionManager_client.cpp
+    ${OSQUERY_THRIFT_DIR}/ExtensionManager.cpp
+    ${OSQUERY_THRIFT_DIR}/ExtensionManager_processmap_binary.cpp
+    ${OSQUERY_THRIFT_DIR}/ExtensionManager_processmap_compact.cpp
+    ${OSQUERY_THRIFT_DIR}/Extension_processmap_binary.cpp
+    ${OSQUERY_THRIFT_DIR}/Extension_processmap_compact.cpp
+    ${OSQUERY_THRIFT_DIR}/osquery_constants.cpp
+    ${OSQUERY_THRIFT_DIR}/osquery_data.cpp
+    ${OSQUERY_THRIFT_DIR}/osquery_types.cpp
+  )
+  include_directories("${CMAKE_BINARY_DIR}")
+  add_definitions(-DFBTHRIFT=1)
+endif()
 
-# For the extensions targets, allow them to include thrift interface headers.
+find_program(THRIFT_COMPILER ${THRIFT_NAME} ${BUILD_DEPS} ENV PATH)
+
+# Set the include directory for generated Thrift files.
 include_directories("${OSQUERY_THRIFT_DIR}")

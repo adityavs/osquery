@@ -1,15 +1,16 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
-#include <vector>
+#include <future>
 #include <string>
+#include <vector>
 
 #include <osquery/core.h>
 #include <osquery/config.h>
@@ -31,7 +32,6 @@ extern const std::set<std::string> kCommonFileColumns;
 class FileEventSubscriber : public EventSubscriber<FSEventsEventPublisher> {
  public:
   Status init() override {
-    configure();
     return Status(0);
   }
 
@@ -64,8 +64,8 @@ void FileEventSubscriber::configure() {
   // There may be a better way to find the set intersection/difference.
   removeSubscriptions();
 
-  Config::getInstance().files([this](const std::string& category,
-                                     const std::vector<std::string>& files) {
+  Config::get().files([this](const std::string& category,
+                             const std::vector<std::string>& files) {
     for (const auto& file : files) {
       VLOG(1) << "Added file event listener to: " << file;
       auto sc = createSubscriptionContext();
@@ -80,6 +80,20 @@ Status FileEventSubscriber::Callback(const FSEventsEventContextRef& ec,
                                      const FSEventsSubscriptionContextRef& sc) {
   if (ec->action.empty()) {
     return Status(0);
+  }
+
+  // Need to call configure on the publisher, not the subscriber
+  if (ec->fsevent_flags & kFSEventStreamEventFlagMount) {
+    // Should we add listening to the mount point
+    auto subscriber = ([this, &ec]() {
+      auto msc = createSubscriptionContext();
+      msc->path = ec->path + "/*";
+      msc->category = "tmp";
+      return subscribe(&FileEventSubscriber::Callback, msc);
+    });
+    std::packaged_task<void()> task(std::move(subscriber));
+    auto result = task.get_future();
+    std::thread(std::move(task)).detach();
   }
 
   Row r;

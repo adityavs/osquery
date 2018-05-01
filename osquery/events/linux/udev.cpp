@@ -1,12 +1,14 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
+
+#include <poll.h>
 
 #include <osquery/events.h>
 #include <osquery/filesystem.h>
@@ -58,7 +60,6 @@ void UdevEventPublisher::tearDown() {
 
 Status UdevEventPublisher::run() {
   int fd = 0;
-  fd_set set;
 
   {
     WriteLock lock(mutex_);
@@ -68,31 +69,34 @@ Status UdevEventPublisher::run() {
     fd = udev_monitor_get_fd(monitor_);
   }
 
-  FD_ZERO(&set);
-  FD_SET(fd, &set);
+  struct pollfd fds[1];
+  fds[0].fd = fd;
+  fds[0].events = POLLIN;
 
-  struct timeval timeout = {1, 0};
-  int selector = ::select(fd + 1, &set, nullptr, nullptr, &timeout);
-  if (selector == -1) {
+  int selector = ::poll(fds, 1, 1000);
+  if (selector == -1 && errno != EINTR && errno != EAGAIN) {
     LOG(ERROR) << "Could not read udev monitor";
     return Status(1, "udev monitor failed.");
   }
 
-  if (selector == 0 || !FD_ISSET(fd, &set)) {
+  if (selector == 0 || !(fds[0].revents & POLLIN)) {
     // Read timeout.
     return Status(0, "Finished");
   }
 
-  struct udev_device* device = udev_monitor_receive_device(monitor_);
-  if (device == nullptr) {
-    LOG(ERROR) << "udev monitor returned invalid device";
-    return Status(1, "udev monitor failed.");
+  {
+    WriteLock lock(mutex_);
+    struct udev_device* device = udev_monitor_receive_device(monitor_);
+    if (device == nullptr) {
+      LOG(ERROR) << "udev monitor returned invalid device";
+      return Status(1, "udev monitor failed.");
+    }
+
+    auto ec = createEventContextFrom(device);
+    fire(ec);
+
+    udev_device_unref(device);
   }
-
-  auto ec = createEventContextFrom(device);
-  fire(ec);
-
-  udev_device_unref(device);
 
   pauseMilli(kUdevMLatency);
   return Status(0, "OK");

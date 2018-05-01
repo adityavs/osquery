@@ -3,14 +3,16 @@ require File.expand_path("../Abstract/abstract-osquery-formula", __FILE__)
 class Gflags < AbstractOsqueryFormula
   desc "Library for processing command-line flags"
   homepage "https://gflags.github.io/gflags/"
-  url "https://github.com/gflags/gflags/archive/v2.2.0.tar.gz"
-  sha256 "466c36c6508a451734e4f4d76825cf9cd9b8716d2b70ef36479ae40f08271f88"
+  license "MIT"
+  url "https://github.com/gflags/gflags/archive/v2.2.1.tar.gz"
+  sha256 "ae27cdbcd6a2f935baa78e4f21f675649271634c092b1be01469440495609d0e"
+  revision 200
 
   bottle do
     root_url "https://osquery-packages.s3.amazonaws.com/bottles"
     cellar :any_skip_relocation
-    sha256 "b1f631a81f19deb2f9d09050e4ca59c2d7b0ed389a5fb1ce178bae1d1325de00" => :sierra
-    sha256 "2ef16484fd377d1e0ade7c4261cf8c9099cb12350ca7145862aa61f32b4ce67f" => :x86_64_linux
+    sha256 "dd8f29f2e3f51f8ab9071172cdfdb4dfbd0f65c7e56324469901620aa515041e" => :sierra
+    sha256 "207abb23d835c159094abcb723add137fafd19edcc34079b75aa1ca50ff050ee" => :x86_64_linux
   end
 
   depends_on "cmake" => :build

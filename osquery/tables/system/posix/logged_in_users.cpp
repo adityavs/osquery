@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <mutex>
@@ -22,7 +22,6 @@ Mutex utmpxEnumerationMutex;
 
 const std::map<size_t, std::string> kLoginTypes = {
     {EMPTY, "empty"},
-    {RUN_LVL, "runlevel"},
     {BOOT_TIME, "boot_time"},
     {NEW_TIME, "new_time"},
     {OLD_TIME, "old_time"},
@@ -30,7 +29,10 @@ const std::map<size_t, std::string> kLoginTypes = {
     {LOGIN_PROCESS, "login"},
     {USER_PROCESS, "user"},
     {DEAD_PROCESS, "dead"},
+#if !defined(FREEBSD)
+    {RUN_LVL, "runlevel"},
     {ACCOUNTING, "accounting"},
+#endif
 };
 
 QueryData genLoggedInUsers(QueryContext& context) {

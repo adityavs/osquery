@@ -2,10 +2,11 @@ All osquery development occurs in feature branches and all contributions occur v
 
 ## Contributor License Agreement ("CLA")
 
-In order to accept your pull request, we need you to submit a CLA. You only need
-to do this once to work on any of Facebook's open source projects.
+In order to accept your pull request, we need you to submit a CLA. You only need to do this once to work on any of Facebook's open source projects.
 
 Complete your CLA here: <https://code.facebook.com/cla>
+
+By contributing to osquery, you agree that your contributions will be licensed under both the `LICENSE` file and the `COPYING` file in the root directory of this source tree.
 
 ## Git workflow
 
@@ -27,7 +28,7 @@ origin  git@gitHub.com:facebook/osquery.git (push)
 Now, use the GitHub UI to fork osquery to your personal GitHub organization. Then, add the remote URL of your fork to git's local remotes:
 
 ```
-$ git remote add marpaia git@github.com:marpaia/osquery.git
+$ git remote add $USER git@github.com:$USER/osquery.git
 ```
 
 Now, your "remote" should be set up as follows:
@@ -51,7 +52,7 @@ Write your code and when you're ready to put up a Pull Request, push your local 
 ```
 $ git add .
 $ git commit -m "my awesome feature!"
-$ git push -u marpaia my-feature
+$ git push -u $USER my-feature
 ```
 
 Visit https://github.com/facebook/osquery and use the web UI to create a Pull Request. Once your pull request has gone through sufficient review and iteration, please squash all of your commits into one commit.
@@ -64,71 +65,11 @@ In most cases your PR should represent a single body of work. It is fine to chan
 
 Pull requests will often need revision, most likely after the required code review from the friendly core development team. :D
 
-Our preference is to minimize the number of commits in a pull request and represent each body of change as a single, concise, commit. To do this we ask you to [squash](https://git-scm.com/book/en/v2/Git-Tools-Rewriting-History) your git commits before we merge changes. There are two basic workflows for squashing, let's run through examples of each.
-
-**You create a pull request with several commits**
-
-If you open a pull request from a branch with 'stacked commits' the request will ask us to merge the lot of them into our master. That is no fun, and we will promptly ask you to squash! If you have 5 commits in the pull request you can squash these into 1 using:
-
-```
-$ git rebase -i HEAD~5
-```
-
-This tells git to perform an interactive rebase onto the `HEAD-5` commit. The interactive part means your favorite editor will prompt you for actions. To turn 5 commits into 1 we'll `pick` the first, then `squash` the remaining, in this case 4. The 'squashed' 4 will be squashed into the commit we 'pick'. Within the interactive editor, change the last 4 'picks' to an `s`, shorthand for squash.
-
-For example here are my 5 commits while editing this guide:
-
-```
-pick dc849a9 Update contributing with squash instructions
-pick 8b1fa6b Minor change to contributing
-pick 45baf1a Delete whitespace in contributing
-pick bded8d7 Delete more whitespace
-pick ab49a55 Fix small mistake
-```
-
-I can squash these into a single commit by updating and saving:
-
-```
-pick dc849a9 Update contributing with squash instructions
-s 8b1fa6b Minor change to contributing
-s 45baf1a Delete whitespace in contributing
-s bded8d7 Delete more whitespace
-s ab49a55 Fix small mistake
-```
-
-The next prompt allows us to amend the commit message:
-
-```
-# This is a combination of 5 commits.
-# The first commit's message is:
-Update contributing with squash instructions
-# This is the 2nd commit message:
-Minor change to contributing
-# This is the 3rd commit message:
-Delete whitespace in contributing
-# This is the 4th commit message:
-Delete more whitespace
-# This is the 5th commit message:
-Fix small mistake
-```
-
-I will remove everything except for the first line, as that is the thesis for all 5 commits, and save:
-
-```
-# This is a combination of 5 commits.
-# The first commit's message is:
-Update contributing with squash instructions
-```
-
-When you save you can verify your 5 commits are now 1 by inspecting the `git log`. To update your pull request you'll need to force-push since you just rewrote your local history:
-
-```
-$ git push -f
-```
+Please feel free to add several commits to your Pull Request. When it comes time to merge into **master** all commits in a Pull Request will be squashed using GitHub's tooling into a single commit. The development team will usually choose to remove the commit body and keep the GitHub-appended `(#PR)` number in the commit title.
 
 **You make updates to your pull request**
 
-If the pull request needs changes, or you decide to update the content, please 'amend' your previous commit:
+If the pull request needs changes, or you decide to update the content, consider 'amending' your previous commit:
 
 ```
 $ git commit --amend
@@ -184,14 +125,45 @@ It's worth noting that you should exercise caution when copying code of any kind
 
 ## Code of Conduct
 
-As contributors and maintainers of this project, we pledge to respect all people who contribute through reporting issues, posting feature requests, updating documentation, submitting pull requests or patches, and other activities.
+### Our Pledge
 
-We are committed to making participation in this project a harassment-free experience for everyone, regardless of level of experience, gender, gender identity and expression, sexual orientation, disability, personal appearance, body size, race, age, or religion.
+In the interest of fostering an open and welcoming environment, we as contributors and maintainers pledge to making participation in our project and our community a harassment-free experience for everyone, regardless of age, body size, disability, ethnicity, gender identity and expression, level of experience, nationality, personal appearance, race, religion, or sexual identity and orientation.
 
-Examples of unacceptable behavior by participants include the use of sexual language or imagery, derogatory comments or personal attacks, trolling, public or private harassment, insults, or other unprofessional conduct.
+### Our Standards
 
-Project maintainers have the right and responsibility to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned to this Code of Conduct. Project maintainers who do not follow the Code of Conduct may be removed from the project team.
+Examples of behavior that contributes to creating a positive environment
+include:
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by opening an issue or contacting one or more of the project maintainers.
+- Using welcoming and inclusive language
+- Being respectful of differing viewpoints and experiences
+- Gracefully accepting constructive criticism
+- Focusing on what is best for the community
+- Showing empathy towards other community members
 
-This Code of Conduct is adapted from the [Contributor Covenant](http://contributor-covenant.org), version 1.0.0, available at [http://contributor-covenant.org/version/1/0/0/](http://contributor-covenant.org/version/1/0/0/)
+Examples of unacceptable behavior by participants include:
+
+- The use of sexualized language or imagery and unwelcome sexual attention or advances
+- Trolling, insulting/derogatory comments, and personal or political attacks
+- Public or private harassment
+- Publishing others' private information, such as a physical or electronic address, without explicit permission
+- Other conduct which could reasonably be considered inappropriate in a professional setting
+
+### Our Responsibilities
+
+Project maintainers are responsible for clarifying the standards of acceptable behavior and are expected to take appropriate and fair corrective action in response to any instances of unacceptable behavior.
+
+Project maintainers have the right and responsibility to remove, edit, or reject comments, commits, code, wiki edits, issues, and other contributions that are not aligned to this Code of Conduct, or to ban temporarily or permanently any contributor for other behaviors that they deem inappropriate, threatening, offensive, or harmful.
+
+### Scope
+
+This Code of Conduct applies both within project spaces and in public spaces when an individual is representing the project or its community. Examples of representing a project or community include using an official project e-mail address, posting via an official social media account, or acting as an appointed representative at an online or offline event. Representation of a project may be further defined and clarified by project maintainers.
+
+### Enforcement
+
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by contacting the project team at osquery@fb.com. All complaints will be reviewed and investigated and will result in a response that is deemed necessary and appropriate to the circumstances. The project team is obligated to maintain confidentiality with regard to the reporter of an incident. Further details of specific enforcement policies may be posted separately.
+
+Project maintainers who do not follow or enforce the Code of Conduct in good faith may face temporary or permanent repercussions as determined by other members of the project's leadership.
+
+### Attribution
+
+This Code of Conduct is adapted from the Contributor Covenant, version 1.4, available at http://contributor-covenant.org/version/1/4.

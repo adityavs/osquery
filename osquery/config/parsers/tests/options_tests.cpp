@@ -1,16 +1,17 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <gtest/gtest.h>
 
 #include <osquery/config.h>
+#include <osquery/flags.h>
 #include <osquery/registry.h>
 
 #include "osquery/tests/test_util.h"
@@ -25,9 +26,38 @@ TEST_F(OptionsConfigParserPluginTests, test_get_option) {
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(s.toString(), "OK");
 
-  EXPECT_EQ(c.getParser("options")->getData().get_child("options").get<bool>(
-                "enable_monitor"),
-            true);
+  const auto& parser = c.getParser("options")->getData();
+  ASSERT_TRUE(parser.doc().HasMember("options"));
+  EXPECT_TRUE(JSON::valueToBool(parser.doc()["options"]["enable_monitor"]));
+
   c.reset();
+}
+
+TEST_F(OptionsConfigParserPluginTests, test_unknown_option) {
+  Config c;
+  std::map<std::string, std::string> update;
+
+  update["awesome"] =
+      "{\"options\": {\"fake\": 1, \"custom_fake\": 1, \"fake_custom_fake\": "
+      "1}}";
+  auto s = c.update(update);
+
+  // This looks funky, because the parser is named 'options' and it claims
+  // ownership of a single top-level-key called 'options'.
+  const auto& doc = c.getParser("options")->getData().doc()["options"];
+
+  // Since 'fake' was not defined as a flag, it is not an option.
+  EXPECT_TRUE(doc.HasMember("fake"));
+  EXPECT_TRUE(Flag::getValue("fake").empty());
+
+  // The word 'custom_' must be a prefix.
+  EXPECT_TRUE(doc.HasMember("fake_custom_fake"));
+  EXPECT_TRUE(Flag::getValue("fake_custom_fake").empty());
+
+  // This should work.
+  ASSERT_TRUE(doc.HasMember("custom_fake"));
+  EXPECT_TRUE(doc["custom_fake"].IsNumber());
+  EXPECT_EQ(1U, doc["custom_fake"].GetUint());
+  EXPECT_FALSE(Flag::getValue("custom_fake").empty());
 }
 }

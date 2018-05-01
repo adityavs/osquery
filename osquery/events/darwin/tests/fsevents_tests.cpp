@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <boost/filesystem/operations.hpp>
@@ -18,8 +18,8 @@
 #include <osquery/flags.h>
 #include <osquery/tables.h>
 
-#include "osquery/tests/test_util.h"
 #include "osquery/events/darwin/fsevents.h"
+#include "osquery/tests/test_util.h"
 
 namespace fs = boost::filesystem;
 
@@ -33,7 +33,7 @@ class FSEventsTests : public testing::Test {
  protected:
   void SetUp() override {
     // FSEvents will use data from the config and config parsers.
-    Registry::registry("config_parser")->setUp();
+    Registry::get().registry("config_parser")->setUp();
 
     FLAGS_verbose = true;
     real_test_path = kTestWorkingDirectory + "fsevents-triggers" +
@@ -44,8 +44,7 @@ class FSEventsTests : public testing::Test {
   }
 
   void TearDown() override {
-    remove(real_test_path);
-    fs::remove_all(real_test_dir);
+    removePath(real_test_dir);
   }
 
   void StartEventLoop() {
@@ -166,6 +165,40 @@ TEST_F(FSEventsTests, test_fsevents_add_subscription_success) {
   // But the paths with be deduped when the event type reconfigures.
   num_paths = event_pub->numSubscriptionedPaths();
   EXPECT_EQ(num_paths, 1U);
+  EventFactory::deregisterEventPublisher("fsevents");
+}
+
+TEST_F(FSEventsTests, test_fsevents_match_subscription) {
+  auto event_pub = std::make_shared<FSEventsEventPublisher>();
+  EventFactory::registerEventPublisher(event_pub);
+
+  auto sc = event_pub->createSubscriptionContext();
+  sc->path = "/etc/%%";
+  replaceGlobWildcards(sc->path);
+  auto subscription = Subscription::create("TestSubscriber", sc);
+  auto status = EventFactory::addSubscription("fsevents", subscription);
+  EXPECT_TRUE(status.ok());
+  event_pub->configure();
+
+  std::vector<std::string> exclude_paths = {
+      "/etc/ssh/%%", "/etc/", "/etc/ssl/openssl.cnf", "/"};
+  for (const auto& path : exclude_paths) {
+    event_pub->exclude_paths_.insert(path);
+  }
+
+  {
+    auto ec = event_pub->createEventContext();
+    ec->path = "/private/etc/ssh/ssh_config";
+    EXPECT_FALSE(event_pub->shouldFire(sc, ec));
+    ec->path = "/private/etc/passwd";
+    EXPECT_FALSE(event_pub->shouldFire(sc, ec));
+    ec->path = "/private/etc/group";
+    EXPECT_FALSE(event_pub->shouldFire(sc, ec));
+    ec->path = "/private/etc/ssl/openssl.cnf";
+    EXPECT_FALSE(event_pub->shouldFire(sc, ec));
+    ec->path = "/private/etc/ssl/certs/";
+    EXPECT_TRUE(event_pub->shouldFire(sc, ec));
+  }
   EventFactory::deregisterEventPublisher("fsevents");
 }
 

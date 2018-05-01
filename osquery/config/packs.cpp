@@ -1,18 +1,18 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <algorithm>
 #include <random>
 
 #include <osquery/core.h>
-#include <osquery/hash.h>
+#include <osquery/database.h>
 #include <osquery/logger.h>
 #include <osquery/packs.h>
 #include <osquery/sql.h>
@@ -21,7 +21,7 @@
 #include "osquery/core/conversions.h"
 #include "osquery/core/json.h"
 
-namespace pt = boost::property_tree;
+namespace rj = rapidjson;
 
 namespace osquery {
 
@@ -71,7 +71,8 @@ size_t getMachineShard(const std::string& hostname = "", bool force = false) {
 
   // An optional input hostname may override hostname detection for testing.
   auto hn = (hostname.empty()) ? getHostname() : hostname;
-  auto hn_hash = hashFromBuffer(HASH_TYPE_MD5, hn.c_str(), hn.size());
+  auto hn_hash = getBufferSHA1(hn.c_str(), hn.size());
+
   if (hn_hash.size() >= 2) {
     long hn_char;
     if (safeStrtol(hn_hash.substr(0, 2), 16, hn_char)) {
@@ -109,24 +110,24 @@ size_t restoreSplayedValue(const std::string& name, size_t interval) {
 
 void Pack::initialize(const std::string& name,
                       const std::string& source,
-                      const pt::ptree& tree) {
+                      const rj::Value& obj) {
   name_ = name;
   source_ = source;
   // Check the shard limitation, shards falling below this value are included.
-  if (tree.count("shard") > 0) {
-    shard_ = tree.get<size_t>("shard", 0);
+  if (obj.HasMember("shard")) {
+    shard_ = JSON::valueToSize(obj["shard"]);
   }
 
   // Check for a platform restriction.
   platform_.clear();
-  if (tree.count("platform") > 0) {
-    platform_ = tree.get<std::string>("platform", "");
+  if (obj.HasMember("platform") && obj["platform"].IsString()) {
+    platform_ = obj["platform"].GetString();
   }
 
   // Check for a version restriction.
   version_.clear();
-  if (tree.count("version") > 0) {
-    version_ = tree.get<std::string>("version", "");
+  if (obj.HasMember("version") && obj["version"].IsString()) {
+    version_ = obj["version"].GetString();
   }
 
   // Apply the shard, platform, and version checking.
@@ -138,9 +139,9 @@ void Pack::initialize(const std::string& name,
   }
 
   discovery_queries_.clear();
-  if (tree.count("discovery") > 0) {
-    for (const auto& item : tree.get_child("discovery")) {
-      discovery_queries_.push_back(item.second.get_value<std::string>());
+  if (obj.HasMember("discovery") && obj["discovery"].IsArray()) {
+    for (const auto& item : obj["discovery"].GetArray()) {
+      discovery_queries_.push_back(item.GetString());
     }
   }
 
@@ -154,51 +155,85 @@ void Pack::initialize(const std::string& name,
   }
 
   schedule_.clear();
-  if (tree.count("queries") == 0) {
+  if (!obj.HasMember("queries") || !obj["queries"].IsObject()) {
     // This pack contained no queries.
+    VLOG(1) << "No queries defined for pack " << name;
     return;
   }
 
   // Iterate the queries (or schedule) and check platform/version/sanity.
-  for (const auto& q : tree.get_child("queries")) {
-    if (q.second.count("shard") > 0) {
-      auto shard = q.second.get<size_t>("shard", 0);
+  for (const auto& q : obj["queries"].GetObject()) {
+    if (!q.value.IsObject()) {
+      VLOG(1) << "The pack " << name << " must contain a dictionary of queries";
+      continue;
+    }
+
+    if (q.value.HasMember("shard")) {
+      auto shard = JSON::valueToSize(q.value["shard"]);
       if (shard > 0 && shard < getMachineShard()) {
         continue;
       }
     }
 
-    if (q.second.count("platform")) {
-      if (!checkPlatform(q.second.get<std::string>("platform", ""))) {
+    if (q.value.HasMember("platform") && q.value["platform"].IsString()) {
+      if (!checkPlatform(q.value["platform"].GetString())) {
         continue;
       }
     }
 
-    if (q.second.count("version")) {
-      if (!checkVersion(q.second.get<std::string>("version", ""))) {
+    if (q.value.HasMember("version") && q.value["version"].IsString()) {
+      if (!checkVersion(q.value["version"].GetString())) {
         continue;
       }
     }
 
-    ScheduledQuery query;
-    query.query = q.second.get<std::string>("query", "");
-    query.interval = q.second.get("interval", FLAGS_schedule_default_interval);
-    if (query.interval <= 0 || query.query.empty() ||
-        query.interval > kMaxQueryInterval) {
-      // Invalid pack query.
-      LOG(WARNING) << "Query has invalid interval: " << q.first << ": "
-                   << query.interval;
+    if (!q.value.HasMember("query") || !q.value["query"].IsString()) {
+      VLOG(1) << "No query string defined for query " << q.name.GetString();
       continue;
     }
 
-    query.splayed_interval = restoreSplayedValue(q.first, query.interval);
-    query.options["snapshot"] = q.second.get<bool>("snapshot", false);
-    query.options["removed"] = q.second.get<bool>("removed", true);
-    schedule_[q.first] = query;
+    ScheduledQuery query;
+    query.query = q.value["query"].GetString();
+    if (!q.value.HasMember("interval")) {
+      query.interval = FLAGS_schedule_default_interval;
+    } else {
+      query.interval = JSON::valueToSize(q.value["interval"]);
+    }
+    if (query.interval <= 0 || query.query.empty() ||
+        query.interval > kMaxQueryInterval) {
+      // Invalid pack query.
+      LOG(WARNING) << "Query has invalid interval: " << q.name.GetString()
+                   << ": " << query.interval;
+      continue;
+    }
+
+    query.splayed_interval =
+        restoreSplayedValue(q.name.GetString(), query.interval);
+
+    if (!q.value.HasMember("snapshot")) {
+      query.options["snapshot"] = false;
+    } else {
+      query.options["snapshot"] = JSON::valueToBool(q.value["snapshot"]);
+    }
+
+    if (!q.value.HasMember("removed")) {
+      query.options["removed"] = true;
+    } else {
+      query.options["removed"] = JSON::valueToBool(q.value["removed"]);
+    }
+    query.options["blacklist"] = (q.value.HasMember("blacklist"))
+                                     ? q.value["blacklist"].GetBool()
+                                     : true;
+
+    schedule_.emplace(std::make_pair(q.name.GetString(), std::move(query)));
   }
 }
 
 const std::map<std::string, ScheduledQuery>& Pack::getSchedule() const {
+  return schedule_;
+}
+
+std::map<std::string, ScheduledQuery>& Pack::getSchedule() {
   return schedule_;
 }
 
@@ -244,16 +279,23 @@ bool Pack::checkPlatform(const std::string& platform) const {
     return true;
   }
 
-#ifdef __linux__
-  if (platform.find("linux") != std::string::npos) {
-    return true;
-  }
-#endif
-
   if (platform.find("any") != std::string::npos ||
       platform.find("all") != std::string::npos) {
     return true;
   }
+
+  auto linux_type = (platform.find("linux") != std::string::npos ||
+                     platform.find("ubuntu") != std::string::npos ||
+                     platform.find("centos") != std::string::npos);
+  if (linux_type && isPlatform(PlatformType::TYPE_LINUX)) {
+    return true;
+  }
+
+  auto posix_type = (platform.find("posix") != std::string::npos);
+  if (posix_type && isPlatform(PlatformType::TYPE_POSIX)) {
+    return true;
+  }
+
   return (platform.find(kSDKPlatform) != std::string::npos);
 }
 
@@ -281,14 +323,14 @@ bool Pack::checkDiscovery() {
   discovery_cache_.first = current;
   discovery_cache_.second = true;
   for (const auto& q : discovery_queries_) {
-    auto sql = SQL(q);
-    if (!sql.ok()) {
+    SQL results(q);
+    if (!results.ok()) {
       LOG(WARNING) << "Discovery query failed (" << q
-                   << "): " << sql.getMessageString();
+                   << "): " << results.getMessageString();
       discovery_cache_.second = false;
       break;
     }
-    if (sql.rows().size() == 0) {
+    if (results.rows().size() == 0) {
       discovery_cache_.second = false;
       break;
     }

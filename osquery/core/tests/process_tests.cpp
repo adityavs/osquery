@@ -1,19 +1,23 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
+
+#ifndef WIN32
+#include <sys/wait.h>
+#endif
 
 #include <gtest/gtest.h>
 
 #include <osquery/core.h>
 
 #include "osquery/core/process.h"
-#include "osquery/core/testing.h"
+#include "osquery/tests/test_util.h"
 
 namespace osquery {
 
@@ -89,8 +93,7 @@ TEST_F(ProcessTests, test_constructorPosix) {
 TEST_F(ProcessTests, test_getpid) {
   int pid = -1;
 
-  std::shared_ptr<PlatformProcess> process =
-      PlatformProcess::getCurrentProcess();
+  auto process = PlatformProcess::getCurrentProcess();
   EXPECT_NE(nullptr, process.get());
 
 #ifdef WIN32
@@ -123,13 +126,12 @@ TEST_F(ProcessTests, test_envVar) {
 
 TEST_F(ProcessTests, test_launchExtension) {
   {
-    std::shared_ptr<osquery::PlatformProcess> process =
-        osquery::PlatformProcess::launchExtension(kProcessTestExecPath.c_str(),
-                                                  "extension-test",
-                                                  kExpectedExtensionArgs[2],
-                                                  kExpectedExtensionArgs[4],
-                                                  kExpectedExtensionArgs[6],
-                                                  "true");
+    auto process =
+        PlatformProcess::launchExtension(kProcessTestExecPath.c_str(),
+                                         kExpectedExtensionArgs[3],
+                                         kExpectedExtensionArgs[5],
+                                         kExpectedExtensionArgs[7],
+                                         true);
     EXPECT_NE(nullptr, process.get());
 
     int code = 0;
@@ -150,11 +152,10 @@ TEST_F(ProcessTests, test_launchWorker) {
     }
     argv.push_back(nullptr);
 
-    std::shared_ptr<osquery::PlatformProcess> process =
-        osquery::PlatformProcess::launchWorker(
-            kProcessTestExecPath.c_str(),
-            static_cast<int>(kExpectedWorkerArgsCount),
-            &argv[0]);
+    auto process = PlatformProcess::launchWorker(
+        kProcessTestExecPath.c_str(),
+        static_cast<int>(kExpectedWorkerArgsCount),
+        &argv[0]);
     for (size_t i = 0; i < argv.size(); i++) {
       delete[] argv[i];
     }
@@ -166,23 +167,4 @@ TEST_F(ProcessTests, test_launchWorker) {
     EXPECT_EQ(code, WORKER_SUCCESS_CODE);
   }
 }
-
-#ifdef WIN32
-TEST_F(ProcessTests, test_launchExtensionQuotes) {
-  {
-    std::shared_ptr<osquery::PlatformProcess> process =
-        osquery::PlatformProcess::launchExtension(kProcessTestExecPath.c_str(),
-                                                  "exten\"sion-te\"st",
-                                                  "socket-name",
-                                                  "100",
-                                                  "5",
-                                                  "true");
-    EXPECT_NE(nullptr, process.get());
-
-    int code = 0;
-    EXPECT_TRUE(getProcessExitCode(*process, code));
-    EXPECT_EQ(code, EXTENSION_SUCCESS_CODE);
-  }
-}
-#endif
 }

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/config.h>
@@ -21,14 +21,13 @@ namespace osquery {
  */
 class FilePathsConfigParserPlugin : public ConfigParserPlugin {
  public:
-  FilePathsConfigParserPlugin();
-  virtual ~FilePathsConfigParserPlugin() {}
+  virtual ~FilePathsConfigParserPlugin() = default;
 
   std::vector<std::string> keys() const override {
-    return {"file_paths", "file_accesses"};
+    return {"file_paths", "file_accesses", "exclude_paths"};
   }
 
-  Status setUp() override { return Status(0); };
+  Status setUp() override;
 
   Status update(const std::string& source, const ParserConfig& config) override;
 
@@ -37,48 +36,96 @@ class FilePathsConfigParserPlugin : public ConfigParserPlugin {
   std::map<std::string, std::vector<std::string> > access_map_;
 };
 
-FilePathsConfigParserPlugin::FilePathsConfigParserPlugin() {
-  data_.put_child("file_paths", pt::ptree());
-  data_.put_child("file_accesses", pt::ptree());
+Status FilePathsConfigParserPlugin::setUp() {
+  auto paths_obj = data_.getObject();
+  data_.add("file_paths", paths_obj);
+  auto accesses_arr = data_.getArray();
+  data_.add("file_accesses", accesses_arr);
+  auto exclude_obj = data_.getObject();
+  data_.add("exclude_paths", exclude_obj);
+  return Status();
 }
 
 Status FilePathsConfigParserPlugin::update(const std::string& source,
                                            const ParserConfig& config) {
-  if (config.count("file_paths") > 0) {
-    data_.put_child("file_paths", config.at("file_paths"));
+  Config::get().removeFiles(source);
+  access_map_.erase(source);
+  if (config.count("file_paths") == 0) {
+    return Status();
   }
 
-  auto& accesses = data_.get_child("file_accesses");
   if (config.count("file_accesses") > 0) {
-    if (access_map_.count(source) > 0) {
-      access_map_.erase(source);
+    const auto& accesses = config.at("file_accesses").doc();
+    if (accesses.IsArray()) {
+      for (const auto& category : accesses.GetArray()) {
+        if (!category.IsString()) {
+          continue;
+        }
+        std::string path = category.GetString();
+        access_map_[source].push_back(path);
+      }
     }
 
-    for (const auto& category : config.at("file_accesses")) {
-      auto path = category.second.get_value<std::string>("");
-      access_map_[source].push_back(path);
-    }
-    // Regenerate the access:
+    auto arr = data_.getArray();
+    std::set<std::string> valid_categories;
     for (const auto& access_source : access_map_) {
       for (const auto& category : access_source.second) {
-        accesses.put(category, access_source.first);
+        valid_categories.insert(category);
+      }
+    }
+
+    for (const auto& category : valid_categories) {
+      data_.pushCopy(category, arr);
+    }
+    data_.add("file_accesses", arr);
+  }
+
+  // We know this top-level is an Object.
+  const auto& file_paths = config.at("file_paths").doc();
+  if (file_paths.IsObject()) {
+    for (const auto& category : file_paths.GetObject()) {
+      if (category.value.IsArray()) {
+        for (const auto& path : category.value.GetArray()) {
+          std::string pattern = path.GetString();
+          if (pattern.empty()) {
+            continue;
+          }
+
+          std::string name = category.name.GetString();
+          replaceGlobWildcards(pattern);
+          Config::get().addFile(source, name, pattern);
+        }
       }
     }
   }
 
-  Config::getInstance().removeFiles(source);
-  for (const auto& category : data_.get_child("file_paths")) {
-    for (const auto& path : category.second) {
-      auto pattern = path.second.get_value<std::string>("");
-      if (pattern.empty()) {
-        continue;
+  // We know this top-level is an Object.
+  if (config.count("exclude_paths") > 0) {
+    auto obj = data_.getObject();
+    const auto& exclude_paths = config.at("exclude_paths").doc();
+    if (exclude_paths.IsObject()) {
+      for (const auto& category : exclude_paths.GetObject()) {
+        auto arr = data_.getArray();
+        if (category.value.IsArray()) {
+          for (const auto& path : category.value.GetArray()) {
+            std::string path_string = path.GetString();
+            data_.pushCopy(path_string, arr);
+          }
+
+          std::string category_string = category.name.GetString();
+          data_.add(category_string, arr, obj);
+        }
       }
-      replaceGlobWildcards(pattern);
-      Config::getInstance().addFile(source, category.first, pattern);
+    }
+
+    if (!data_.doc().HasMember("exclude_paths")) {
+      data_.add("exclude_paths", obj);
+    } else {
+      data_.mergeObject(data_.doc()["exclude_paths"], obj);
     }
   }
 
-  return Status(0, "OK");
+  return Status();
 }
 
 REGISTER_INTERNAL(FilePathsConfigParserPlugin, "config_parser", "file_paths");

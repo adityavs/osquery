@@ -3,9 +3,10 @@
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant
-#  of patent rights can be found in the PATENTS file in the same directory.
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -37,8 +38,6 @@ RESERVED = ["n", "index"]
 PLATFORM = platform()
 
 # Supported SQL types for spec
-
-
 class DataType(object):
     def __init__(self, affinity, cpp_type="std::string"):
         '''A column datatype is a pair of a SQL affinity to C++ type.'''
@@ -72,6 +71,7 @@ COLUMN_OPTIONS = {
     "additional": "ADDITIONAL",
     "required": "REQUIRED",
     "optimized": "OPTIMIZED",
+    "hidden": "HIDDEN",
 }
 
 # Column options that render tables uncacheable.
@@ -88,6 +88,26 @@ TABLE_ATTRIBUTES = {
     "utility": "UTILITY",
     "kernel_required": "KERNEL_REQUIRED",
 }
+
+
+def WINDOWS():
+    return PLATFORM in ['windows', 'win32', 'cygwin']
+
+
+def LINUX():
+    return PLATFORM in ['linux']
+
+
+def POSIX():
+    return PLATFORM in ['linux', 'darwin', 'freebsd']
+
+
+def DARWIN():
+    return PLATFORM in ['darwin']
+
+
+def FREEBSD():
+    return PLATFORM in ['freebsd']
 
 
 def to_camel_case(snake_case):
@@ -183,6 +203,7 @@ class TableState(Singleton):
         self.fuzz_paths = []
         self.has_options = False
         self.has_column_aliases = False
+        self.generator = False
 
     def columns(self):
         return [i for i in self.schema if isinstance(i, Column)]
@@ -203,14 +224,21 @@ class TableState(Singleton):
                 if option in COLUMN_OPTIONS:
                     column_options.append("ColumnOptions::" + COLUMN_OPTIONS[option])
                     all_options.append(COLUMN_OPTIONS[option])
+                else:
+                    print(yellow(
+                        "Table %s column %s contains an unknown option: %s" % (
+                            self.table_name, column.name, option)))
             column.options_set = " | ".join(column_options)
             if len(column.aliases) > 0:
                 self.has_column_aliases = True
         if len(all_options) > 0:
             self.has_options = True
+        if "event_subscriber" in self.attributes:
+            self.generator = True
         if "cacheable" in self.attributes:
-            if len(set(all_options).intersection(NON_CACHEABLE)) > 0:
-                print(lightred("Table cannot be marked cacheable: %s" % (path)))
+            if self.generator:
+                print(lightred(
+                    "Table cannot use a generator and be marked cacheable: %s" % (path)))
                 exit(1)
         if self.table_name == "" or self.function == "":
             print(lightred("Invalid table spec: %s" % (path)))
@@ -222,6 +250,13 @@ class TableState(Singleton):
                 print(lightred(("Cannot use column name: %s in table: %s "
                                 "(the column name is reserved)" % (
                                     column.name, self.table_name))))
+                exit(1)
+
+        if "ADDITIONAL" in all_options and "INDEX" not in all_options:
+            if "no_pkey" not in self.attributes:
+                print(lightred(
+                    "Table cannot have 'additional' columns without an index: %s" %(
+                    path)))
                 exit(1)
 
         path_bits = path.split("/")
@@ -249,7 +284,8 @@ class TableState(Singleton):
             aliases=self.aliases,
             has_options=self.has_options,
             has_column_aliases=self.has_column_aliases,
-            attribute_set=[TABLE_ATTRIBUTES[attr] for attr in self.attributes],
+            generator=self.generator,
+            attribute_set=[TABLE_ATTRIBUTES[attr] for attr in self.attributes if attr in TABLE_ATTRIBUTES],
         )
 
         with open(path, "w+") as file_h:
@@ -316,7 +352,23 @@ def schema(schema_list):
     table.schema = schema_list
 
 
+def extended_schema(check, schema_list):
+    """
+    define a comparator and a list of Columns objects.
+    """
+    logging.debug("- extended schema")
+    for it in schema_list:
+        if isinstance(it, Column):
+            logging.debug("  - column: %s (%s)" % (it.name, it.type))
+            if not check():
+                it.options['hidden'] = True
+            table.schema.append(it)
+
+
 def description(text):
+    if text[-1:] != '.':
+        print(lightred("Table description must end with a period!"))
+        exit(1)
     table.description = text
 
 
@@ -339,7 +391,7 @@ def fuzz_paths(paths):
     table.fuzz_paths = paths
 
 
-def implementation(impl_string):
+def implementation(impl_string, generator=False):
     """
     define the path to the implementation file and the function which
     implements the virtual table. You should use the following format:
@@ -360,9 +412,13 @@ def implementation(impl_string):
     table.impl = impl
     table.function = function
     table.class_name = class_name
+    table.generator = generator
 
     '''Check if the table has a subscriber attribute, if so, enforce time.'''
     if "event_subscriber" in table.attributes:
+        if not table.table_name.endswith("_events"):
+            print(lightred("Event subscriber must use a '_events' suffix"))
+            sys.exit(1)
         columns = {}
         # There is no dictionary comprehension on all supported platforms.
         for column in table.schema:

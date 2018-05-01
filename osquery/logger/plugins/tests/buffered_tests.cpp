@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <chrono>
@@ -39,9 +39,9 @@ MATCHER_P(MatchesStatus, expected, "") {
     pt::read_json(json_in, actual);
     return expected.severity == actual.get<int>("severity") &&
            expected.filename == actual.get<std::string>("filename") &&
-           expected.line == actual.get<int>("line") &&
+           expected.line == actual.get<size_t>("line") &&
            expected.message == actual.get<std::string>("message");
-  } catch (const std::exception& e) {
+  } catch (const std::exception& /* e */) {
     return false;
   }
 }
@@ -65,8 +65,13 @@ class BufferedLogForwarderTests : public Test {
 
 class MockBufferedLogForwarder : public BufferedLogForwarder {
  public:
-  using BufferedLogForwarder::BufferedLogForwarder;
-  MockBufferedLogForwarder() : BufferedLogForwarder("mock") {}
+  MockBufferedLogForwarder(
+      const std::string& name = "mock",
+      const std::chrono::duration<long, std::ratio<1, 1000>> log_period =
+          kLogPeriod,
+      size_t max_log_lines = kMaxLogLines)
+      : BufferedLogForwarder(
+            "MockBufferedLogForwarder", name, log_period, max_log_lines) {}
 
   MOCK_METHOD2(send,
                Status(std::vector<std::string>& log_data,
@@ -83,10 +88,12 @@ class MockBufferedLogForwarder : public BufferedLogForwarder {
 
 TEST_F(BufferedLogForwarderTests, test_index) {
   MockBufferedLogForwarder runner;
-  EXPECT_THAT(runner.genResultIndex(), ContainsRegex("mock_r_[0-9]+_1"));
-  EXPECT_THAT(runner.genStatusIndex(), ContainsRegex("mock_s_[0-9]+_2"));
-  EXPECT_THAT(runner.genResultIndex(), ContainsRegex("mock_r_[0-9]+_3"));
-  EXPECT_THAT(runner.genStatusIndex(), ContainsRegex("mock_s_[0-9]+_4"));
+  if (!isPlatform(PlatformType::TYPE_WINDOWS)) {
+    EXPECT_THAT(runner.genResultIndex(), ContainsRegex("mock_r_[0-9]+_1"));
+    EXPECT_THAT(runner.genStatusIndex(), ContainsRegex("mock_s_[0-9]+_2"));
+    EXPECT_THAT(runner.genResultIndex(), ContainsRegex("mock_r_[0-9]+_3"));
+    EXPECT_THAT(runner.genStatusIndex(), ContainsRegex("mock_s_[0-9]+_4"));
+  }
 
   EXPECT_TRUE(runner.isResultIndex(runner.genResultIndex()));
   EXPECT_FALSE(runner.isResultIndex(runner.genStatusIndex()));

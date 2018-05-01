@@ -3,9 +3,10 @@
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant
-#  of patent rights can be found in the PATENTS file in the same directory.
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -55,7 +56,7 @@ class AdditionalFeatureTests(test_base.ProcessGenerator, unittest.TestCase):
 
         # Introspect into the daemon's query packs.
         client = test_base.EXClient(daemon.options["extensions_socket"])
-        test_base.expectTrue(client.open)
+        test_base.expectTrue(client.try_open)
         self.assertTrue(client.open())
         em = client.getEM()
 

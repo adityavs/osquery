@@ -1,20 +1,22 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
 
 #include <csignal>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
+
+#include <boost/thread/recursive_mutex.hpp>
+#include <boost/thread/shared_mutex.hpp>
 
 #include <osquery/status.h>
 
@@ -90,17 +92,30 @@
 #define OSQUERY_HOME "/etc/osquery"
 #define OSQUERY_DB_HOME "/var/osquery"
 #define OSQUERY_SOCKET OSQUERY_DB_HOME "/"
+#define OSQUERY_PIDFILE "/var/run/"
 #define OSQUERY_LOG_HOME "/var/log/osquery/"
+#define OSQUERY_CERTS_HOME "/usr/share/osquery/certs/"
 #elif defined(WIN32)
 #define OSQUERY_HOME "\\ProgramData\\osquery"
 #define OSQUERY_DB_HOME OSQUERY_HOME
 #define OSQUERY_SOCKET "\\\\.\\pipe\\"
-#define OSQUERY_LOG_HOME "\\ProgramData\\osquery\\log\\"
+#define OSQUERY_PIDFILE OSQUERY_DB_HOME "\\"
+#define OSQUERY_LOG_HOME OSQUERY_HOME "\\log\\"
+#define OSQUERY_CERTS_HOME OSQUERY_HOME "\\certs\\"
+#elif defined(FREEBSD)
+#define OSQUERY_HOME "/var/db/osquery"
+#define OSQUERY_DB_HOME OSQUERY_HOME
+#define OSQUERY_SOCKET "/var/run/"
+#define OSQUERY_PIDFILE "/var/run/"
+#define OSQUERY_LOG_HOME "/var/log/osquery/"
+#define OSQUERY_CERTS_HOME "/etc/ssl/"
 #else
 #define OSQUERY_HOME "/var/osquery"
 #define OSQUERY_DB_HOME OSQUERY_HOME
 #define OSQUERY_SOCKET OSQUERY_DB_HOME "/"
+#define OSQUERY_PIDFILE OSQUERY_DB_HOME "/"
 #define OSQUERY_LOG_HOME "/var/log/osquery/"
+#define OSQUERY_CERTS_HOME OSQUERY_HOME "/certs/"
 #endif
 
 /// A configuration error is catastrophic and should exit the watcher.
@@ -120,6 +135,7 @@ enum class ToolType {
   DAEMON,
   TEST,
   EXTENSION,
+  SHELL_DAEMON,
 };
 
 /**
@@ -175,14 +191,48 @@ inline bool isPlatform(PlatformType a, const PlatformType& t = kPlatformType) {
 }
 
 /// Helper alias for defining mutexes.
-using Mutex = std::mutex;
+using Mutex = boost::shared_timed_mutex;
 
 /// Helper alias for write locking a mutex.
-using WriteLock = std::lock_guard<Mutex>;
+using WriteLock = boost::unique_lock<Mutex>;
+
+/// Helper alias for read locking a mutex.
+using ReadLock = boost::shared_lock<Mutex>;
 
 /// Helper alias for defining recursive mutexes.
-using RecursiveMutex = std::recursive_mutex;
+using RecursiveMutex = boost::recursive_mutex;
 
 /// Helper alias for write locking a recursive mutex.
-using RecursiveLock = std::lock_guard<std::recursive_mutex>;
-}
+using RecursiveLock = boost::unique_lock<boost::recursive_mutex>;
+
+/**
+ * @brief An abstract similar to boost's noncopyable that defines moves.
+ *
+ * By defining protected move constructors we allow the children to assign
+ * their's as default.
+ */
+class only_movable {
+ protected:
+  /// Boilerplate self default constructor.
+  only_movable() = default;
+
+  /// Boilerplate self destructor.
+  ~only_movable() = default;
+
+  /// Boilerplate move constructor.
+  only_movable(only_movable&&) noexcept = default;
+
+  /// Boilerplate move assignment.
+  only_movable& operator=(only_movable&&) = default;
+
+ public:
+  /// Important, a private copy constructor prevents copying.
+  only_movable(const only_movable&) = delete;
+
+  /// Important, a private copy assignment constructor prevents copying.
+  only_movable& operator=(const only_movable&) = delete;
+};
+
+/// Custom literal for size_t.
+size_t operator"" _sz(unsigned long long int x);
+} // namespace osquery

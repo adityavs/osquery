@@ -1,156 +1,195 @@
+#  Copyright (c) 2014-present, Facebook, Inc.
+#  All rights reserved.
+#
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
+
+# List of table categories
+set(TABLE_CATEGORIES
+  "applications"
+  "events"
+  "networking"
+  "system"
+)
+
+if(NOT SKIP_CARVER)
+  list(APPEND TABLE_CATEGORIES "forensic")
+endif()
+
+# Apple/Darwin specific and applicable tables.
 if(APPLE)
-  file(GLOB OSQUERY_OBJC_TABLES "*/darwin/*.mm")
-  ADD_OSQUERY_OBJCXX_LIBRARY_ADDITIONAL(osquery_tables_objc
-    ${OSQUERY_OBJC_TABLES}
-  )
-
-  file(GLOB OSQUERY_DARWIN_TABLES "*/darwin/*.cpp")
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_darwin
-    ${OSQUERY_DARWIN_TABLES}
-  )
-
-  file(GLOB OSQUERY_DARWIN_TABLES_TESTS "*/darwin/tests/*.cpp" "*/darwin/tests/*.mm")
-  ADD_OSQUERY_TABLE_TEST(${OSQUERY_DARWIN_TABLES_TESTS})
+  set(TABLE_PLATFORM "darwin")
 
   ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreFoundation")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreWLAN")
+  ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreGraphics")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework Security")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework OpenDirectory")
   ADD_OSQUERY_LINK_ADDITIONAL("-framework DiskArbitration")
+  ADD_OSQUERY_LINK_ADDITIONAL("-framework ServiceManagement")
 
   ADD_OSQUERY_LINK_ADDITIONAL("libresolv.dylib")
   ADD_OSQUERY_LINK_ADDITIONAL("libxar.dylib")
-  ADD_OSQUERY_LINK_ADDITIONAL("magic")
-  ADD_OSQUERY_LINK_ADDITIONAL("tsk")
-elseif(FREEBSD)
-  file(GLOB OSQUERY_FREEBSD_TABLES "*/freebsd/*.cpp")
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_freebsd
-    ${OSQUERY_FREEBSD_TABLES}
-  )
+  ADD_OSQUERY_LINK_ADDITIONAL("libcups")
+  ADD_OSQUERY_LINK_ADDITIONAL("libiconv")
+  ADD_OSQUERY_LINK_ADDITIONAL("libbsm")
+endif()
 
-  file(GLOB OSQUERY_FREEBSD_TABLES_TESTS "*/freebsd/tests/*.cpp")
-  ADD_OSQUERY_TABLE_TEST(${OSQUERY_FREEBSD_TABLES_TESTS})
+# FreeBSD specific and applicable tables.
+if(FREEBSD)
+  set(TABLE_PLATFORM "freebsd")
+
+  include_directories("/usr/local/include/libxml2")
 
   ADD_OSQUERY_LINK_ADDITIONAL("procstat")
   ADD_OSQUERY_LINK_ADDITIONAL("util")
   ADD_OSQUERY_LINK_ADDITIONAL("kvm")
   ADD_OSQUERY_LINK_ADDITIONAL("elf")
-  ADD_OSQUERY_LINK_ADDITIONAL("magic")
-elseif(WINDOWS)
-  # Windows specific tables
-  file(GLOB OSQUERY_WINDOWS_TABLES "*/windows/*.cpp")
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_windows
-    ${OSQUERY_WINDOWS_TABLES}
-  )
+endif()
 
-  file(GLOB OSQUERY_WINDOWS_TABLES_TESTS "*/windows/tests/*.cpp")
-  ADD_OSQUERY_TABLE_TEST(${OSQUERY_WINDOWS_TABLES_TESTS})
-else()
-  file(GLOB OSQUERY_LINUX_TABLES "*/linux/*.cpp")
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_linux
-    ${OSQUERY_LINUX_TABLES}
-  )
+# Windows specific and applicable tables.
+if(WINDOWS)
+  set(TABLE_PLATFORM "windows")
 
-  file(GLOB OSQUERY_LINUX_TABLES_TESTS "*/linux/tests/*.cpp")
-  ADD_OSQUERY_TABLE_TEST(${OSQUERY_LINUX_TABLES_TESTS})
+  # Additional Windows libraries
+  ADD_OSQUERY_LINK_ADDITIONAL("crypt32.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("Wintrust.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("Advapi32.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("Iphlpapi.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("SetupAPI.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("Ws2_32.lib")
+  ADD_OSQUERY_LINK_ADDITIONAL("version.lib")
+endif()
 
-  if(REDHAT_BASED)
-    # CentOS specific tables
-    # file(GLOB OSQUERY_REDHAT_TABLES "*/centos/*.cpp")
-    # ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_redhat
-    #   ${OSQUERY_REDHAT_TABLES}
-    # )
-
-  elseif(DEBIAN_BASED)
-    # Ubuntu specific tables
-    # file(GLOB OSQUERY_UBUNTU_TABLES "*/ubuntu/*.cpp")
-    # ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_ubuntu
-    #   ${OSQUERY_UBUNTU_TABLES}
-    # )
-
-  endif()
+# Linux specific and applicable tables.
+if(LINUX)
+  set(TABLE_PLATFORM "linux")
 
   ADD_OSQUERY_LINK_ADDITIONAL("libresolv.so")
-  ADD_OSQUERY_LINK_ADDITIONAL("cryptsetup devmapper")
+  ADD_OSQUERY_LINK_ADDITIONAL("cryptsetup devmapper lvm2app lvm-internal daemonclient")
   ADD_OSQUERY_LINK_ADDITIONAL("gcrypt gpg-error")
   ADD_OSQUERY_LINK_ADDITIONAL("blkid")
   ADD_OSQUERY_LINK_ADDITIONAL("ip4tc")
-  ADD_OSQUERY_LINK_ADDITIONAL("magic")
-  ADD_OSQUERY_LINK_ADDITIONAL("tsk")
 
-  ADD_OSQUERY_LINK_ADDITIONAL("apt-pkg dpkg lzma lz4 bz2")
-  ADD_OSQUERY_LINK_ADDITIONAL("rpm rpmio beecrypt popt db")
+  ADD_OSQUERY_LINK_ADDITIONAL("dpkg lzma bz2")
+  ADD_OSQUERY_LINK_ADDITIONAL("rpm rpmio popt db")
 endif()
 
-if(APPLE OR LINUX)
-  file(GLOB OSQUERY_CROSS_EVENTS_TABLES "events/*.cpp")
-
+if(POSIX)
   ADD_OSQUERY_LINK_ADDITIONAL("augeas fa xml2")
-  if(APPLE)
-    ADD_OSQUERY_LINK_ADDITIONAL("libiconv")
-  endif()
-else()
-  # TODO: When we have Windows events, fill this in
-  set(OSQUERY_CROSS_EVENTS_TABLES "")
 endif()
 
-# TODO: These tables should be made Windows-compatible
-if(NOT WINDOWS)
-  file(GLOB OSQUERY_POSIX_NETWORKING_TABLES "networking/posix/*.cpp")
-  file(GLOB OSQUERY_CROSS_FORENSIC_TABLES "forensic/*.cpp")
-
-  file(GLOB OSQUERY_POSIX_APPLICATIONS_TABLES "applications/posix/*.cpp")
-  file(GLOB OSQUERY_POSIX_SYSTEM_TABLES "system/posix/*.cpp")
-
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables
-    ${OSQUERY_POSIX_APPLICATIONS_TABLES}
-    ${OSQUERY_POSIX_NETWORKING_TABLES}
-    ${OSQUERY_CROSS_EVENTS_TABLES}
-    ${OSQUERY_CROSS_FORENSIC_TABLES}
-    ${OSQUERY_POSIX_SYSTEM_TABLES}
+# For each general category, add the C++ files in the base.
+foreach(CATEGORY ${TABLE_CATEGORIES})
+  file(GLOB OSQUERY_${CATEGORY}_TABLES
+    "${CATEGORY}/*.[cpm]*"
+    "${CATEGORY}/${TABLE_PLATFORM}/*.[cpm]*"
   )
+  if(OSQUERY_${CATEGORY}_TABLES)
+    ADD_OSQUERY_LIBRARY_ADDITIONAL(
+      osquery_${CATEGORY}_tables
+      ${OSQUERY_${CATEGORY}_TABLES}
+    )
+  endif()
 
-  file(GLOB OSQUERY_POSIX_TABLES_TESTS "*/posix/tests/*.cpp")
-  ADD_OSQUERY_TABLE_TEST(${OSQUERY_POSIX_TABLES_TESTS})
+  # POSIX tables.
+  if(POSIX)
+    file(GLOB OSQUERY_${CATEGORY}_POSIX_TABLES "${CATEGORY}/posix/*.[cpm]*")
+    if(OSQUERY_${CATEGORY}_POSIX_TABLES)
+      ADD_OSQUERY_LIBRARY_ADDITIONAL(
+        osquery_${CATEGORY}_posix_tables
+        ${OSQUERY_${CATEGORY}_POSIX_TABLES}
+      )
+    endif()
+
+    # Add posix table tests.
+    file(GLOB POSIX_OSQUERY_${CATEGORY}_TABLES_TESTS
+      "${CATEGORY}/posix/tests/*.[cpm]*"
+    )
+    ADD_OSQUERY_TABLE_TEST(${POSIX_OSQUERY_${CATEGORY}_TABLES_TESTS})
+  endif()
+
+  # Table implementations shared by FreeBSD and Linux
+  if(FREEBSD OR LINUX)
+    file(GLOB OSQUERY_${CATEGORY}_FREENUX_TABLES "${CATEGORY}/freenux/*.[cpm]*")
+    if(OSQUERY_${CATEGORY}_FREENUX_TABLES)
+      ADD_OSQUERY_LIBRARY_ADDITIONAL(
+        osquery_${CATEGORY}_freenux_tables
+        ${OSQUERY_${CATEGORY}_FREENUX_TABLES}
+      )
+    endif()
+  endif()
+
+  # Add the table tests.
+  file(GLOB OSQUERY_${CATEGORY}_TABLES_TESTS
+    "${CATEGORY}/tests/*.[cpm]*"
+    "${CATEGORY}/${TABLE_PLATFORM}/tests/*.[cpm]*"
+  )
+  ADD_OSQUERY_TABLE_TEST(${OSQUERY_${CATEGORY}_TABLES_TESTS})
+endforeach()
+
+if(NOT SKIP_KERNEL)
+  file(GLOB OSQUERY_KERNEL_TABLES
+    "kernel/*.[cpm]*"
+    "*/${TABLE_PLATFORM}/kernel/*.[cpm]*"
+  )
+  ADD_OSQUERY_LIBRARY_ADDITIONAL(
+    osquery_kernel_tables
+    ${OSQUERY_KERNEL_TABLES}
+  )
 endif()
-
-# No cross-platform application tables yet.
-file(GLOB OSQUERY_CROSS_APPLICATIONS_TABLES "applications/*.cpp")
-ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_applications
-  ${OSQUERY_CROSS_APPLICATIONS_TABLES}
-)
-
-file(GLOB OSQUERY_CROSS_NETWORKING_TABLES "networking/*.cpp")
-ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_networking
-  ${OSQUERY_CROSS_NETWORKING_TABLES}
-)
-
-file(GLOB OSQUERY_CROSS_SYSTEM_TABLES "system/*.cpp")
-ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_tables_system
-  ${OSQUERY_CROSS_SYSTEM_TABLES}
-)
-
-file(GLOB OSQUERY_CROSS_TABLES_TESTS "[!uo]*/tests/*/*.cpp")
-file(GLOB OSQUERY_CATEGORY_TABLE_TESTS "[!uo]*/tests/*.cpp")
-file(GLOB OSQUERY_TABLE_TESTS "tests/*.cpp")
-
-ADD_OSQUERY_TABLE_TEST(
-  ${OSQUERY_CROSS_TABLES_TESTS}
-  ${OSQUERY_CATEGORY_TABLE_TESTS}
-  ${OSQUERY_TABLE_TESTS}
-)
 
 file(GLOB OSQUERY_UTILITY_TABLES "utility/*.cpp")
 ADD_OSQUERY_LIBRARY_CORE(osquery_tables_utility
   ${OSQUERY_UTILITY_TABLES}
 )
 
-if(NOT FREEBSD AND NOT WINDOWS)
-  file(GLOB OSQUERY_UTILS "other/*.cpp")
-  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_utils
-    ${OSQUERY_UTILS}
-  )
+if(NOT SKIP_AWS AND LINUX)
+  file(GLOB OSQUERY_CLOUD_TABLES "cloud/*.[cpm]*")
+  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_cloud_tables ${OSQUERY_CLOUD_TABLES})
 
-  file(GLOB OSQUERY_UTILS_TESTS "other/tests/*.cpp")
-  ADD_OSQUERY_TEST_ADDITIONAL(${OSQUERY_UTILS_TESTS})
+  file(GLOB OSQUERY_CLOUD_TABLES_TESTS "cloud/tests/*.[cpm]*")
+  if(OSQUERY_CLOUD_TABLES_TESTS)
+    ADD_OSQUERY_TABLE_TEST(${OSQUERY_CLOUD_TABLES_TESTS})
+  endif()
+
+  ADD_OSQUERY_LINK_ADDITIONAL("aws-cpp-sdk-ec2")
+endif()
+
+if(NOT SKIP_TSK AND POSIX)
+  file(GLOB OSQUERY_TSK_TABLES "sleuthkit/*.[cpm]*")
+  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_sleuthkit_tables ${OSQUERY_TSK_TABLES})
+
+  file(GLOB OSQUERY_TSK_TABLES_TESTS "sleuthkit/tests/*.[cpm]*")
+  if(OSQUERY_TSK_TABLES_TESTS)
+    ADD_OSQUERY_TABLE_TEST(${OSQUERY_TSK_TABLES_TESTS})
+  endif()
+
+  ADD_OSQUERY_LINK_ADDITIONAL("tsk")
+endif()
+
+if(NOT SKIP_YARA AND POSIX)
+  file(GLOB OSQUERY_YARA_TABLES "yara/*.[cpm]*")
+  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_yara_tables ${OSQUERY_YARA_TABLES})
+
+  file(GLOB OSQUERY_YARA_TABLES_TESTS "yara/tests/*.[cpm]*")
+  if(OSQUERY_YARA_TABLES_TESTS)
+    ADD_OSQUERY_TABLE_TEST(${OSQUERY_YARA_TABLES_TESTS})
+  endif()
+
+  ADD_OSQUERY_LINK_ADDITIONAL("yara")
+endif()
+
+if(NOT SKIP_LLDPD AND POSIX)
+  file(GLOB OSQUERY_LLDPD_TABLES "lldpd/*.[cpm]*")
+  ADD_OSQUERY_LIBRARY_ADDITIONAL(osquery_lldpd_tables ${OSQUERY_LLDPD_TABLES})
+
+  file(GLOB OSQUERY_LLDPD_TABLES_TESTS "lldpd/tests/*.[cpm]*")
+  if(OSQUERY_LLDPD_TABLES_TESTS)
+    ADD_OSQUERY_TABLE_TEST(${OSQUERY_LLDPD_TABLES_TESTS})
+  endif()
+
+  ADD_OSQUERY_LINK_ADDITIONAL("lldpctl")
 endif()

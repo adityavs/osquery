@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sys/stat.h>
@@ -39,6 +39,14 @@ void genFileInfo(const fs::path& path,
                  QueryData& results) {
   // Must provide the path, filename, directory separate from boost path->string
   // helpers to match any explicit (query-parsed) predicate constraints.
+
+  Row r;
+  r["path"] = path.string();
+  r["filename"] = path.filename().string();
+  r["directory"] = parent.string();
+  r["symlink"] = "0";
+
+  struct stat file_stat;
 #if !defined(WIN32)
   // On POSIX systems, first check the link state.
   struct stat link_stat;
@@ -46,18 +54,18 @@ void genFileInfo(const fs::path& path,
     // Path was not real, had too may links, or could not be accessed.
     return;
   }
+  if ((link_stat.st_mode & S_IFLNK) != 0) {
+    r["symlink"] = "1";
+  }
 #endif
 
-  struct stat file_stat;
   if (stat(path.string().c_str(), &file_stat)) {
-    // Path was not real, had too may links, or could not be accessed.
+#if !defined(WIN32)
+    file_stat = link_stat;
+#else
     return;
+#endif
   }
-
-  Row r;
-  r["path"] = path.string();
-  r["filename"] = path.filename().string();
-  r["directory"] = parent.string();
 
   r["inode"] = BIGINT(file_stat.st_ino);
   r["uid"] = BIGINT(file_stat.st_uid);

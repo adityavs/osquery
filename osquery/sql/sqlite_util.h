@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -43,7 +43,7 @@ class SQLiteDBInstance : private boost::noncopyable {
   SQLiteDBInstance() {
     init();
   }
-  SQLiteDBInstance(sqlite3*& db, std::mutex& mtx);
+  SQLiteDBInstance(sqlite3*& db, Mutex& mtx);
   ~SQLiteDBInstance();
 
   /// Check if the instance is the osquery primary.
@@ -68,6 +68,18 @@ class SQLiteDBInstance : private boost::noncopyable {
   /// Clear per-query state of a table affected by the use of this instance.
   void clearAffectedTables();
 
+  /// Check if a virtual table had been called already.
+  bool tableCalled(VirtualTableContent* table);
+
+  /// Request that virtual tables use a warm cache for their results.
+  void useCache(bool use_cache);
+
+  /// Check if the query requested use of the warm query cache.
+  bool useCache() const;
+
+  /// Lock the database for attaching virtual tables.
+  RecursiveLock attachLock() const;
+
  private:
   /// Handle the primary/forwarding requests for table attribute accesses.
   TableAttributes getAttributes() const;
@@ -84,11 +96,31 @@ class SQLiteDBInstance : private boost::noncopyable {
   /// Track whether this instance is managed internally by the DB manager.
   bool managed_{false};
 
+  /// True if this query should bypass table cache.
+  bool use_cache_{false};
+
   /// Either the managed primary database or an ephemeral instance.
   sqlite3* db_{nullptr};
 
-  /// An attempted unique lock on the manager's primary database access mutex.
-  std::unique_lock<std::mutex> lock_;
+  /**
+   * @brief An attempted unique lock on the manager's primary database mutex.
+   *
+   * This lock is not always acquired. If it is then this instance has locked
+   * access to the 'primary' SQLite database.
+   */
+  WriteLock lock_;
+
+  /**
+   * @brief A mutex protecting access to this instance's SQLite database.
+   *
+   * Attaching, and other access, can occur async from the registry APIs.
+   *
+   * If a database is primary then the static attach mutex is used.
+   */
+  mutable RecursiveMutex attach_mutex_;
+
+  /// See attach_mutex_ but used for the primary database.
+  static RecursiveMutex kPrimaryAttachMutex;
 
   /// Vector of tables that need their constraints cleared after execution.
   std::map<std::string, VirtualTableContent*> affected_tables_;
@@ -143,6 +175,14 @@ class SQLiteDBManager : private boost::noncopyable {
   static SQLiteDBInstanceRef getUnique();
 
   /**
+   * @brief Reset the primary database connection.
+   *
+   * Over time it may be helpful to remove SQLite's arena.
+   * We can periodically close and re-initialize and connect virtual tables.
+   */
+  static void resetPrimary();
+
+  /**
    * @brief Check if `table_name` is disabled.
    *
    * Check if `table_name` is in the list of tables passed in to the
@@ -169,10 +209,10 @@ class SQLiteDBManager : private boost::noncopyable {
   SQLiteDBInstanceRef connection_{nullptr};
 
   /// Mutex and lock around sqlite3 access.
-  std::mutex mutex_;
+  Mutex mutex_;
 
   /// A write mutex for initializing the primary database.
-  std::mutex create_mutex_;
+  Mutex create_mutex_;
 
   /// Member variable to hold set of disabled tables.
   std::unordered_set<std::string> disabled_tables_;
@@ -201,8 +241,8 @@ class SQLiteDBManager : private boost::noncopyable {
 class QueryPlanner : private boost::noncopyable {
  public:
   explicit QueryPlanner(const std::string& query)
-      : QueryPlanner(query, SQLiteDBManager::get()->db()) {}
-  QueryPlanner(const std::string& query, sqlite3* db);
+      : QueryPlanner(query, SQLiteDBManager::get()) {}
+  QueryPlanner(const std::string& query, const SQLiteDBInstanceRef& instance);
   ~QueryPlanner() {}
 
  public:
@@ -217,6 +257,11 @@ class QueryPlanner : private boost::noncopyable {
    * @return success if all columns types were found, otherwise false.
    */
   Status applyTypes(TableColumns& columns);
+
+  /// Get the list of tables filtered by this query.
+  std::vector<std::string> tables() const {
+    return tables_;
+  }
 
   /**
    * @brief A helper structure to represent an opcode's result and type.
@@ -267,7 +312,9 @@ extern const std::map<std::string, QueryPlanner::Opcode> kSQLOpcodes;
  *
  * @return A status indicating SQL query results.
  */
-Status queryInternal(const std::string& q, QueryData& results, sqlite3* db);
+Status queryInternal(const std::string& q,
+                     QueryData& results,
+                     const SQLiteDBInstanceRef& instance);
 
 /**
  * @brief SQLite Intern: Analyze a query, providing information about the
@@ -286,24 +333,7 @@ Status queryInternal(const std::string& q, QueryData& results, sqlite3* db);
  */
 Status getQueryColumnsInternal(const std::string& q,
                                TableColumns& columns,
-                               sqlite3* db);
-
-/// The SQLiteSQLPlugin implements the "sql" registry for internal/core.
-class SQLiteSQLPlugin : SQLPlugin {
- public:
-  /// Execute SQL and store results.
-  Status query(const std::string& q, QueryData& results) const override;
-
-  /// Introspect, explain, the suspected types selected in an SQL statement.
-  Status getQueryColumns(const std::string& q,
-                         TableColumns& columns) const override;
-
-  /// Create a SQLite module and attach (CREATE).
-  Status attach(const std::string& name) override;
-
-  /// Detach a virtual table (DROP).
-  void detach(const std::string& name) override;
-};
+                               const SQLiteDBInstanceRef& instance);
 
 /**
  * @brief SQLInternal: SQL, but backed by internal calls.
@@ -313,9 +343,10 @@ class SQLInternal : public SQL {
   /**
    * @brief Instantiate an instance of the class with an internal query.
    *
-   * @param q An osquery SQL query.
+   * @param query An osquery SQL query.
+   * @param use_cache [optional] Set true to use the query cache.
    */
-  explicit SQLInternal(const std::string& q);
+  explicit SQLInternal(const std::string& query, bool use_cache = false);
 
  public:
   /**
@@ -329,9 +360,7 @@ class SQLInternal : public SQL {
    * All the tables used in the query will be checked. The TableAttributes of
    * each will be ORed and if any include EVENT_BASED, this will return true.
    */
-  bool eventBased() const {
-    return event_based_;
-  }
+  bool eventBased() const;
 
  private:
   /// Before completing the execution, store a check for EVENT_BASED.
@@ -360,4 +389,19 @@ void registerMathExtensions(sqlite3* db);
  * @brief Register string-related 'custom' functions.
  */
 void registerStringExtensions(sqlite3* db);
+
+/**
+ * @brief Register hashing-related 'custom' functions.
+ */
+void registerHashingExtensions(sqlite3* db);
+
+/**
+ * @brief Register osquery operation 'custom' functions.
+ */
+void registerOperationExtensions(sqlite3* db);
+
+/**
+ * @brief Register encoding-related 'custom' functions.
+ */
+void registerEncodingExtensions(sqlite3* db);
 }

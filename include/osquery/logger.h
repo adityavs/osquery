@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #pragma once
@@ -20,14 +20,14 @@
 
 #include <glog/logging.h>
 
-#include <osquery/database.h>
+#include <boost/noncopyable.hpp>
+
+#include <osquery/core.h>
 #include <osquery/flags.h>
+#include <osquery/query.h>
 #include <osquery/registry.h>
 
 namespace osquery {
-
-DECLARE_bool(disable_logging);
-DECLARE_string(logger_plugin);
 
 /**
  * @brief An internal severity set mapping to Glog's LogSeverity levels.
@@ -42,14 +42,32 @@ enum StatusLogSeverity {
 /// An intermediate status log line.
 struct StatusLogLine {
  public:
-  /// An integer severity level mimicing Glog's.
+  /// An integer severity level mimicking Glog's.
   StatusLogSeverity severity;
+
   /// The name of the file emitting the status log.
   std::string filename;
+
   /// The line of the file emitting the status log.
-  int line;
+  size_t line;
+
   /// The string-formatted status message.
   std::string message;
+
+  /// The ASCII time stamp for when the status message was emitted
+  std::string calendar_time;
+
+  /// The UNIX time for when the status message was emitted
+  size_t time;
+
+  /**
+   * @brief The host identifier at the time when logs are flushed.
+   *
+   * There is occasionally a delay between logging a status and decorating
+   * with the host identifier. In most cases the identifier is static so this
+   * does not matter. In some cases the host identifier causes database lookups.
+   */
+  std::string identifier;
 };
 
 /**
@@ -154,18 +172,17 @@ class LoggerPlugin : public Plugin {
   /**
    * @brief Set the process name.
    */
-  void setName(const std::string& name) {
-    name_ = name;
+  void setProcessName(const std::string& name) {
+    process_name_ = name;
   }
 
   /**
    * @brief Get the process name.
    */
   const std::string& name() const {
-    return name_;
+    return process_name_;
   }
 
- protected:
   /** @brief Virtual method which should implement custom logging.
    *
    *  LoggerPlugin::logString should be implemented by a subclass of
@@ -177,33 +194,13 @@ class LoggerPlugin : public Plugin {
   virtual Status logString(const std::string& s) = 0;
 
   /**
-   * @brief Initialize the logger with the name of the binary and any status
-   * logs generated between program launch and logger start.
-   *
-   * The logger initialization is called once CLI flags have been parsed, the
-   * registry items are constructed, extension routes broadcasted and extension
-   * plugins discovered (as a logger may be an extension plugin) and the config
-   * has been loaded (which may include additional CLI flag-options).
-   *
-   * All of these actions may have generated VERBOSE, INFO, WARNING, or ERROR
-   * logs. The internal logging facility, Glog, collects these intermediate
-   * status logs and a customized log sink buffers them until the active
-   * osquery logger's `init` method is called.
-   *
-   * @param binary_name The string name of the process (argv[0]).
-   * @param log The set of status (INFO, WARNING, ERROR) logs generated before
-   * the logger's `init` method was called.
-   */
-  virtual void init(const std::string& binary_name,
-                    const std::vector<StatusLogLine>& log) = 0;
-
-  /**
    * @brief See the usesLogStatus method, log a Glog status.
    *
    * @param log A vector of parsed Glog log lines.
    * @return Status non-op indicating success or failure.
    */
   virtual Status logStatus(const std::vector<StatusLogLine>& log) {
+    (void)log;
     return Status(1, "Not enabled");
   }
 
@@ -227,19 +224,46 @@ class LoggerPlugin : public Plugin {
    * It is possible to skip the database representation of event subscribers
    * and instead forward each added event to the active logger plugin.
    */
-  virtual Status logEvent(const std::string& s) {
+  virtual Status logEvent(const std::string& /*s*/) {
     return Status(1, "Not enabled");
   }
 
+ protected:
+  /**
+   * @brief Initialize the logger with the name of the binary and any status
+   * logs generated between program launch and logger start.
+   *
+   * The logger initialization is called once CLI flags have been parsed, the
+   * registry items are constructed, extension routes broadcasted and extension
+   * plugins discovered (as a logger may be an extension plugin) and the config
+   * has been loaded (which may include additional CLI flag-options).
+   *
+   * All of these actions may have generated VERBOSE, INFO, WARNING, or ERROR
+   * logs. The internal logging facility, Glog, collects these intermediate
+   * status logs and a customized log sink buffers them until the active
+   * osquery logger's `init` method is called.
+   *
+   * @param binary_name The string name of the process (argv[0]).
+   * @param log The set of status (INFO, WARNING, ERROR) logs generated before
+   * the logger's `init` method was called.
+   */
+  virtual void init(const std::string& binary_name,
+                    const std::vector<StatusLogLine>& log) = 0;
+
  private:
-  std::string name_;
+  std::string process_name_;
 };
 
 /// Set the verbose mode, changes Glog's sinking logic and will affect plugins.
 void setVerboseLevel();
 
-/// Start status logging to a buffer until the logger plugin is online.
-void initStatusLogger(const std::string& name);
+/**
+ * @brief Start status logging to a buffer until the logger plugin is online.
+ *
+ * This will also call google::InitGoogleLogging. Use the default init_glog
+ * to control this in tests to protect against calling the API twice.
+ */
+void initStatusLogger(const std::string& name, bool init_glog = true);
 
 /**
  * @brief Initialize the osquery Logger facility by dumping the buffered status
@@ -316,31 +340,6 @@ Status logQueryLogItem(const QueryLogItem& item, const std::string& receiver);
 Status logSnapshotQuery(const QueryLogItem& item);
 
 /**
- * @brief Helper class to disable logger forwarding
- *
- * Sometimes, it is useful to turn off log forwarding and force status logs to
- * be buffered. One example is with handling of rocksdb status logs; if those
- * status logs are forwarded, it can cause a deadlock inside rocksdb, if the
- * logger plugin tries to call back into rocksdb.
- *
- * Creating an object of this class allows one to halt log forwarding and
- * leave the log sink in a locked/non-forwarding state. Any log requests in this
- * * state are guaranteed to be buffered. Callback loops can thus be avoided.
- *
- * The logger forwarding state is restored and unlocked as soon as the object
- * of this class goes out of scope.
- */
-class LoggerForwardingDisabler {
- public:
-  LoggerForwardingDisabler();
-  ~LoggerForwardingDisabler();
-
- private:
-  /// Value of the
-  bool forward_state_;
-};
-
-/**
  * @brief Sink a set of buffered status logs.
  *
  * When the osquery daemon uses a watcher/worker set, the watcher's status logs
@@ -353,7 +352,13 @@ class LoggerForwardingDisabler {
  * Extensions, the registry, configuration, and optional config/logger plugins
  * are all protected as a monitored worker.
  */
-void relayStatusLogs();
+void relayStatusLogs(bool async = false);
+
+/// Inspect the number of internal-buffered status log lines.
+size_t queuedStatuses();
+
+/// Inspect the number of active internal status log sender threads.
+size_t queuedSenders();
 
 /**
  * @brief Write a log line to the OS system log.
@@ -363,15 +368,8 @@ void relayStatusLogs();
  * configuration and log to the OS system log.
  *
  * Linux/Darwin: this uses syslog's LOG_NOTICE.
+ * Windows: This will end up inside the Facebook/osquery in the Windows
+ * Event Log.
  */
 void systemLog(const std::string& line);
-
-/**
- * @brief Logger plugin registry.
- *
- * This creates an osquery registry for "logger" which may implement
- * LoggerPlugin. Only strings are logged in practice, and LoggerPlugin provides
- * a helper member for transforming PluginRequest%s to strings.
- */
-CREATE_REGISTRY(LoggerPlugin, "logger");
-}
+} // namespace osquery

@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/core.h>
@@ -13,7 +13,7 @@
 #include <osquery/sql.h>
 #include <osquery/logger.h>
 
-#include "osquery/events/darwin/iokit.h"
+#include "osquery/core/darwin/iokit.hpp"
 
 namespace osquery {
 namespace tables {
@@ -42,15 +42,10 @@ const std::map<std::string, uint32_t> kRootlessConfigFlags = {
 #define kIODeviceTreeChosenPath_ "IODeviceTree:/options"
 typedef uint32_t csr_config_t;
 
-#if !defined(DARWIN_10_9)
-// mark these symbols as weakly linked, as they may not be available
-// at runtime on older OS X versions.
-// https://developer.apple.com/library/mac/documentation/MacOSX/Conceptual/BPFrameworks/Concepts/WeakLinking.html
 extern "C" {
-int csr_check(csr_config_t mask) __attribute__((weak_import));
-int csr_get_active_config(csr_config_t* config) __attribute__((weak_import));
+int csr_check(csr_config_t mask);
+int csr_get_active_config(csr_config_t* config);
 };
-#endif
 
 Status genCsrConfigFromNvram(uint32_t& config) {
   auto chosen =
@@ -76,6 +71,7 @@ Status genCsrConfigFromNvram(uint32_t& config) {
   if (CFDictionaryGetValueIfPresent(
           properties, CFSTR("csr-active-config"), &csr_config)) {
     if (CFGetTypeID(csr_config) != CFDataGetTypeID()) {
+      CFRelease(properties);
       return Status(1, "Unexpected data type for csr-active-config");
     }
 
@@ -85,9 +81,10 @@ Status genCsrConfigFromNvram(uint32_t& config) {
                    (UInt8*)buffer);
     CFRelease(properties);
     memcpy(&config, buffer, sizeof(uint32_t));
-    return Status(0, "ok");
+    return Status{0};
   } else {
-    // the default case, csr-active-config is cleared or not set is not an error
+    CFRelease(properties);
+    // The case where csr-active-config is cleared or not set is not an error
     return Status(0, "csr-active-config key not found");
   }
 }
@@ -107,13 +104,6 @@ QueryData genSIPConfig(QueryContext& context) {
   }
 
   QueryData results;
-
-#if !defined(DARWIN_10_9)
-  // check if weakly linked symbols exist
-  if (csr_get_active_config == nullptr || csr_check == nullptr) {
-    return {};
-  }
-
   csr_config_t config = 0;
   csr_get_active_config(&config);
 
@@ -144,10 +134,11 @@ QueryData genSIPConfig(QueryContext& context) {
     r["enabled"] = (csr_check(kv.second) == 0) ? INTEGER(1) : INTEGER(0);
     if (nvram_status.ok()) {
       r["enabled_nvram"] = (nvram_config & kv.second) ? INTEGER(1) : INTEGER(0);
+    } else {
+      r["enabled_nvram"] = INTEGER(-1);
     }
     results.push_back(r);
   }
-#endif
 
   return results;
 }

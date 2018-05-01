@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <string>
@@ -13,6 +13,7 @@
 #include <osquery/core.h>
 #include <osquery/tables.h>
 
+#include "osquery/core/conversions.h"
 #include "osquery/tables/system/windows/registry.h"
 
 namespace osquery {
@@ -31,22 +32,31 @@ QueryData genShims(QueryContext& context) {
   QueryData shimResults;
   std::map<std::string, sdb> sdbs;
 
-  queryKey("HKEY_LOCAL_MACHINE",
-           "SOFTWARE\\Microsoft\\Windows "
-           "NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB",
-           sdbResults);
+  queryKey(
+      "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows "
+      "NT\\CurrentVersion\\AppCompatFlags\\InstalledSDB",
+      sdbResults);
   for (const auto& rKey : sdbResults) {
+    if (rKey.count("type") == 0 || rKey.count("path") == 0) {
+      continue;
+    }
     QueryData regResults;
     sdb sdb;
-    std::string subkey = rKey.at("subkey");
-    auto start = subkey.find("{");
+    std::string subkey = rKey.at("path");
+    auto start = subkey.find('{');
     if (start == std::string::npos) {
+      continue;
+    }
+    if (start > subkey.size()) {
       continue;
     }
     std::string sdbId = subkey.substr(start, subkey.length());
     // make sure it's a sane uninstall key
-    queryKey("HKEY_LOCAL_MACHINE", subkey, regResults);
+    queryKey(subkey, regResults);
     for (const auto& aKey : regResults) {
+      if (aKey.count("name") == 0 || aKey.count("data") == 0) {
+        continue;
+      }
       if (aKey.at("name") == "DatabaseDescription") {
         sdb.description = aKey.at("data");
       }
@@ -66,20 +76,20 @@ QueryData genShims(QueryContext& context) {
   }
 
   queryKey(
-      "HKEY_LOCAL_MACHINE",
-      "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\AppCompatFlags\\Custom",
+      "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\"
+      "CurrentVersion\\AppCompatFlags\\Custom",
       shimResults);
   for (const auto& rKey : shimResults) {
-    QueryData regResults;
-    std::string subkey = rKey.at("subkey");
-    auto start = rKey.at("subkey").rfind("\\");
-    if (start == std::string::npos) {
+    if (rKey.count("type") == 0 || rKey.count("path") == 0 ||
+        rKey.at("type") != "subkey") {
       continue;
     }
-    std::string executable =
-        rKey.at("subkey").substr(start + 1, rKey.at("subkey").length());
-    // make sure it's a sane uninstall key
-    queryKey("HKEY_LOCAL_MACHINE", subkey, regResults);
+
+    QueryData regResults;
+    std::string subkey = rKey.at("path");
+    auto toks = split(rKey.at("path"), "\\");
+    auto executable = toks[toks.size() - 1];
+    queryKey(subkey, regResults);
     for (const auto& aKey : regResults) {
       Row r;
       std::string sdbId;
@@ -101,5 +111,5 @@ QueryData genShims(QueryContext& context) {
 
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery

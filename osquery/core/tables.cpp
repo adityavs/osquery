@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <osquery/database.h>
@@ -15,11 +15,11 @@
 
 #include "osquery/core/json.h"
 
-namespace pt = boost::property_tree;
-
 namespace osquery {
 
 FLAG(bool, disable_caching, false, "Disable scheduled query caching");
+
+CREATE_LAZY_REGISTRY(TablePlugin, "table");
 
 size_t TablePlugin::kCacheInterval = 0;
 size_t TablePlugin::kCacheStep = 0;
@@ -55,50 +55,36 @@ void TablePlugin::removeExternal(const std::string& name) {
 
 void TablePlugin::setRequestFromContext(const QueryContext& context,
                                         PluginRequest& request) {
-  pt::ptree tree;
+  auto doc = JSON::newObject();
+  auto constraints = doc.getArray();
 
   // The QueryContext contains a constraint map from column to type information
   // and the list of operand/expression constraints applied to that column from
   // the query given.
-  pt::ptree constraints;
   for (const auto& constraint : context.constraints) {
-    pt::ptree child;
-    child.put("name", constraint.first);
-    constraint.second.serialize(child);
-    constraints.push_back(std::make_pair("", child));
+    auto child = doc.getObject();
+    doc.addRef("name", constraint.first, child);
+    constraint.second.serialize(doc, child);
+    doc.push(child, constraints);
   }
-  tree.add_child("constraints", constraints);
 
-  // Write the property tree as a JSON string into the PluginRequest.
-  std::ostringstream output;
-  try {
-    pt::write_json(output, tree, false);
-  } catch (const pt::json_parser::json_parser_error& /* e */) {
-    // The content could not be represented as JSON.
-  }
-  request["context"] = output.str();
+  doc.add("constraints", constraints);
+  doc.toString(request["context"]);
 }
 
 void TablePlugin::setContextFromRequest(const PluginRequest& request,
                                         QueryContext& context) {
-  if (request.count("context") == 0) {
-    return;
-  }
-
-  // Read serialized context from PluginRequest.
-  pt::ptree tree;
-  try {
-    std::stringstream input;
-    input << request.at("context");
-    pt::read_json(input, tree);
-  } catch (const pt::json_parser::json_parser_error& /* e */) {
+  auto doc = JSON::newObject();
+  doc.fromString(request.at("context"));
+  if (!doc.doc().HasMember("constraints") ||
+      !doc.doc()["constraints"].IsArray()) {
     return;
   }
 
   // Set the context limit and deserialize each column constraint list.
-  for (const auto& constraint : tree.get_child("constraints")) {
-    auto column_name = constraint.second.get<std::string>("name");
-    context.constraints[column_name].unserialize(constraint.second);
+  for (const auto& constraint : doc.doc()["constraints"].GetArray()) {
+    auto column_name = constraint["name"].GetString();
+    context.constraints[column_name].deserialize(constraint);
   }
 }
 
@@ -167,8 +153,30 @@ PluginResponse TablePlugin::routeInfo() const {
   return response;
 }
 
-bool TablePlugin::isCached(size_t step) {
-  return (!FLAGS_disable_caching && step < last_cached_ + last_interval_);
+static bool cacheAllowed(const TableColumns& cols, const QueryContext& ctx) {
+  if (!ctx.useCache()) {
+    // The query execution did not request use of the warm cache.
+    return false;
+  }
+
+  auto uncachable = ColumnOptions::INDEX | ColumnOptions::REQUIRED |
+                    ColumnOptions::ADDITIONAL | ColumnOptions::OPTIMIZED;
+  for (const auto& column : cols) {
+    auto opts = std::get<2>(column) & uncachable;
+    if (opts && ctx.constraints.at(std::get<0>(column)).exists()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TablePlugin::isCached(size_t step, const QueryContext& ctx) const {
+  if (FLAGS_disable_caching) {
+    return false;
+  }
+
+  // Perform the step comparison first, because it's easy.
+  return (step < last_cached_ + last_interval_ && cacheAllowed(columns(), ctx));
 }
 
 QueryData TablePlugin::getCache() const {
@@ -183,10 +191,15 @@ QueryData TablePlugin::getCache() const {
 
 void TablePlugin::setCache(size_t step,
                            size_t interval,
+                           const QueryContext& ctx,
                            const QueryData& results) {
+  if (FLAGS_disable_caching || !cacheAllowed(columns(), ctx)) {
+    return;
+  }
+
   // Serialize QueryData and save to database.
   std::string content;
-  if (!FLAGS_disable_caching && serializeQueryDataJSON(results, content)) {
+  if (serializeQueryDataJSON(results, content)) {
     last_cached_ = step;
     last_interval_ = interval;
     setDatabaseValue(kQueries, "cache." + getName(), content);
@@ -195,14 +208,20 @@ void TablePlugin::setCache(size_t step,
 
 std::string columnDefinition(const TableColumns& columns) {
   std::map<std::string, bool> epilog;
+  bool indexed = false;
+  std::vector<std::string> pkeys;
+
   std::string statement = "(";
   for (size_t i = 0; i < columns.size(); ++i) {
     const auto& column = columns.at(i);
     statement +=
-        "`" + std::get<0>(column) + "` " + columnTypeName(std::get<1>(column));
+        '`' + std::get<0>(column) + "` " + columnTypeName(std::get<1>(column));
     auto& options = std::get<2>(column);
-    if (options & ColumnOptions::INDEX) {
-      statement += " PRIMARY KEY";
+    if (options & (ColumnOptions::INDEX | ColumnOptions::ADDITIONAL)) {
+      if (options & ColumnOptions::INDEX) {
+        indexed = true;
+      }
+      pkeys.push_back(std::get<0>(column));
       epilog["WITHOUT ROWID"] = true;
     }
     if (options & ColumnOptions::HIDDEN) {
@@ -213,9 +232,29 @@ std::string columnDefinition(const TableColumns& columns) {
     }
   }
 
-  statement += ")";
+  // If there are only 'additional' columns (rare), do not attempt a pkey.
+  if (!indexed) {
+    epilog["WITHOUT ROWID"] = false;
+    pkeys.clear();
+  }
+
+  // Append the primary keys, if any were defined.
+  if (!pkeys.empty()) {
+    statement += ", PRIMARY KEY (";
+    for (auto pkey = pkeys.begin(); pkey != pkeys.end();) {
+      statement += '`' + std::move(*pkey) + '`';
+      if (++pkey != pkeys.end()) {
+        statement += ", ";
+      }
+    }
+    statement += ')';
+  }
+
+  statement += ')';
   for (auto& ei : epilog) {
-    statement += " " + std::move(ei.first);
+    if (ei.second) {
+      statement += ' ' + std::move(ei.first);
+    }
   }
   return statement;
 }
@@ -278,21 +317,24 @@ bool ConstraintList::exists(const ConstraintOperatorFlag ops) const {
 
 bool ConstraintList::matches(const std::string& expr) const {
   // Support each SQL affinity type casting.
-  if (affinity == TEXT_TYPE) {
-    return literal_matches<TEXT_LITERAL>(expr);
-  } else if (affinity == INTEGER_TYPE) {
-    INTEGER_LITERAL lexpr = AS_LITERAL(INTEGER_LITERAL, expr);
-    return literal_matches<INTEGER_LITERAL>(lexpr);
-  } else if (affinity == BIGINT_TYPE) {
-    BIGINT_LITERAL lexpr = AS_LITERAL(BIGINT_LITERAL, expr);
-    return literal_matches<BIGINT_LITERAL>(lexpr);
-  } else if (affinity == UNSIGNED_BIGINT_TYPE) {
-    UNSIGNED_BIGINT_LITERAL lexpr = AS_LITERAL(UNSIGNED_BIGINT_LITERAL, expr);
-    return literal_matches<UNSIGNED_BIGINT_LITERAL>(lexpr);
-  } else {
-    // Unsupported affinity type.
-    return false;
+  try {
+    if (affinity == TEXT_TYPE) {
+      return literal_matches<TEXT_LITERAL>(expr);
+    } else if (affinity == INTEGER_TYPE) {
+      INTEGER_LITERAL lexpr = AS_LITERAL(INTEGER_LITERAL, expr);
+      return literal_matches<INTEGER_LITERAL>(lexpr);
+    } else if (affinity == BIGINT_TYPE) {
+      BIGINT_LITERAL lexpr = AS_LITERAL(BIGINT_LITERAL, expr);
+      return literal_matches<BIGINT_LITERAL>(lexpr);
+    } else if (affinity == UNSIGNED_BIGINT_TYPE) {
+      UNSIGNED_BIGINT_LITERAL lexpr = AS_LITERAL(UNSIGNED_BIGINT_LITERAL, expr);
+      return literal_matches<UNSIGNED_BIGINT_LITERAL>(lexpr);
+    }
+  } catch (const boost::bad_lexical_cast& /* e */) {
+    // Unsupported affinity type or unable to cast content type.
   }
+
+  return false;
 }
 
 template <typename T>
@@ -311,8 +353,8 @@ bool ConstraintList::literal_matches(const T& base_expr) const {
     } else if (constraints_[i].op == LESS_THAN_OR_EQUALS) {
       aggregate = aggregate && (base_expr <= constraint_expr);
     } else {
-      // Unsupported constraint.
-      return false;
+      // Unsupported constraint. Should match every thing.
+      return true;
     }
     if (!aggregate) {
       // Speed up comparison.
@@ -333,27 +375,67 @@ std::set<std::string> ConstraintList::getAll(ConstraintOperator op) const {
   return set;
 }
 
-void ConstraintList::serialize(boost::property_tree::ptree& tree) const {
-  boost::property_tree::ptree expressions;
+void ConstraintList::serialize(JSON& doc, rapidjson::Value& obj) const {
+  auto expressions = doc.getArray();
   for (const auto& constraint : constraints_) {
-    boost::property_tree::ptree child;
-    child.put("op", constraint.op);
-    child.put("expr", constraint.expr);
-    expressions.push_back(std::make_pair("", child));
+    auto child = doc.getObject();
+    doc.add("op", static_cast<size_t>(constraint.op), child);
+    doc.addRef("expr", constraint.expr, child);
+    doc.push(child, expressions);
   }
-  tree.add_child("list", expressions);
-  tree.put("affinity", columnTypeName(affinity));
+  doc.add("list", expressions, obj);
+  doc.addCopy("affinity", columnTypeName(affinity), obj);
 }
 
-void ConstraintList::unserialize(const boost::property_tree::ptree& tree) {
+void ConstraintList::deserialize(const rapidjson::Value& obj) {
   // Iterate through the list of operand/expressions, then set the constraint
   // type affinity.
-  for (const auto& list : tree.get_child("list")) {
-    Constraint constraint(list.second.get<unsigned char>("op"));
-    constraint.expr = list.second.get<std::string>("expr");
+  if (!obj.IsObject() || !obj.HasMember("list") || !obj["list"].IsArray()) {
+    return;
+  }
+
+  for (const auto& list : obj["list"].GetArray()) {
+    auto op = static_cast<unsigned char>(JSON::valueToSize(list["op"]));
+    Constraint constraint(op);
+    constraint.expr = list["expr"].GetString();
     constraints_.push_back(constraint);
   }
-  affinity = columnTypeName(tree.get<std::string>("affinity", "UNKNOWN"));
+
+  auto affinity_name = (obj.HasMember("affinity") && obj["affinity"].IsString())
+                           ? obj["affinity"].GetString()
+                           : "UNKNOWN";
+  affinity = columnTypeName(affinity_name);
+}
+
+void QueryContext::useCache(bool use_cache) {
+  use_cache_ = use_cache;
+}
+
+bool QueryContext::useCache() const {
+  return use_cache_;
+}
+
+void QueryContext::setCache(const std::string& index, Row _cache) {
+  table_->cache[index] = std::move(_cache);
+}
+
+void QueryContext::setCache(const std::string& index,
+                            const std::string& key,
+                            std::string _item) {
+  table_->cache[index][key] = std::move(_item);
+}
+
+bool QueryContext::isCached(const std::string& index) const {
+  return (table_->cache.count(index) != 0);
+}
+
+const Row& QueryContext::getCache(const std::string& index) {
+  return table_->cache[index];
+}
+
+const std::string& QueryContext::getCache(const std::string& index,
+                                          const std::string& key) {
+  return table_->cache[index][key];
 }
 
 bool QueryContext::hasConstraint(const std::string& column,

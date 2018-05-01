@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <fstream>
@@ -22,21 +22,19 @@
 #include "osquery/events/darwin/diskarbitration.h"
 
 namespace fs = boost::filesystem;
+namespace errc = boost::system::errc;
 
 namespace osquery {
 
-const std::string kIOHIDXClassPath = "IOService:/IOResources/IOHDIXController/";
+const std::string kIOHIDXClassPath{"IOService:/IOResources/IOHDIXController/"};
 
 REGISTER(DiskArbitrationEventPublisher, "event_publisher", "diskarbitration");
 
 void DiskArbitrationEventPublisher::restart() {
-  if (run_loop_ == nullptr) {
-    return;
-  }
-
   stop();
 
   WriteLock lock(mutex_);
+  run_loop_ = CFRunLoopGetCurrent();
   session_ = DASessionCreate(kCFAllocatorDefault);
   DARegisterDiskAppearedCallback(
       session_,
@@ -53,37 +51,33 @@ void DiskArbitrationEventPublisher::restart() {
 }
 
 Status DiskArbitrationEventPublisher::run() {
-  if (run_loop_ == nullptr) {
-    run_loop_ = CFRunLoopGetCurrent();
-    restart();
-  }
-
+  restart();
   CFRunLoopRun();
   return Status(0, "OK");
 }
 
 void DiskArbitrationEventPublisher::stop() {
+  WriteLock lock(mutex_);
+
   if (run_loop_ == nullptr) {
     return;
   }
 
-  WriteLock lock(mutex_);
   if (session_ != nullptr) {
     DASessionUnscheduleFromRunLoop(session_, run_loop_, kCFRunLoopDefaultMode);
     CFRelease(session_);
     session_ = nullptr;
   }
-
   CFRunLoopStop(run_loop_);
+  run_loop_ = nullptr;
 }
 
 void DiskArbitrationEventPublisher::tearDown() {
   stop();
-  run_loop_ = nullptr;
 }
 
 void DiskArbitrationEventPublisher::DiskAppearedCallback(DADiskRef disk,
-                                                         void *context) {
+                                                         void* context) {
   auto ec = createEventContext();
 
   CFDictionaryRef disk_properties = DADiskCopyDescription(disk);
@@ -120,38 +114,43 @@ void DiskArbitrationEventPublisher::DiskAppearedCallback(DADiskRef disk,
               disk_properties, kDADiskDescriptionMediaWholeKey))) {
         ec->checksum = extractUdifChecksum(ec->path);
       }
+    } else {
+      // There was no interface location.
+      ec->path = getProperty(kDADiskDescriptionDevicePathKey, disk_properties);
     }
     CFRelease(protocol_properties);
   } else {
     ec->path = "";
   }
 
-  fire("add", ec, disk_properties);
+  if (ec->path.find("/SSD0@0") == std::string::npos) {
+    // This is not an internal SSD.
+    fire("add", ec, disk_properties);
+  }
 
   CFRelease(disk_properties);
   IOObjectRelease(entry);
 }
 
 void DiskArbitrationEventPublisher::DiskDisappearedCallback(DADiskRef disk,
-                                                            void *context) {
-
+                                                            void* context) {
   CFDictionaryRef disk_properties = DADiskCopyDescription(disk);
   fire("remove", createEventContext(), disk_properties);
   CFRelease(disk_properties);
 }
 
 bool DiskArbitrationEventPublisher::shouldFire(
-    const DiskArbitrationSubscriptionContextRef &sc,
-    const DiskArbitrationEventContextRef &ec) const {
-
+    const DiskArbitrationSubscriptionContextRef& sc,
+    const DiskArbitrationEventContextRef& ec) const {
   // We want events for physical disks as well
   if (sc->physical_disks) {
     return true;
   } else {
-    // We want only virtual disk (DMG) events
+    // We 'could' only want only virtual disk (DMG) events
     if (ec->action == "add") {
       // Filter events by matching on Virtual Interface based on IO device path
-      return (boost::starts_with(ec->device_path, kIOHIDXClassPath));
+      // return (boost::starts_with(ec->device_path, kIOHIDXClassPath));
+      return true;
     } else {
       return true;
     }
@@ -159,14 +158,17 @@ bool DiskArbitrationEventPublisher::shouldFire(
 }
 
 std::string DiskArbitrationEventPublisher::extractUdifChecksum(
-    const std::string &path_str) {
+    const std::string& path_str) {
   fs::path path = path_str;
   if (!pathExists(path).ok() || !isReadable(path).ok()) {
     return "";
   }
-  if (!fs::is_regular_file(path)) {
+
+  boost::system::error_code ec;
+  if (!fs::is_regular_file(path, ec) || ec.value() != errc::success) {
     return "";
   }
+
   // The koly trailer (footer) is 512 bytes
   // http://newosxbook.com/DMG.html
   if (fs::file_size(path) < 512) {
@@ -177,7 +179,7 @@ std::string DiskArbitrationEventPublisher::extractUdifChecksum(
   if (dmg_file.is_open()) {
     dmg_file.seekg(-512L, std::ios::end);
 
-    char *buffer = new char[4];
+    char* buffer = new char[4];
     dmg_file.read(buffer, 4);
     std::string koly_signature;
     koly_signature.assign(buffer, 4);
@@ -191,13 +193,13 @@ std::string DiskArbitrationEventPublisher::extractUdifChecksum(
 
     uint32_t checksum_size;
     dmg_file.seekg(-156L, std::ios::end);
-    dmg_file.read((char *)&checksum_size, sizeof(checksum_size));
+    dmg_file.read((char*)&checksum_size, sizeof(checksum_size));
     // checksum_size is in big endian and we need to byte swap
     checksum_size = CFSwapInt32(checksum_size);
 
     dmg_file.seekg(-152L, std::ios::end); // checksum offset
-    unsigned char *u_buffer = new unsigned char[checksum_size];
-    dmg_file.read((char *)u_buffer, checksum_size);
+    unsigned char* u_buffer = new unsigned char[checksum_size];
+    dmg_file.read((char*)u_buffer, checksum_size);
     // we don't want to byte swap checksum as disk utility/hdiutil doesn't
     std::stringstream checksum;
     for (size_t i = 0; i < checksum_size; i++) {
@@ -214,16 +216,15 @@ std::string DiskArbitrationEventPublisher::extractUdifChecksum(
 }
 
 void DiskArbitrationEventPublisher::fire(
-    const std::string &action,
-    const DiskArbitrationEventContextRef &ec,
-    const CFDictionaryRef &dict) {
-
+    const std::string& action,
+    const DiskArbitrationEventContextRef& ec,
+    const CFDictionaryRef& dict) {
   ec->action = action;
   ec->name = getProperty(kDADiskDescriptionMediaNameKey, dict);
-  ec->bsd_name = getProperty(kDADiskDescriptionMediaBSDNameKey, dict);
+  ec->device = "/dev/" + getProperty(kDADiskDescriptionMediaBSDNameKey, dict);
   ec->uuid = getProperty(kDADiskDescriptionVolumeUUIDKey, dict);
   ec->size = getProperty(kDADiskDescriptionMediaSizeKey, dict);
-  ec->ejectable = getProperty(kDADiskDescriptionMediaEjectableKey, dict);
+  ec->ejectable = getProperty(kDADiskDescriptionMediaRemovableKey, dict);
   ec->mountable = getProperty(kDADiskDescriptionVolumeMountableKey, dict);
   ec->writable = getProperty(kDADiskDescriptionMediaWritableKey, dict);
   ec->content = getProperty(kDADiskDescriptionMediaContentKey, dict);
@@ -231,12 +232,15 @@ void DiskArbitrationEventPublisher::fire(
   ec->vendor = getProperty(kDADiskDescriptionDeviceVendorKey, dict);
   ec->filesystem = getProperty(kDADiskDescriptionVolumeKindKey, dict);
   ec->disk_appearance_time = getProperty(CFSTR(kDAAppearanceTime_), dict);
+  if (ec->path.find("IOService:/") == 0) {
+    ec->path = ec->device;
+  }
 
   EventFactory::fire<DiskArbitrationEventPublisher>(ec);
 }
 
 std::string DiskArbitrationEventPublisher::getProperty(
-    const CFStringRef &property, const CFDictionaryRef &dict) {
+    const CFStringRef& property, const CFDictionaryRef& dict) {
   CFTypeRef value = (CFTypeRef)CFDictionaryGetValue(dict, property);
   if (value == nullptr) {
     return "";

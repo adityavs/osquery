@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -140,10 +140,10 @@ QueryData genKnownWifiNetworks(QueryContext& context) {
     }
   } else if (CFGetTypeID(networks) == CFDictionaryGetTypeID()) {
     auto count = CFDictionaryGetCount((CFDictionaryRef)networks);
-    const void* keys[count];
-    const void* values[count];
-    CFDictionaryGetKeysAndValues((CFDictionaryRef)networks, keys, values);
-
+    std::vector<const void *> keys(count);
+    std::vector<const void *> values(count);
+    CFDictionaryGetKeysAndValues((CFDictionaryRef)networks, keys.data(),
+                                 values.data());
     for (CFIndex i = 0; i < count; i++) {
       parseNetworks((CFDictionaryRef)values[i], results);
     }

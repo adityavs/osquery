@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sstream>
@@ -68,9 +68,9 @@ Status parseKeychainItemACLEntry(SecACLRef acl,
   OSStatus os_status;
 
   uint32 acl_tag_size = 64;
-  CSSM_ACL_AUTHORIZATION_TAG tags[acl_tag_size];
+  std::vector<CSSM_ACL_AUTHORIZATION_TAG> tags(acl_tag_size);
   OSQUERY_USE_DEPRECATED(
-      os_status = SecACLGetAuthorizations(acl, tags, &acl_tag_size););
+      os_status = SecACLGetAuthorizations(acl, tags.data(), &acl_tag_size));
   if (os_status != noErr) {
     return Status(os_status, "Could not get ACL authorizations");
   }
@@ -81,13 +81,12 @@ Status parseKeychainItemACLEntry(SecACLRef acl,
       acl_data.authorizations.push_back(kACLAuthorizationTags.at(tag));
     }
   }
-
   CFStringRef description = nullptr;
   CSSM_ACL_KEYCHAIN_PROMPT_SELECTOR prompt_selector = {};
   CFArrayRef application_list = nullptr;
   OSQUERY_USE_DEPRECATED(
       os_status = SecACLCopySimpleContents(
-          acl, &application_list, &description, &prompt_selector););
+          acl, &application_list, &description, &prompt_selector));
   if (os_status != noErr) {
     return Status(os_status, "Could not copy ACL content");
   }
@@ -204,7 +203,8 @@ Status genKeychainACLAppsForEntry(SecKeychainRef keychain,
   case kSecGenericPasswordItemClass:
     item_id = CSSM_DL_DB_RECORD_GENERIC_PASSWORD;
     break;
-  case 'ashp':
+  // ashp case
+  case 0x61736870:
     item_id = CSSM_DL_DB_RECORD_APPLESHARE_PASSWORD;
     break;
   default:
@@ -282,7 +282,7 @@ Status genKeychainACLApps(const std::string& path, QueryData& results) {
   SecKeychainSearchRef search = nullptr;
   OSQUERY_USE_DEPRECATED(
       os_status = SecKeychainSearchCreateFromAttributes(
-          keychain, (SecItemClass)CSSM_DL_DB_RECORD_ANY, nullptr, &search););
+          keychain, (SecItemClass)CSSM_DL_DB_RECORD_ANY, nullptr, &search));
   if (os_status != noErr || search == nullptr) {
     if (search != nullptr) {
       CFRelease(search);

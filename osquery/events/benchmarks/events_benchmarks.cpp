@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <benchmark/benchmark.h>
@@ -13,6 +13,8 @@
 #include <osquery/config.h>
 #include <osquery/events.h>
 #include <osquery/tables.h>
+
+#include "osquery/tests/test_util.h"
 
 namespace osquery {
 
@@ -28,6 +30,8 @@ class BenchmarkEventPublisher
 };
 
 static void EVENTS_register(benchmark::State& state) {
+  RegistryFactory::get().setActive("database", "rocksdb");
+
   while (state.KeepRunning()) {
     auto pub = std::make_shared<BenchmarkEventPublisher>();
     auto type = pub->type();
@@ -42,9 +46,13 @@ BENCHMARK(EVENTS_register);
 class BenchmarkEventSubscriber
     : public EventSubscriber<BenchmarkEventPublisher> {
  public:
-  BenchmarkEventSubscriber() { setName("benchmark"); }
+  BenchmarkEventSubscriber() {
+    setName("benchmark");
+  }
 
-  Status Callback(const ECRef& ec, const SCRef& sc) { return Status(0, "OK"); }
+  Status Callback(const ECRef& ec, const SCRef& sc) {
+    return Status(0, "OK");
+  }
 
   void benchmarkInit() {
     auto sub_ctx = createSubscriptionContext();
@@ -67,12 +75,23 @@ class BenchmarkEventSubscriber
     expire_time_ = et;
   }
 
-  void benchmarkGet(int low, int high) { auto results = get(low, high); }
+  void benchmarkGet(int low, int high) {
+    RowGenerator::pull_type generator(std::bind(
+        &EventSubscriberPlugin::get, this, std::placeholders::_1, low, high));
+    if (!generator) {
+      return;
+    }
+
+    while (generator) {
+      generator.get();
+      generator();
+    }
+  }
 };
 
 static void EVENTS_subscribe_fire(benchmark::State& state) {
   // Setup the event config parser plugin.
-  auto plugin = Config::getInstance().getParser("events");
+  auto plugin = Config::get().getParser("events");
   plugin->setUp();
 
   // Register a publisher.
@@ -117,20 +136,57 @@ BENCHMARK(EVENTS_add_events);
 static void EVENTS_retrieve_events(benchmark::State& state) {
   auto sub = std::make_shared<BenchmarkEventSubscriber>();
 
-  for (int i = 0; i < 1000; i++) {
+  for (int i = 0; i < state.range(1); i++) {
     sub->benchmarkAdd(i++);
   }
 
   while (state.KeepRunning()) {
-    sub->benchmarkGet(state.range_x(), state.range_y());
+    sub->benchmarkGet(state.range(0), state.range(1));
   }
 
   sub->clearRows();
 }
 
 BENCHMARK(EVENTS_retrieve_events)
-    ->ArgPair(0, 10)
-    ->ArgPair(0, 50)
     ->ArgPair(0, 100)
-    ->ArgPair(0, 1000);
+    ->ArgPair(0, 1000)
+    ->ArgPair(0, 10000);
+
+static void EVENTS_gentable(benchmark::State& state) {
+  auto sub = std::make_shared<BenchmarkEventSubscriber>();
+
+  for (int i = 0; i < state.range(1); i++) {
+    sub->benchmarkAdd(i++);
+  }
+
+  while (state.KeepRunning()) {
+    genRows(sub.get());
+  }
+
+  sub->clearRows();
+}
+
+BENCHMARK(EVENTS_gentable)
+    ->ArgPair(0, 100)
+    ->ArgPair(0, 1000)
+    ->ArgPair(0, 10000);
+
+static void EVENTS_add_and_gentable(benchmark::State& state) {
+  auto sub = std::make_shared<BenchmarkEventSubscriber>();
+
+  while (state.KeepRunning()) {
+    for (int i = 0; i < state.range(1); i++) {
+      sub->benchmarkAdd(i++);
+    }
+
+    genRows(sub.get());
+  }
+
+  sub->clearRows();
+}
+
+BENCHMARK(EVENTS_add_and_gentable)
+    ->ArgPair(0, 100)
+    ->ArgPair(0, 1000)
+    ->ArgPair(0, 10000);
 }

@@ -3,9 +3,10 @@
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under the BSD-style license found in the
-#  LICENSE file in the root directory of this source tree. An additional grant
-#  of patent rights can be found in the PATENTS file in the same directory.
+#  This source code is licensed under both the Apache 2.0 license (found in the
+#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+#  in the COPYING file in the root directory of this source tree).
+#  You may select, at your option, one of the above-listed licenses.
 
 from __future__ import absolute_import
 from __future__ import division
@@ -31,6 +32,9 @@ class ExampleQueryTests(test_base.QueryTester):
 
     @test_base.flaky
     def test_platform_specific_queries(self):
+        posix = ["darwin", "linux"]
+        if utils.platform() in posix:
+            self._execute_set(PLATFORM_EXAMPLES["posix"])
         self._execute_set(PLATFORM_EXAMPLES[utils.platform()])
 
     @test_base.flaky
@@ -50,7 +54,12 @@ if __name__ == '__main__':
     for category in API:
         PLATFORM_EXAMPLES[category["key"]] = []
         for table in category["tables"]:
-            PLATFORM_EXAMPLES[category["key"]] += table["examples"]
+            if len(table["examples"]) > 0:
+                PLATFORM_EXAMPLES[category["key"]] += table["examples"]
+            else:
+                PLATFORM_EXAMPLES[category["key"]] += [
+                    "select * from %s limit 1" % table["name"]
+                ]
 
     module = test_base.Tester()
 

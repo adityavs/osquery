@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <sstream>
@@ -39,7 +39,6 @@ namespace errc = boost::system::errc;
 namespace osquery {
 
 FLAG(uint64, read_max, 50 * 1024 * 1024, "Maximum file read size");
-FLAG(uint64, read_user_max, 10 * 1024 * 1024, "Maximum non-su read size");
 
 /// See reference #1382 for reasons why someone would allow unsafe.
 HIDDEN_FLAG(bool, allow_unsafe, false, "Allow unsafe executable permissions");
@@ -55,7 +54,7 @@ Status writeTextFile(const fs::path& path,
                      bool force_permissions) {
   // Open the file with the request permissions.
   PlatformFile output_fd(
-      path.string(), PF_OPEN_ALWAYS | PF_WRITE | PF_APPEND, permissions);
+      path, PF_OPEN_ALWAYS | PF_WRITE | PF_APPEND, permissions);
   if (!output_fd.isValid()) {
     return Status(1, "Could not create file: " + path.string());
   }
@@ -84,7 +83,7 @@ struct OpenReadableFile : private boost::noncopyable {
     }
 
     // Open the file descriptor and allow caller to perform error checking.
-    fd.reset(new PlatformFile(path.string(), mode));
+    fd.reset(new PlatformFile(path, mode));
   }
 
  public:
@@ -109,20 +108,25 @@ Status readFile(const fs::path& path,
   }
 
   // Apply the max byte-read based on file/link target ownership.
-  off_t read_max =
-      static_cast<off_t>((handle.fd->isOwnerRoot().ok())
-                             ? FLAGS_read_max
-                             : std::min(FLAGS_read_max, FLAGS_read_user_max));
+  auto read_max = static_cast<off_t>(FLAGS_read_max);
   if (file_size > read_max) {
-    VLOG(1) << "Cannot read " << path << " size exceeds limit: " << file_size
-            << " > " << read_max;
+    if (!dry_run) {
+      LOG(WARNING) << "Cannot read file that exceeds size limit: "
+                   << path.string();
+      VLOG(1) << "Cannot read " << path.string()
+              << " size exceeds limit: " << file_size << " > " << read_max;
+    }
     return Status(1, "File exceeds read limits");
   }
 
   if (dry_run) {
     // The caller is only interested in performing file read checks.
     boost::system::error_code ec;
-    return Status(0, fs::canonical(path, ec).string());
+    try {
+      return Status(0, fs::canonical(path, ec).string());
+    } catch (const boost::filesystem::filesystem_error& err) {
+      return Status(1, err.what());
+    }
   }
 
   PlatformTime times;
@@ -200,26 +204,32 @@ Status forensicReadFile(const fs::path& path,
   return readFile(path, content, 0, false, true, blocking);
 }
 
-Status isWritable(const fs::path& path) {
+Status isWritable(const fs::path& path, bool effective) {
   auto path_exists = pathExists(path);
   if (!path_exists.ok()) {
     return path_exists;
   }
 
-  if (platformAccess(path.string(), W_OK) == 0) {
+  if (effective) {
+    PlatformFile fd(path, PF_OPEN_EXISTING | PF_WRITE);
+    return Status(fd.isValid() ? 0 : 1);
+  } else if (platformAccess(path.string(), W_OK) == 0) {
     return Status(0, "OK");
   }
 
   return Status(1, "Path is not writable: " + path.string());
 }
 
-Status isReadable(const fs::path& path) {
+Status isReadable(const fs::path& path, bool effective) {
   auto path_exists = pathExists(path);
   if (!path_exists.ok()) {
     return path_exists;
   }
 
-  if (platformAccess(path.string(), R_OK) == 0) {
+  if (effective) {
+    PlatformFile fd(path, PF_OPEN_EXISTING | PF_READ);
+    return Status(fd.isValid() ? 0 : 1);
+  } else if (platformAccess(path.string(), R_OK) == 0) {
     return Status(0, "OK");
   }
 
@@ -239,9 +249,51 @@ Status pathExists(const fs::path& path) {
   return Status(0, "1");
 }
 
-Status remove(const fs::path& path) {
-  auto status_code = std::remove(path.string().c_str());
-  return Status(status_code, "N/A");
+Status movePath(const fs::path& from, const fs::path& to) {
+  boost::system::error_code ec;
+  if (from.empty() || to.empty()) {
+    return Status(1, "Cannot copy empty paths");
+  }
+
+  fs::rename(from, to, ec);
+  if (ec.value() != errc::success) {
+    return Status(1, ec.message());
+  }
+  return Status(0);
+}
+
+Status removePath(const fs::path& path) {
+  boost::system::error_code ec;
+  auto removed_files = fs::remove_all(path, ec);
+  if (ec.value() != errc::success) {
+    return Status(1, ec.message());
+  }
+  return Status(0, std::to_string(removed_files));
+}
+
+static bool checkForLoops(std::set<int>& dsym_inos, std::string path) {
+  if (path.empty() || path.back() != '/') {
+    return false;
+  }
+
+  path.pop_back();
+  struct stat d_stat;
+  // On Windows systems (lstat not implemented) this immiedately returns
+  if (!platformLstat(path, d_stat).ok()) {
+    return false;
+  }
+
+  if ((d_stat.st_mode & 0170000) == 0) {
+    return false;
+  }
+
+  if (dsym_inos.find(d_stat.st_ino) == dsym_inos.end()) {
+    dsym_inos.insert(d_stat.st_ino);
+  } else {
+    LOG(WARNING) << "Symlink loop detected possibly involving: " << path;
+    return true;
+  }
+  return false;
 }
 
 static void genGlobs(std::string path,
@@ -249,14 +301,19 @@ static void genGlobs(std::string path,
                      GlobLimits limits) {
   // Use our helped escape/replace for wildcards.
   replaceGlobWildcards(path, limits);
+  // inodes of directory symlinks for loop detection
+  std::set<int> dsym_inos;
 
   // Generate a glob set and recurse for double star.
-  size_t glob_index = 0;
-  while (++glob_index < kMaxRecursiveGlobs) {
+  for (size_t glob_index = 0; ++glob_index < kMaxRecursiveGlobs;) {
     auto glob_results = platformGlob(path);
 
-    for (auto const& result_path : glob_results) {
+    for (auto& result_path : glob_results) {
       results.push_back(result_path);
+
+      if (checkForLoops(dsym_inos, result_path)) {
+        glob_index = kMaxRecursiveGlobs;
+      }
     }
 
     // The end state is a non-recursive ending or empty set of matches.
@@ -266,6 +323,7 @@ static void genGlobs(std::string path,
         wild < path.size() - 3) {
       break;
     }
+
     path += "/**";
   }
 
@@ -296,7 +354,7 @@ Status resolveFilePattern(const fs::path& fs_path,
 
 inline void replaceGlobWildcards(std::string& pattern, GlobLimits limits) {
   // Replace SQL-wildcard '%' with globbing wildcard '*'.
-  if (pattern.find("%") != std::string::npos) {
+  if (pattern.find('%') != std::string::npos) {
     boost::replace_all(pattern, "%", "*");
   }
 
@@ -305,8 +363,12 @@ inline void replaceGlobWildcards(std::string& pattern, GlobLimits limits) {
                                (pattern.size() > 3 && pattern[1] != ':' &&
                                 pattern[2] != '\\' && pattern[2] != '/'))) &&
       pattern[0] != '~') {
-    boost::system::error_code ec;
-    pattern = (fs::current_path(ec) / pattern).make_preferred().string();
+    try {
+      boost::system::error_code ec;
+      pattern = (fs::current_path(ec) / pattern).make_preferred().string();
+    } catch (const fs::filesystem_error& /* e */) {
+      // There is a bug in versions of current_path that still throw.
+    }
   }
 
   auto base =
@@ -390,8 +452,8 @@ std::set<fs::path> getHomeDirectories() {
   return results;
 }
 
-bool safePermissions(const std::string& dir,
-                     const std::string& path,
+bool safePermissions(const fs::path& dir,
+                     const fs::path& path,
                      bool executable) {
   if (!platformIsFileAccessible(path).ok()) {
     // Path was not real, had too may links, or could not be accessed.
@@ -426,7 +488,7 @@ bool safePermissions(const std::string& dir,
     return false;
   }
 
-  if (fd.isOwnerCurrentUser().ok() || fd.isOwnerRoot().ok()) {
+  if (fd.isOwnerRoot().ok() || fd.isOwnerCurrentUser().ok()) {
     result = fd.isExecutable();
 
     // Otherwise, require matching or root file ownership.
@@ -500,4 +562,4 @@ Status parseJSONContent(const std::string& content, pt::ptree& tree) {
   }
   return Status(0, "OK");
 }
-}
+} // namespace osquery

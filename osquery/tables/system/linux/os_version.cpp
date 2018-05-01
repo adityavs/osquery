@@ -1,16 +1,17 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <map>
 #include <string>
 
+#include <boost/algorithm/string/find.hpp>
 #include <boost/algorithm/string/trim_all.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
@@ -40,14 +41,13 @@ const std::map<std::string, std::string> kOSReleaseColumns = {
     {"VERSION_ID", "_id"},
 };
 
-QueryData genOSRelease() {
+void genOSRelease(Row& r) {
   // This will parse /etc/os-version according to the systemd manual.
   std::string content;
   if (!readFile(kOSRelease, content).ok()) {
-    return {};
+    return;
   }
 
-  Row r;
   for (const auto& line : osquery::split(content, "\n")) {
     auto fields = osquery::split(line, "=", 1);
     if (fields.size() != 2) {
@@ -82,26 +82,36 @@ QueryData genOSRelease() {
     }
   }
 
-  return {r};
+  return;
 }
 
 QueryData genOSVersion(QueryContext& context) {
+  Row r;
+
+  // Set defaults if we cannot determine the version.
+  r["name"] = "Unknown";
+  r["major"] = "0";
+  r["minor"] = "0";
+  r["patch"] = "0";
+  r["platform"] = "posix";
+
   if (isReadable(kOSRelease)) {
     boost::system::error_code ec;
     // Funtoo has an empty os-release file.
     if (boost::filesystem::file_size(kOSRelease, ec) > 0) {
-      return genOSRelease();
+      genOSRelease(r);
     }
   }
 
-  Row r;
   std::string content;
   if (readFile(kRedhatRelease, content).ok()) {
+    r["platform"] = "rhel";
     r["platform_like"] = "rhel";
   } else if (readFile(kGentooRelease, content).ok()) {
+    r["platform"] = "gentoo";
     r["platform_like"] = "gentoo";
   } else {
-    return {};
+    return {r};
   }
 
   boost::algorithm::trim_all(content);
@@ -126,7 +136,16 @@ QueryData genOSVersion(QueryContext& context) {
 
   // No build name.
   r["build"] = "";
+
+  if (r["platform"] == "") {
+    // Try to detect CentOS from the name. CentOS6 does not have all of the
+    // keys we expect above that platform is typically extracted from.
+    if (!boost::algorithm::ifind_first(r["name"], "centos").empty()) {
+      r["platform"] = "centos";
+    }
+  }
+
   return {r};
 }
-}
-}
+} // namespace tables
+} // namespace osquery

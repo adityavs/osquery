@@ -1,11 +1,11 @@
-/*
+/**
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under the BSD-style license found in the
- *  LICENSE file in the root directory of this source tree. An additional grant
- *  of patent rights can be found in the PATENTS file in the same directory.
- *
+ *  This source code is licensed under both the Apache 2.0 license (found in the
+ *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
+ *  in the COPYING file in the root directory of this source tree).
+ *  You may select, at your option, one of the above-listed licenses.
  */
 
 #include <iomanip>
@@ -18,7 +18,7 @@
 
 #include <osquery/tables.h>
 
-#include "osquery/events/darwin/iokit.h"
+#include "osquery/core/darwin/iokit.hpp"
 #include "osquery/tables/system/smbios_utils.h"
 
 namespace osquery {
@@ -133,11 +133,15 @@ QueryData genPlatformInfo(QueryContext& context) {
 
   {
     auto address = getIOKitProperty(details, "fv-main-address");
-    auto value = boost::lexical_cast<size_t>(address);
+    if (!address.empty()) {
+      auto value = boost::lexical_cast<size_t>(address);
 
-    std::stringstream hex_id;
-    hex_id << std::hex << std::setw(8) << std::setfill('0') << value;
-    r["address"] = "0x" + hex_id.str();
+      std::stringstream hex_id;
+      hex_id << std::hex << std::setw(8) << std::setfill('0') << value;
+      r["address"] = "0x" + hex_id.str();
+    } else {
+      r["address"] = "0x0";
+    }
   }
 
   {
@@ -146,14 +150,14 @@ QueryData genPlatformInfo(QueryContext& context) {
     std::vector<std::string> info_lines;
     iter_split(info_lines, info, boost::algorithm::first_finder("%0a"));
     for (const auto& line : info_lines) {
-      std::vector<std::string> details;
-      iter_split(details, line, boost::algorithm::first_finder(": "));
-      if (details.size() > 1) {
-        boost::trim(details[1]);
-        if (details[0].find("Revision") != std::string::npos) {
-          r["revision"] = details[1];
+      std::vector<std::string> details_vec;
+      iter_split(details_vec, line, boost::algorithm::first_finder(": "));
+      if (details_vec.size() > 1) {
+        boost::trim(details_vec[1]);
+        if (details_vec[0].find("Revision") != std::string::npos) {
+          r["revision"] = details_vec[1];
         }
-        extra_items.push_back(details[1]);
+        extra_items.push_back(details_vec[1]);
       }
     }
     r["extra"] = osquery::join(extra_items, "; ");
