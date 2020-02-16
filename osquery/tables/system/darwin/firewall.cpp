@@ -2,18 +2,16 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/sql.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tables/system/darwin/firewall.h"
+#include <osquery/tables/system/darwin/firewall.h>
+#include <osquery/utils/darwin/plist.h>
 
 namespace pt = boost::property_tree;
 
@@ -97,12 +95,17 @@ QueryData parseALFExceptionsTree(const pt::ptree& tree) {
     if (it.second.get("alias", "").length() > 0) {
       std::string path;
       auto alias_data = it.second.get<std::string>("alias", "");
+      auto status = pathFromNestedPlistAliasData(alias_data, path);
 
-      if (pathFromPlistAliasData(alias_data, path).ok()) {
-        r["path"] = path;
-        r["state"] = INTEGER(it.second.get("state", -1));
-        results.push_back(r);
+      if (!status.ok()) {
+        TLOG << "Could not parse nested plist for applications: "
+             << status.getMessage();
+        continue;
       }
+
+      r["path"] = path;
+      r["state"] = INTEGER(it.second.get("state", -1));
+      results.push_back(r);
     }
   }
 
@@ -142,31 +145,5 @@ QueryData genALFExplicitAuths(QueryContext& context) {
   }
   return parseALFExplicitAuthsTree(tree);
 }
-
-QueryData parseALFServicesTree(const pt::ptree& tree) {
-  QueryData results;
-  if (tree.count("firewall") == 0) {
-    return {};
-  }
-
-  auto& firewall_tree = tree.get_child("firewall");
-  for (const auto& it : firewall_tree) {
-    Row r;
-    r["service"] = it.first;
-    r["process"] = it.second.get("proc", "");
-    r["state"] = INTEGER(it.second.get("state", -1));
-    results.push_back(r);
-  }
-  return results;
-}
-
-QueryData genALFServices(QueryContext& context) {
-  pt::ptree tree;
-  auto s = genALFTreeFromFilesystem(tree);
-  if (!s.ok()) {
-    return {};
-  }
-  return parseALFServicesTree(tree);
-}
-}
-}
+} // namespace tables
+} // namespace osquery

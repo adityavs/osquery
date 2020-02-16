@@ -1,10 +1,8 @@
+# We provide this Vagrantfile as a convenience. It is not officially
+# supported.  If adding boxes, please limit sources to well-known
+# organizations, not individual authors.
+
 targets = {
-  "win10" => {
-    "box" => "inclusivedesign/windows10-eval"
-  },
-  "macos10.12" => {
-    "box" => "jhcook/macos-sierra"
-  },
   "debian7" => {
     "box" => "bento/debian-7"
   },
@@ -33,7 +31,10 @@ targets = {
     "box" => "bento/ubuntu-16.10"
   },
   "ubuntu17.04" => {
-    "box" => "bento/ubuntu17.04"
+    "box" => "bento/ubuntu-17.04"
+  },
+  "ubuntu18.04" => {
+    "box" => "ubuntu/bionic64"
   },
   "ubuntu12" => {
     "box" => "ubuntu/precise64"
@@ -60,7 +61,7 @@ targets = {
     "box" => "elastic/sles-12-x86_64"
   },
   "aws-amazon2015.03" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-1ecae776",
       "us-west-1" => "ami-d114f295",
@@ -69,7 +70,7 @@ targets = {
     "username" => "ec2-user"
   },
   "aws-rhel7.1" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-12663b7a",
       "us-west-1" => "ami-a540a5e1",
@@ -78,7 +79,7 @@ targets = {
     "username" => "ec2-user"
   },
   "aws-rhel6.5" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-1643ff7e",
       "us-west-1" => "ami-2b171d6e",
@@ -87,7 +88,7 @@ targets = {
     "username" => "ec2-user"
   },
   "aws-ubuntu10" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-1e6f6176",
       "us-west-1" => "ami-250fe361",
@@ -96,7 +97,7 @@ targets = {
     "username" => "ubuntu"
   },
   "aws-oracle6.6" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-20e4b748",
       "us-west-1" => "ami-f3d83db7",
@@ -105,7 +106,7 @@ targets = {
     "username" => "ec2-user"
   },
   "aws-oracle5.11" => {
-    "box" => "andytson/aws-dummy",
+    "box" => "osquery/aws-dummy",
     "regions" => {
       "us-east-1" => "ami-0ecd7766",
       "us-west-1" => "ami-4b00150e",
@@ -122,9 +123,24 @@ Vagrant.configure("2") do |config|
     else
       v.cpus = 2
     end
-    v.memory = 4096
+    if ENV['OSQUERY_BUILD_MEMORY']
+      v.memory = ENV['OSQUERY_BUILD_MEMORY'].to_i
+    else
+      v.memory = 4096
+    end
   end
-
+  config.vm.provider "vmware_desktop" do |v|
+    if ENV['OSQUERY_BUILD_CPUS']
+      v.cpus = ENV['OSQUERY_BUILD_CPUS'].to_i
+    else
+      v.cpus = 2
+    end
+    if ENV['OSQUERY_BUILD_MEMORY']
+      v.memory = ENV['OSQUERY_BUILD_MEMORY'].to_i
+    else
+      v.memory = 4096
+    end
+  end
   config.vm.provider :aws do |aws, override|
     # Required. Credentials for AWS API.
     aws.access_key_id = ENV['AWS_ACCESS_KEY_ID']
@@ -163,7 +179,7 @@ Vagrant.configure("2") do |config|
       build.vm.box = box
       if name.start_with?('aws-')
         build.vm.provider :aws do |aws, override|
-          if aws.subnet_id != nil
+          if aws.subnet_id != Vagrant::Plugin::V2::Config::UNSET_VALUE
             aws.associate_public_ip = true
           end
           aws.ami = target['regions'][targets["active_region"]]
@@ -180,18 +196,16 @@ Vagrant.configure("2") do |config|
           rsync__exclude: [
             "build",
             ".git/objects",
-            ".git/modules/third-party/objects"
           ]
       end
 
-      if name == 'macos10.12'
+      if name.start_with?('macos')
         config.vm.provision "shell",
           inline: "dseditgroup -o read vagrant || dseditgroup -o create vagrant"
         build.vm.synced_folder ".", "/vagrant", group: "staff", type: "rsync",
           rsync__exclude: [
             "build",
             ".git/objects",
-            ".git/modules/third-party/objects"
           ]
       end
 
@@ -208,7 +222,6 @@ Vagrant.configure("2") do |config|
           rsync__exclude: [
             "build",
             ".git/objects",
-            ".git/modules/third-party/objects"
           ]
         build.vm.provision 'shell',
           inline:

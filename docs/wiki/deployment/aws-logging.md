@@ -15,17 +15,23 @@ Some configuration is shared between the two plugins:
 --aws_sts_region VALUE                  AWS STS assume role region
 --aws_sts_session_name VALUE            AWS STS session name
 --aws_sts_timeout VALUE                 AWS STS temporary credential timeout period in seconds (900-3600)
+--aws_enable_proxy VALUE                Enable proxying of HTTP/HTTPS requests in AWS client config (true or false)
+--aws_proxy_scheme VALUE                Proxy HTTP scheme for use in AWS client config (http or https)
+--aws_proxy_host VALUE                  Proxy host for use in AWS client config
+--aws_proxy_port VALUE                  Proxy port for use in AWS client config
+--aws_proxy_username VALUE              Proxy username for use in AWS client config
+--aws_proxy_password VALUE              Proxy password for use in AWS client config
 ```
 
 When working with AWS, osquery will look for credentials and region configuration in the following order:
 
 1. Configuration flags
-2. Profile from the [AWS config files](http://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html#cli-config-files) (only if `--aws_profile_name` is specified)
+2. Profile from the [AWS config files](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-configure.html#cli-config-files) (only if `--aws_profile_name` is specified)
 3. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
 4. `default` profile in the AWS config files
 5. Profile from the EC2 Instance Metadata Service
 
-All of the STS configuration flags are optional.  However, if `aws_sts_arn_role` is set, you can utilize temporary credentials via assume role with the [AWS Security Token Service](http://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html).
+All of the STS configuration flags are optional.  However, if `aws_sts_arn_role` is set, you can utilize temporary credentials via assume role with the [AWS Security Token Service](https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRole.html).
 
 ### Kinesis Streams
 

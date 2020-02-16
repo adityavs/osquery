@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -17,9 +15,14 @@
 
 #include <sqlite3.h>
 
+#include <boost/filesystem.hpp>
 #include <boost/noncopyable.hpp>
 
 #include <osquery/sql.h>
+
+#include <osquery/utils/mutex.h>
+
+#include <gtest/gtest_prod.h>
 
 #define SQLITE_SOFT_HEAP_LIMIT (5 * 1024 * 1024)
 
@@ -63,13 +66,13 @@ class SQLiteDBInstance : private boost::noncopyable {
   }
 
   /// Allow a virtual table implementation to record use/access of a table.
-  void addAffectedTable(VirtualTableContent* table);
+  void addAffectedTable(std::shared_ptr<VirtualTableContent> table);
 
   /// Clear per-query state of a table affected by the use of this instance.
   void clearAffectedTables();
 
   /// Check if a virtual table had been called already.
-  bool tableCalled(VirtualTableContent* table);
+  bool tableCalled(VirtualTableContent const& table);
 
   /// Request that virtual tables use a warm cache for their results.
   void useCache(bool use_cache);
@@ -123,7 +126,7 @@ class SQLiteDBInstance : private boost::noncopyable {
   static RecursiveMutex kPrimaryAttachMutex;
 
   /// Vector of tables that need their constraints cleared after execution.
-  std::map<std::string, VirtualTableContent*> affected_tables_;
+  std::map<std::string, std::shared_ptr<VirtualTableContent>> affected_tables_;
 
  private:
   friend class SQLiteDBManager;
@@ -185,8 +188,9 @@ class SQLiteDBManager : private boost::noncopyable {
   /**
    * @brief Check if `table_name` is disabled.
    *
-   * Check if `table_name` is in the list of tables passed in to the
-   * `--disable_tables` flag.
+   * `table_name` is disabled if it's in the list of tables passed in to the
+   * `--disable_tables` flag or if the `--enable_tables` flag is set and
+   * `table_name` is not specified.
    *
    * @param The name of the Table to check.
    * @return If `table_name` is disabled.
@@ -217,8 +221,14 @@ class SQLiteDBManager : private boost::noncopyable {
   /// Member variable to hold set of disabled tables.
   std::unordered_set<std::string> disabled_tables_;
 
+  /// Member variable to hold set of enabled tables.
+  std::unordered_set<std::string> enabled_tables_;
+
   /// Parse a comma-delimited set of tables names, passed in as a flag.
   void setDisabledTables(const std::string& s);
+
+  /// Parse a comma-delimited set of tables names, passed in as a flag.
+  void setEnabledTables(const std::string& s);
 
   /// Request a connection, optionally request the primary connection.
   static SQLiteDBInstanceRef getConnection(bool primary = false);
@@ -307,6 +317,23 @@ extern const std::map<std::string, QueryPlanner::Opcode> kSQLOpcodes;
  * useful for testing.
  *
  * @param q the query to execute
+ * @param results The QueryDataTyped vector to emit rows on query success.
+ * @param db the SQLite3 database to execute query q against
+ *
+ * @return A status indicating SQL query results.
+ */
+Status queryInternal(const std::string& q,
+                     QueryDataTyped& results,
+                     const SQLiteDBInstanceRef& instance);
+
+/**
+ * @brief SQLite Internal: Execute a query on a specific database
+ *
+ * If you need to use a different database, other than the osquery default,
+ * use this method and pass along a pointer to a SQLite3 database. This is
+ * useful for testing.
+ *
+ * @param q the query to execute
  * @param results The QueryData struct to emit row on query success.
  * @param db the SQLite3 database to execute query q against
  *
@@ -336,9 +363,10 @@ Status getQueryColumnsInternal(const std::string& q,
                                const SQLiteDBInstanceRef& instance);
 
 /**
- * @brief SQLInternal: SQL, but backed by internal calls.
+ * @brief SQLInternal: like SQL, but backed by internal calls, and deals
+ * with QueryDataTyped results.
  */
-class SQLInternal : public SQL {
+class SQLInternal : private only_movable {
  public:
   /**
    * @brief Instantiate an instance of the class with an internal query.
@@ -349,6 +377,15 @@ class SQLInternal : public SQL {
   explicit SQLInternal(const std::string& query, bool use_cache = false);
 
  public:
+  /**
+   * @brief Const accessor for the rows returned by the query.
+   *
+   * @return A QueryDataTyped object of the query results.
+   */
+  QueryDataTyped& rowsTyped();
+
+  const Status& getStatus() const;
+
   /**
    * @brief Check if the SQL query's results use event-based tables.
    *
@@ -362,7 +399,15 @@ class SQLInternal : public SQL {
    */
   bool eventBased() const;
 
+  /// ASCII escape the results of the query.
+  void escapeResults();
+
  private:
+  /// The internal member which holds the typed results of the query.
+  QueryDataTyped resultsTyped_;
+
+  /// The internal member which holds the status of the query.
+  Status status_;
   /// Before completing the execution, store a check for EVENT_BASED.
   bool event_based_{false};
 };
@@ -404,4 +449,34 @@ void registerOperationExtensions(sqlite3* db);
  * @brief Register encoding-related 'custom' functions.
  */
 void registerEncodingExtensions(sqlite3* db);
-}
+
+/**
+ * @brief Register filesystem-related 'custom' functions.
+ */
+void registerFilesystemExtensions(sqlite3* db);
+
+/**
+ * @brief Generate the data for auto-constructed sqlite tables
+ *
+ * When auto-constructed sqlite tables are queried, this function
+ * generated the resulting QueryData
+ *
+ * @param sqlite_db Path to the sqlite_db
+ * @param sqlite_query The query you want to run against the SQLite database
+ * @param columns The columns that you want out of the sqlite query results
+ * @param results The TableRows data structure that will hold the returned rows
+ */
+Status genTableRowsForSqliteTable(const boost::filesystem::path& sqlite_db,
+                                  const std::string& sqlite_query,
+                                  TableRows& results,
+                                  bool respect_locking = true);
+
+/**
+ * @brief Detect journal_mode of d SQLite database file
+ *
+ * Returns a Status, if successful contains the journal mode as message
+ *
+ * @param sqlite_db Path to the sqlite_db
+ */
+Status getSqliteJournalMode(const boost::filesystem::path& sqlite_db);
+} // namespace osquery

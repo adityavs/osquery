@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iomanip>
@@ -25,11 +23,10 @@
 #include <osquery/core.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
+#include <osquery/tables/networking/posix/utils.h>
 
 // Include belongs here to fix build on older fbsds.
 #include <net/route.h>
-
-#include "osquery/tables/networking/utils.h"
 
 namespace osquery {
 namespace tables {
@@ -81,6 +78,7 @@ Status genRoute(const struct rt_msghdr* route,
                 Row& r) {
   r["flags"] = INTEGER(route->rtm_flags);
   r["mtu"] = INTEGER(route->rtm_rmx.rmx_mtu);
+  r["hopcount"] = INTEGER(route->rtm_rmx.rmx_hopcount);
 
   if ((route->rtm_addrs & RTA_DST) == RTA_DST) {
     r["destination"] = ipAsString(addr_map[RTAX_DST]);
@@ -106,7 +104,7 @@ Status genRoute(const struct rt_msghdr* route,
   // Fields not supported by OSX routes:
   r["source"] = "";
   r["metric"] = "0";
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status genArp(const struct rt_msghdr* route,
@@ -133,7 +131,7 @@ Status genArp(const struct rt_msghdr* route,
     r["permanent"] = "0";
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 void genRouteTableType(RouteType type, InterfaceMap ifmap, QueryData& results) {

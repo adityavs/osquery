@@ -1,29 +1,22 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+#  This source code is licensed in accordance with the terms specified in
+#  the LICENSE file found in the root directory of this source tree.
 
 import argparse
 import ast
+import fnmatch
 import jinja2
 import logging
 import os
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(SCRIPT_DIR + "/../tests")
 
-from utils import platform
+from osquery_tests.tools.tests import utils
 
 # the log format for the logging module
 LOG_FORMAT = "%(levelname)s [Line %(lineno)d]: %(message)s"
@@ -35,7 +28,7 @@ TEMPLATES = {}
 RESERVED = ["n", "index"]
 
 # Set the platform in osquery-language
-PLATFORM = platform()
+PLATFORM = utils.platform()
 
 # Supported SQL types for spec
 class DataType(object):
@@ -86,7 +79,7 @@ TABLE_ATTRIBUTES = {
     "user_data": "USER_BASED",
     "cacheable": "CACHEABLE",
     "utility": "UTILITY",
-    "kernel_required": "KERNEL_REQUIRED",
+    "kernel_required": "KERNEL_REQUIRED", # Deprecated
 }
 
 
@@ -115,6 +108,10 @@ def to_camel_case(snake_case):
     components = snake_case.split('_')
     return components[0] + "".join(x.title() for x in components[1:])
 
+def to_upper_camel_case(snake_case):
+    """ convert a snake_case string to UpperCamelCase """
+    components = snake_case.split('_')
+    return "".join(x.title() for x in components)
 
 def lightred(msg):
     return "\033[1;31m %s \033[0m" % str(msg)
@@ -160,7 +157,8 @@ def setup_templates(templates_path):
         if not os.path.exists(templates_path):
             print("Cannot read templates path: %s" % (templates_path))
             exit(1)
-    for template in os.listdir(templates_path):
+    templates = (f for f in os.listdir(templates_path) if fnmatch.fnmatch(f, "*.in"))
+    for template in templates:
         template_name = template.split(".", 1)[0]
         with open(os.path.join(templates_path, template), "r") as fh:
             TEMPLATES[template_name] = fh.read().replace("\\\n", "")
@@ -203,6 +201,7 @@ class TableState(Singleton):
         self.fuzz_paths = []
         self.has_options = False
         self.has_column_aliases = False
+        self.strongly_typed_rows = False
         self.generator = False
 
     def columns(self):
@@ -235,6 +234,8 @@ class TableState(Singleton):
             self.has_options = True
         if "event_subscriber" in self.attributes:
             self.generator = True
+        if "strongly_typed_rows" in self.attributes:
+            self.strongly_typed_rows = True
         if "cacheable" in self.attributes:
             if self.generator:
                 print(lightred(
@@ -252,13 +253,6 @@ class TableState(Singleton):
                                     column.name, self.table_name))))
                 exit(1)
 
-        if "ADDITIONAL" in all_options and "INDEX" not in all_options:
-            if "no_pkey" not in self.attributes:
-                print(lightred(
-                    "Table cannot have 'additional' columns without an index: %s" %(
-                    path)))
-                exit(1)
-
         path_bits = path.split("/")
         for i in range(1, len(path_bits)):
             dir_path = ""
@@ -274,6 +268,7 @@ class TableState(Singleton):
         self.impl_content = jinja2.Template(TEMPLATES[template]).render(
             table_name=self.table_name,
             table_name_cc=to_camel_case(self.table_name),
+            table_name_ucc=to_upper_camel_case(self.table_name),
             schema=self.columns(),
             header=self.header,
             impl=self.impl,
@@ -285,6 +280,7 @@ class TableState(Singleton):
             has_options=self.has_options,
             has_column_aliases=self.has_column_aliases,
             generator=self.generator,
+            strongly_typed_rows=self.strongly_typed_rows,
             attribute_set=[TABLE_ATTRIBUTES[attr] for attr in self.attributes if attr in TABLE_ATTRIBUTES],
         )
 
@@ -395,7 +391,6 @@ def implementation(impl_string, generator=False):
     """
     define the path to the implementation file and the function which
     implements the virtual table. You should use the following format:
-
       # the path is "osquery/table/implementations/foo.cpp"
       # the function is "QueryData genFoo();"
       implementation("foo@genFoo")
@@ -435,7 +430,7 @@ def implementation(impl_string, generator=False):
             sys.exit(1)
 
 
-def main(argc, argv):
+def main():
     parser = argparse.ArgumentParser(
         "Generate C++ Table Plugin from specfile.")
     parser.add_argument(
@@ -444,6 +439,8 @@ def main(argc, argv):
     )
     parser.add_argument("--disable-blacklist", default=False,
         action="store_true")
+    parser.add_argument("--header", default=False, action="store_true",
+                        help="Generate the header file instead of cpp")
     parser.add_argument("--foreign", default=False, action="store_true",
         help="Generate a foreign table")
     parser.add_argument("--templates", default=SCRIPT_DIR + "/templates",
@@ -463,16 +460,20 @@ def main(argc, argv):
         # Adding a 3rd parameter will enable the blacklist
 
         setup_templates(args.templates)
-        with open(filename, "rU") as file_handle:
+        with open(filename, "r") as file_handle:
             tree = ast.parse(file_handle.read())
             exec(compile(tree, "<string>", "exec"))
             blacklisted = is_blacklisted(table.table_name, path=filename)
             if not args.disable_blacklist and blacklisted:
                 table.blacklist(output)
             else:
-                template_type = "default" if not args.foreign else "foreign"
+                if args.header:
+                    template_type = "typed_row"
+                elif args.foreign:
+                    template_type = "foreign"
+                else:
+                    template_type = "default"
                 table.generate(output, template=template_type)
 
 if __name__ == "__main__":
-    SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
-    main(len(sys.argv), sys.argv)
+    main()

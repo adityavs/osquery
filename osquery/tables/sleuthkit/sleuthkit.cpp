@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <map>
@@ -16,12 +14,11 @@
 
 #include <tsk/libtsk.h>
 
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/hashing/hashing.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tables/system/hash.h"
+#include <osquery/utils/conversions/tryto.h>
 
 namespace fs = boost::filesystem;
 
@@ -143,8 +140,7 @@ void DeviceHelper::inodes(
         predicate) {
   // Given a set of constraint inodes, convert each to an INUM.
   for (const auto& inode : inodes) {
-    long int inode_meta = 0;
-    safeStrtol(inode, 10, inode_meta);
+    long int inode_meta = tryTo<long int>(inode, 10).takeOr(0l);
     auto* file = new TskFsFile();
     if (file->open(fs, file, static_cast<TSK_INUM_T>(inode_meta)) == 0) {
       // Attempt to get the meta and filesystem name for the inode.
@@ -347,9 +343,9 @@ QueryData genDeviceHash(QueryContext& context) {
 
       dh.inodes(inodes,
                 fs,
-                ([&results, &address, &dev, &dh, &fs](const std::string& inode,
-                                                      TskFsFile* file,
-                                                      const std::string& path) {
+                ([&results, &address, &dev](const std::string& inode,
+                                            TskFsFile* file,
+                                            const std::string& path) {
                   Row r;
                   r["device"] = dev;
                   r["partition"] = address;
@@ -387,8 +383,8 @@ QueryData genDeviceFile(QueryContext& context) {
     // For each require device path, open a device helper that checks the
     // image, checks the volume, and allows partition iteration.
     DeviceHelper dh(dev);
-    dh.partitions(([&results, &dev, &dh, &parts, &inodes, &paths](
-        const TskVsPartInfo* part) {
+    dh.partitions(([&results, &dh, &parts, &inodes, &paths](
+                       const TskVsPartInfo* part) {
       // The table also requires a partition for searching.
       auto address = std::to_string(part->getAddr());
       if (address != *parts.begin()) {

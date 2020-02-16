@@ -2,15 +2,12 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#define _WIN32_DCOM
+#include <osquery/utils/system/system.h>
 
-#include <Windows.h>
 #include <Wtsapi32.h>
 #include <winsock2.h>
 
@@ -18,8 +15,10 @@
 #include <osquery/logger.h>
 #include <osquery/tables.h>
 
-#include "osquery/core/conversions.h"
-#include "osquery/filesystem/fileops.h"
+#include <osquery/filesystem/fileops.h>
+#include <osquery/process/windows/process_ops.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/windows/strings.h>
 
 const std::map<int, std::string> kSessionStates = {
     {WTSActive, "active"},
@@ -56,20 +55,20 @@ QueryData genLoggedInUsers(QueryContext& context) {
   for (size_t i = 0; i < count; i++) {
     Row r;
 
-    char* sessionInfo = nullptr;
-    unsigned long bytesRet = 0;
-    res = WTSQuerySessionInformation(WTS_CURRENT_SERVER_HANDLE,
-                                     pSessionInfo[i].SessionId,
-                                     WTSSessionInfo,
-                                     &sessionInfo,
-                                     &bytesRet);
+    LPWSTR sessionInfo = nullptr;
+    DWORD bytesRet = 0;
+    res = WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE,
+                                      pSessionInfo[i].SessionId,
+                                      WTSSessionInfo,
+                                      &sessionInfo,
+                                      &bytesRet);
     if (res == 0 || sessionInfo == nullptr) {
       VLOG(1) << "Error querying WTS session information (" << GetLastError()
               << ")";
       continue;
     }
-    auto wtsSession = (PWTSINFO)sessionInfo;
-    r["user"] = SQL_TEXT(wtsSession->UserName);
+    const auto wtsSession = reinterpret_cast<WTSINFOW*>(sessionInfo);
+    r["user"] = SQL_TEXT(wstringToString(wtsSession->UserName));
     r["type"] = SQL_TEXT(kSessionStates.at(pSessionInfo[i].State));
     r["tty"] = pSessionInfo[i].pSessionName == nullptr
                    ? ""
@@ -95,9 +94,11 @@ QueryData genLoggedInUsers(QueryContext& context) {
       VLOG(1) << "Error querying WTS session information (" << GetLastError()
               << ")";
       results.push_back(r);
+      WTSFreeMemory(sessionInfo);
       continue;
     }
-    auto wtsClient = (PWTSCLIENT)clientInfo;
+
+    auto wtsClient = reinterpret_cast<WTSCLIENTA*>(clientInfo);
     if (wtsClient->ClientAddressFamily == AF_INET) {
       r["host"] = std::to_string(wtsClient->ClientAddress[0]) + "." +
                   std::to_string(wtsClient->ClientAddress[1]) + "." +
@@ -105,28 +106,46 @@ QueryData genLoggedInUsers(QueryContext& context) {
                   std::to_string(wtsClient->ClientAddress[3]);
     } else if (wtsClient->ClientAddressFamily == AF_INET6) {
       // TODO: IPv6 addresses are given as an array of byte values.
-      r["host"] = SQL_TEXT(wtsClient->ClientAddress);
+      auto addr = reinterpret_cast<const char*>(wtsClient->ClientAddress);
+      r["host"] = std::string(addr, CLIENTADDRESS_LENGTH);
     }
 
     r["pid"] = INTEGER(-1);
-    results.push_back(r);
 
     if (clientInfo != nullptr) {
-      WTSFreeMemoryEx(WTSTypeSessionInfoLevel1, clientInfo, count);
+      WTSFreeMemory(clientInfo);
       clientInfo = nullptr;
+      wtsClient = nullptr;
     }
+
+    const auto sidBuf = getSidFromUsername(wtsSession->UserName);
+
     if (sessionInfo != nullptr) {
-      WTSFreeMemoryEx(WTSTypeSessionInfoLevel1, sessionInfo, count);
+      WTSFreeMemory(sessionInfo);
       sessionInfo = nullptr;
     }
+
+    if (sidBuf == nullptr) {
+      VLOG(1) << "Error converting username to SID";
+      results.push_back(r);
+      continue;
+    }
+
+    const auto sidStr = psidToString(reinterpret_cast<SID*>(sidBuf.get()));
+    r["sid"] = SQL_TEXT(sidStr);
+
+    const auto hivePath = "HKEY_USERS\\" + sidStr;
+    r["registry_hive"] = SQL_TEXT(hivePath);
+
+    results.push_back(r);
   }
 
   if (pSessionInfo != nullptr) {
-    WTSFreeMemoryEx(WTSTypeSessionInfoLevel1, pSessionInfo, count);
+    WTSFreeMemory(pSessionInfo);
     pSessionInfo = nullptr;
   }
 
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery

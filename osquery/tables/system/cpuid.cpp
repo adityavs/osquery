@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #ifdef WIN32
@@ -69,10 +67,16 @@ std::map<size_t, std::vector<FeatureDef>> kCPUFeatures{
      }},
     {0x80000001,
      {
+         FEATURE("lahfsahf", "ecx", 0),
          FEATURE("svm", "ecx", 2),
+         FEATURE("3dnowprefetch", "ecx", 8),
          FEATURE("ibs", "ecx", 10),
          FEATURE("skinit", "ecx", 12),
          FEATURE("lwp", "ecx", 15),
+
+         FEATURE("nx", "edx", 20),
+         FEATURE("page1gb", "edx", 26),
+         FEATURE("lm", "edx", 29),
      }}};
 
 static inline void cpuid(size_t eax, size_t ecx, int regs[4]) {
@@ -173,7 +177,7 @@ inline Status genStrings(QueryData& results) {
   r["input_eax"] = "1,3";
   results.push_back(r);
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 inline void genFamily(QueryData& results) {
@@ -229,7 +233,7 @@ QueryData genCPUID(QueryContext& context) {
       r["value"] = isBitSet(feature_bit, regs[feature_register]) ? "1" : "0";
       r["output_register"] = feature.second.first;
       r["output_bit"] = INTEGER(feature_bit);
-      r["input_eax"] = boost::lexical_cast<std::string>(eax);
+      r["input_eax"] = std::to_string(eax);
       results.push_back(r);
     }
   }

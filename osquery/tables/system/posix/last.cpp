@@ -2,14 +2,9 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
-
-#include <vector>
-#include <string>
 
 #include <utmpx.h>
 
@@ -18,6 +13,23 @@
 
 namespace osquery {
 namespace tables {
+
+namespace impl {
+
+void genLastAccessForRow(const utmpx& ut, QueryData& results) {
+  if (ut.ut_type == USER_PROCESS || ut.ut_type == DEAD_PROCESS) {
+    Row r;
+    r["username"] = TEXT(ut.ut_user);
+    r["tty"] = TEXT(ut.ut_line);
+    r["pid"] = INTEGER(ut.ut_pid);
+    r["type"] = INTEGER(ut.ut_type);
+    r["time"] = INTEGER(ut.ut_tv.tv_sec);
+    r["host"] = TEXT(ut.ut_host);
+    results.push_back(r);
+  }
+}
+
+} // namespace impl
 
 QueryData genLastAccess(QueryContext& context) {
   QueryData results;
@@ -29,22 +41,13 @@ QueryData genLastAccess(QueryContext& context) {
 #else
 
 #ifndef __FreeBSD__
-  utmpxname("/var/log/wtmpx");
+  utmpxname(_PATH_WTMP);
 #endif
   setutxent();
 
   while ((ut = getutxent()) != nullptr) {
 #endif
-
-    Row r;
-    r["username"] = TEXT(ut->ut_user);
-    r["tty"] = TEXT(ut->ut_line);
-    r["pid"] = INTEGER(ut->ut_pid);
-    r["type"] = INTEGER(ut->ut_type);
-    r["time"] = INTEGER(ut->ut_tv.tv_sec);
-    r["host"] = TEXT(ut->ut_host);
-
-    results.push_back(r);
+    impl::genLastAccessForRow(*ut, results);
   }
 
 #ifdef __APPLE__
@@ -52,7 +55,6 @@ QueryData genLastAccess(QueryContext& context) {
 #else
   endutxent();
 #endif
-
   return results;
 }
 }

@@ -2,36 +2,34 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#ifdef WIN32
-#define _WIN32_DCOM
-
-#include <Windows.h>
-#endif
+// clang-format off
+// Keep it on top of all other includes to fix double include WinSock.h header file
+// which is windows specific boost build problem
+#include <osquery/remote/utility.h>
+// clang-format on
 
 #include <boost/algorithm/string.hpp>
 
+#include <osquery/carver/carver.h>
 #include <osquery/database.h>
 #include <osquery/distributed.h>
+#include <osquery/filesystem/fileops.h>
 #include <osquery/flags.h>
+#include <osquery/hashing/hashing.h>
 #include <osquery/logger.h>
+#include <osquery/remote/serializers/json.h>
 #include <osquery/system.h>
+#include <osquery/utils/base64.h>
+#include <osquery/utils/json/json.h>
 
-#include "osquery/carver/carver.h"
-#include "osquery/core/conversions.h"
-#include "osquery/core/json.h"
-#include "osquery/filesystem/fileops.h"
-#include "osquery/remote/serializers/json.h"
-#include "osquery/remote/utility.h"
-#include "osquery/tables/system/hash.h"
+#include <osquery/utils/system/system.h>
+#include <osquery/utils/system/time.h>
 
 namespace fs = boost::filesystem;
-namespace pt = boost::property_tree;
 
 namespace osquery {
 
@@ -152,25 +150,8 @@ void Carver::start() {
     LOG(WARNING) << "Carver has not been properly constructed";
     return;
   }
-  for (const auto& p : carvePaths_) {
-    // Ensure the file is a flat file on disk before carving
-    PlatformFile pFile(p, PF_OPEN_EXISTING | PF_READ);
-    if (!pFile.isValid() || isDirectory(p)) {
-      VLOG(1) << "File does not exist on disk or is subdirectory: " << p;
-      continue;
-    }
-    Status s = carve(p);
-    if (!s.ok()) {
-      VLOG(1) << "Failed to carve file " << p << " " << s.getMessage();
-    }
-  }
-
-  std::set<fs::path> carvedFiles;
-  for (const auto& p : platformGlob((carveDir_ / "*").string())) {
-    carvedFiles.insert(fs::path(p));
-  }
-
-  auto s = archive(carvedFiles, archivePath_);
+  const auto carvedFiles = carveAll();
+  auto s = archive(carvedFiles, archivePath_, FLAGS_carver_block_size);
   if (!s.ok()) {
     VLOG(1) << "Failed to create carve archive: " << s.getMessage();
     updateCarveValue(carveGuid_, "status", "ARCHIVE FAILED");
@@ -211,20 +192,38 @@ void Carver::start() {
   }
 };
 
-Status Carver::carve(const boost::filesystem::path& path) {
-  PlatformFile src(path, PF_OPEN_EXISTING | PF_READ);
-  PlatformFile dst(carveDir_ / path.leaf(), PF_CREATE_NEW | PF_WRITE);
-
-  if (!dst.isValid()) {
-    return Status(1, "Destination tmp FS is not valid.");
+std::set<fs::path> Carver::carveAll() {
+  std::set<fs::path> carvedFiles;
+  for (const auto& srcPath : carvePaths_) {
+    // Ensure the file is a flat file on disk before carving
+    PlatformFile src(srcPath, PF_OPEN_EXISTING | PF_READ);
+    if (!src.isValid() || isDirectory(srcPath)) {
+      VLOG(1) << "File does not exist on disk or is subdirectory: " << srcPath;
+      continue;
+    }
+    const auto dstPath = carveDir_ / srcPath.leaf();
+    PlatformFile dst(dstPath, PF_CREATE_NEW | PF_WRITE);
+    if (!dst.isValid()) {
+      VLOG(1) << "Destination temporary file is invalid: " << dstPath;
+      continue;
+    }
+    Status s = blockwiseCopy(src, dst);
+    if (s.ok()) {
+      carvedFiles.insert(dstPath);
+    } else {
+      VLOG(1) << "Failed to copy file from " << srcPath << " to " << dstPath
+              << " " << s.getMessage();
+    }
   }
+  return carvedFiles;
+}
 
+Status Carver::blockwiseCopy(PlatformFile& src, PlatformFile& dst) {
   auto blkCount = ceil(static_cast<double>(src.size()) /
                        static_cast<double>(FLAGS_carver_block_size));
 
   std::vector<char> inBuff(FLAGS_carver_block_size, 0);
   for (size_t i = 0; i < blkCount; i++) {
-    inBuff.clear();
     auto bytesRead = src.read(inBuff.data(), FLAGS_carver_block_size);
     if (bytesRead > 0) {
       auto bytesWritten = dst.write(inBuff.data(), bytesRead);
@@ -234,7 +233,7 @@ Status Carver::carve(const boost::filesystem::path& path) {
     }
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 };
 
 Status Carver::postCarve(const boost::filesystem::path& path) {
@@ -295,7 +294,7 @@ Status Carver::postCarve(const boost::filesystem::path& path) {
     params.add("block_id", i);
     params.add("session_id", session_id);
     params.add("request_id", requestId_);
-    params.add("data", base64Encode(std::string(block.begin(), block.end())));
+    params.add("data", base64::encode(std::string(block.begin(), block.end())));
 
     // TODO: Error sending files.
     status = contRequest.call(params);
@@ -307,7 +306,7 @@ Status Carver::postCarve(const boost::filesystem::path& path) {
   }
 
   updateCarveValue(carveGuid_, "status", "SUCCESS");
-  return Status(0, "Ok");
+  return Status::success();
 };
 
 Status carvePaths(const std::set<std::string>& paths) {

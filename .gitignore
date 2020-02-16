@@ -30,7 +30,6 @@ build/
 # Run Artifacts
 *.log
 *.orig
-*.patch
 *.rej
 
 # Vagrant Artifacts
@@ -60,6 +59,7 @@ doxygen/latex
 \#*\#
 *.swp
 *.vscode
+.vs/
 
 # Tags
 tags
@@ -68,4 +68,12 @@ cscope.out
 
 # Ignored components
 /external/*
+!/external/cmake/cmakelibs.cmake
 !/external/CMakeLists.txt
+
+# Buck
+.buckd/
+buck-out/
+
+# Windows system specific toolchain paths
+tools/buckconfigs/windows-x86_64/toolchain/vs2017_15.5.bcfg

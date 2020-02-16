@@ -1,5 +1,8 @@
-#!/usr/bin/env python
-"""Generate a complete table specification for the website
+#!/usr/bin/env python3
+"""
+Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+
+Generate a complete table specification for the website
 
 This script will generate JSON output as expected by the osquery website given
 a directory of osquery schema specifications. Results will be printer to stdout.
@@ -11,15 +14,8 @@ Usage:
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+#  This source code is licensed in accordance with the terms specified in
+#  the LICENSE file found in the root directory of this source tree.
 
 import json
 import os
@@ -36,6 +32,7 @@ PLATFORM_DIRS = {
     "specs": ["darwin", "linux", "windows", "freebsd"],
     "utility": ["darwin", "linux", "freebsd", "windows"],
     "yara": ["darwin", "linux"],
+    "smart": ["darwin", "linux"],
     "darwin": ["darwin"],
     "freebsd": ["freebsd"],
     "kernel": ["darwin"],
@@ -65,7 +62,7 @@ def url_for_spec(path):
     to the specification on GitHub.
     """
     full_path = os.path.abspath(path)
-    url = "https://github.com/facebook/osquery/blob/master"
+    url = "https://github.com/osquery/osquery/blob/master"
     osquery_found = False
     for part in full_path.split("/"):
         if osquery_found:
@@ -79,7 +76,7 @@ def url_for_spec(path):
 def generate_table_metadata(full_path):
     """This function generates a dictionary of table metadata for a spec file
     found at a given path."""
-    with open(full_path, "rU") as file_handle:
+    with open(full_path, "r") as file_handle:
         # Each osquery table specification is a syntactically correct python file
         # because we imported `from gentable import *`, we imported all of the
         # functions that you use in an osquery specification. a global "table"

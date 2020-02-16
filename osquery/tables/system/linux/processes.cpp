@@ -2,13 +2,12 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <map>
+#include <regex>
 #include <string>
 
 #include <stdlib.h>
@@ -18,17 +17,23 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/noncopyable.hpp>
-#include <boost/regex.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/filesystem/linux/proc.h>
 #include <osquery/logger.h>
+#include <osquery/sql/dynamic_table_row.h>
 #include <osquery/tables.h>
 
-#include "osquery/core/conversions.h"
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/system/uptime.h>
+
+#include <ctime>
 
 namespace osquery {
 namespace tables {
+
+const int kMSIn1CLKTCK = (1000 / sysconf(_SC_CLK_TCK));
 
 inline std::string getProcAttr(const std::string& attr,
                                const std::string& pid) {
@@ -54,16 +59,32 @@ inline std::string readProcLink(const std::string& attr,
                                 const std::string& pid) {
   // The exe is a symlink to the binary on-disk.
   auto attr_path = getProcAttr(attr, pid);
-  char full_path[PATH_MAX] = {0};
 
-  char* link_path = realpath(attr_path.c_str(), full_path);
-  if (link_path != nullptr) {
-    return std::string(link_path);
-  } else if (attr_path.compare(std::string(full_path)) != 0) {
-    return std::string(full_path);
+  std::string result = "";
+  struct stat sb;
+  if (lstat(attr_path.c_str(), &sb) != -1) {
+    // Some symlinks may report 'st_size' as zero
+    // Use PATH_MAX as best guess
+    // For cases when 'st_size' is not zero but smaller than
+    // PATH_MAX we will still use PATH_MAX to minimize chance
+    // of output trucation during race condition
+    ssize_t buf_size = sb.st_size < PATH_MAX ? PATH_MAX : sb.st_size;
+    // +1 for \0, since readlink does not append a null
+    char* linkname = static_cast<char*>(malloc(buf_size + 1));
+    ssize_t r = readlink(attr_path.c_str(), linkname, buf_size);
+
+    if (r > 0) { // Success check
+      // r may not be equal to buf_size
+      // if r == buf_size there was race condition
+      // and link is longer than buf_size and because of this
+      // truncated
+      linkname[r] = '\0';
+      result = std::string(linkname);
+    }
+    free(linkname);
   }
 
-  return "";
+  return result;
 }
 
 // In the case where the linked binary path ends in " (deleted)", and a file
@@ -78,9 +99,9 @@ Status deletedMatchesInode(const std::string& path, const std::string& pid) {
   }
 
   // Extract the expected inode of the binary file from /proc/%pid/maps
-  boost::smatch what;
-  boost::regex expression("([0-9]+)\\h+\\Q" + path + "\\E");
-  if (!boost::regex_search(maps_contents, what, expression)) {
+  std::smatch what;
+  std::regex expression("([0-9]+)\\h+\\Q" + path + "\\E");
+  if (!std::regex_search(maps_contents, what, expression)) {
     return Status(-1, "Could not find binary inode in maps file: " + maps_path);
   }
   std::string inode = what[1];
@@ -93,7 +114,7 @@ Status deletedMatchesInode(const std::string& path, const std::string& pid) {
 
   // If the inodes match, the binary name actually ends with " (deleted)"
   if (std::to_string(st.st_ino) == inode) {
-    return Status(0, "Inodes match");
+    return Status::success();
   } else {
     return Status(1, "Inodes do not match");
   }
@@ -162,14 +183,8 @@ void genProcessMap(const std::string& pid, QueryData& results) {
     }
 
     r["permissions"] = fields[1];
-    try {
-      auto offset = std::stoll(fields[2], nullptr, 16);
-      r["offset"] = (offset != 0) ? BIGINT(offset) : r["start"];
-
-    } catch (const std::exception& e) {
-      // Value was out of range or could not be interpreted as a hex long long.
-      r["offset"] = "-1";
-    }
+    auto offset = tryTo<long long>(fields[2], 16);
+    r["offset"] = BIGINT((offset) ? offset.take() : -1);
     r["device"] = fields[3];
     r["inode"] = fields[4];
 
@@ -237,11 +252,7 @@ SimpleProcStat::SimpleProcStat(const std::string& pid) {
     this->system_time = details.at(12);
     this->nice = details.at(16);
     this->threads = details.at(17);
-    try {
-      this->start_time = TEXT(AS_LITERAL(BIGINT_LITERAL, details.at(19)) / 100);
-    } catch (const boost::bad_lexical_cast& e) {
-      this->start_time = "-1";
-    }
+    this->start_time = details.at(19);
   }
 
   // /proc/N/status may be not available, or readable by this user.
@@ -252,7 +263,7 @@ SimpleProcStat::SimpleProcStat(const std::string& pid) {
 
   for (const auto& line : osquery::split(content, "\n")) {
     // Status lines are formatted: Key: Value....\n.
-    auto detail = osquery::split(line, ":", 1);
+    auto detail = osquery::split(line, ':', 1);
     if (detail.size() != 2) {
       continue;
     }
@@ -312,7 +323,7 @@ SimpleProcIo::SimpleProcIo(const std::string& pid) {
 
   for (const auto& line : osquery::split(content, "\n")) {
     // IO lines are formatted: Key: Value....\n.
-    auto detail = osquery::split(line, ":", 1);
+    auto detail = osquery::split(line, ':', 1);
     if (detail.size() != 2) {
       continue;
     }
@@ -380,7 +391,9 @@ int getOnDisk(const std::string& pid, std::string& path) {
   }
 }
 
-void genProcess(const std::string& pid, QueryData& results) {
+void genProcess(const std::string& pid,
+                long system_boot_time,
+                TableRows& results) {
   // Parse the process stat and status.
   SimpleProcStat proc_stat(pid);
   // Parse the process io
@@ -391,7 +404,7 @@ void genProcess(const std::string& pid, QueryData& results) {
     return;
   }
 
-  Row r;
+  auto r = make_table_row();
   r["pid"] = pid;
   r["parent"] = proc_stat.parent;
   r["path"] = readProcLink("exe", pid);
@@ -419,21 +432,27 @@ void genProcess(const std::string& pid, QueryData& results) {
   r["total_size"] = proc_stat.total_size;
 
   // time information
-  r["user_time"] = proc_stat.user_time;
-  r["system_time"] = proc_stat.system_time;
-  r["start_time"] = proc_stat.start_time;
+  auto usr_time = std::strtoull(proc_stat.user_time.data(), nullptr, 10);
+  r["user_time"] = std::to_string(usr_time * kMSIn1CLKTCK);
+  auto sys_time = std::strtoull(proc_stat.system_time.data(), nullptr, 10);
+  r["system_time"] = std::to_string(sys_time * kMSIn1CLKTCK);
+
+  auto proc_start_time_exp = tryTo<long>(proc_stat.start_time);
+  if (proc_start_time_exp.isValue() && system_boot_time > 0) {
+    r["start_time"] = INTEGER(system_boot_time + proc_start_time_exp.take() /
+                                                     sysconf(_SC_CLK_TCK));
+  } else {
+    r["start_time"] = "-1";
+  }
 
   if (!proc_io.status.ok()) {
     // /proc/<pid>/io can require root to access, so don't fail if we can't
     VLOG(1) << proc_io.status.getMessage();
   } else {
     r["disk_bytes_read"] = proc_io.read_bytes;
-    long long write_bytes = 0;
-    long long cancelled_write_bytes = 0;
-
-    osquery::safeStrtoll(proc_io.write_bytes, 10, write_bytes);
-    osquery::safeStrtoll(
-        proc_io.cancelled_write_bytes, 10, cancelled_write_bytes);
+    long long write_bytes = tryTo<long long>(proc_io.write_bytes).takeOr(0ll);
+    long long cancelled_write_bytes =
+        tryTo<long long>(proc_io.cancelled_write_bytes).takeOr(0ll);
 
     r["disk_bytes_written"] =
         std::to_string(write_bytes - cancelled_write_bytes);
@@ -442,12 +461,34 @@ void genProcess(const std::string& pid, QueryData& results) {
   results.push_back(r);
 }
 
-QueryData genProcesses(QueryContext& context) {
-  QueryData results;
+void genNamespaces(const std::string& pid, QueryData& results) {
+  Row r;
+
+  ProcessNamespaceList proc_ns;
+  Status status = procGetProcessNamespaces(pid, proc_ns);
+  if (!status.ok()) {
+    VLOG(1) << "Namespaces for pid " << pid
+            << " are incomplete: " << status.what();
+  }
+
+  r["pid"] = pid;
+  for (const auto& pair : proc_ns) {
+    r[pair.first + "_namespace"] = std::to_string(pair.second);
+  }
+
+  results.push_back(r);
+}
+
+TableRows genProcesses(QueryContext& context) {
+  TableRows results;
+  auto system_boot_time = getUptime();
+  if (system_boot_time > 0) {
+    system_boot_time = std::time(nullptr) - system_boot_time;
+  }
 
   auto pidlist = getProcList(context);
   for (const auto& pid : pidlist) {
-    genProcess(pid, results);
+    genProcess(pid, system_boot_time, results);
   }
 
   return results;
@@ -470,6 +511,17 @@ QueryData genProcessMemoryMap(QueryContext& context) {
   auto pidlist = getProcList(context);
   for (const auto& pid : pidlist) {
     genProcessMap(pid, results);
+  }
+
+  return results;
+}
+
+QueryData genProcessNamespaces(QueryContext& context) {
+  QueryData results;
+
+  const auto pidlist = getProcList(context);
+  for (const auto& pid : pidlist) {
+    genNamespaces(pid, results);
   }
 
   return results;

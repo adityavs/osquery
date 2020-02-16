@@ -2,29 +2,24 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <unistd.h>
 
 #include <map>
+#include <regex>
 #include <string>
 
 #include <boost/algorithm/string/find.hpp>
 #include <boost/algorithm/string/trim.hpp>
-#include <boost/regex.hpp>
-#include <boost/xpressive/xpressive.hpp>
 
-#include <osquery/core/conversions.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
 #include <osquery/tables.h>
-
-namespace xp = boost::xpressive;
+#include <osquery/utils/conversions/split.h>
 
 namespace osquery {
 namespace tables {
@@ -41,17 +36,15 @@ QueryData genOSVersion(QueryContext& context) {
   r["platform"] = "freebsd";
   r["version"] = result[0]["current_value"];
 
-  auto rx = xp::sregex::compile(
-      "(?P<major>[0-9]+)\\.(?P<minor>[0-9]+)-(?P<build>\\w+)-?p?(?P<patch>[0-9]+)"
-      "?");
+  auto rx = std::regex("([0-9]+)\\.([0-9]+)-(\\w+)-?p?([0-9]+)?");
 
-  xp::smatch matches;
+  std::smatch matches;
   for (auto& line : osquery::split(result[0]["current_value"], "\n")) {
-    if (xp::regex_search(line, matches, rx)) {
-      r["major"] = INTEGER(matches["major"]);
-      r["minor"] = INTEGER(matches["minor"]);
-      r["build"] = matches["build"];
-      r["patch"] = matches["patch"];
+    if (std::regex_search(line, matches, rx)) {
+      r["major"] = matches[1];
+      r["minor"] = matches[2];
+      r["build"] = matches[3];
+      r["patch"] = matches[4];
       break;
     }
   }

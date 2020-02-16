@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iomanip>
@@ -90,8 +88,8 @@ std::set<std::string> kSMCTemperatureKeys = {
     "TCGC", "TCGc", "TG0P", "TG0D", "TG1D", "TG0H", "TG1H", "Ts0S", "TM0P",
     "TM1P", "TM8P", "TM9P", "TM0S", "TM1S", "TM8S", "TM9S", "TN0D", "TN0P",
     "TN1P", "TN0C", "TN0H", "TP0D", "TPCD", "TP0P", "TA0P", "TA1P", "Th0H",
-    "Th1H", "Th2H", "Tm0P", "Tp0P", "Ts0P", "Tb0P", "TL0P", "TW0P", "TH0P",
-    "TH1P", "TH2P", "TH3P", "TO0P", "TB0T", "TB1T", "TB2T", "TB3T", "Tp0P",
+    "Th1H", "Th2H", "Tm0P", "Ts0P", "Tb0P", "TL0P", "TW0P", "TH0P",
+    "TH1P", "TH2P", "TH3P", "TO0P", "TB0T", "TB1T", "TB2T", "TB3T",
     "Tp0C", "Tp1P", "Tp1C", "Tp2P", "Tp3P", "Tp4P", "Tp5P", "TS0C", "TA0S",
     "TA1S", "TA2S", "TA3S",
 };
@@ -375,23 +373,7 @@ kern_return_t SMCHelper::call(uint32_t selector,
 inline uint32_t strtoul(const char *str, size_t size, size_t base) {
   uint32_t total = 0;
   for (size_t i = 0; i < size; i++) {
-    if (base == 16) {
-      total += str[i] << (size - 1 - i) * 8;
-    } else {
-      total += (unsigned char)(str[i] << (size - 1 - i) * 8);
-    }
-  }
-  return total;
-}
-
-inline float strtof(const char *str, size_t size, size_t e) {
-  float total = 0;
-  for (size_t i = 0; i < size; i++) {
-    if (i == (size - 1)) {
-      total += (str[i] & 0xff) >> e;
-    } else {
-      total += str[i] << (size - 1 - i) * (8 - e);
-    }
+    total += (unsigned char)(str[i]) << (size - 1 - i) * 8;
   }
   return total;
 }

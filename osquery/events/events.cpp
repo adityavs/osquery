@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <chrono>
@@ -16,15 +14,18 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/lexical_cast.hpp>
 
-#include <osquery/config.h>
+#include <osquery/config/config.h>
 #include <osquery/database.h>
 #include <osquery/events.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/registry_factory.h>
 #include <osquery/sql.h>
+#include <osquery/sql/dynamic_table_row.h>
 #include <osquery/system.h>
-
-#include "osquery/core/conversions.h"
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/system/time.h>
 
 namespace osquery {
 
@@ -51,20 +52,15 @@ FLAG(uint64, events_max, 50000, "Maximum number of events per type to buffer");
 
 static inline EventTime timeFromRecord(const std::string& record) {
   // Convert a stored index "as string bytes" to a time value.
-  long long afinite;
-  if (!safeStrtoll(record, 10, afinite)) {
-    return 0;
-  }
-  return afinite;
+  return static_cast<EventTime>(tryTo<long long>(record).takeOr(0ll));
 }
 
 static inline std::string toIndex(size_t i) {
-  auto j = std::to_string(i);
-  size_t n = 1;
-  while (i /= 10) {
-    n++;
+  auto str_index = std::to_string(i);
+  if (str_index.size() < 10) {
+    str_index.insert(str_index.begin(), 10 - str_index.size(), '0');
   }
-  return (n >= 10) ? j : std::string(10 - n, '0').append(std::move(j));
+  return str_index;
 }
 
 static inline void getOptimizeData(EventTime& o_time,
@@ -82,17 +78,13 @@ static inline void getOptimizeData(EventTime& o_time,
   {
     std::string content;
     getDatabaseValue(kEvents, "optimize." + query_name, content);
-    long long optimize_time = 0;
-    safeStrtoll(content, 10, optimize_time);
-    o_time = static_cast<EventTime>(optimize_time);
+    o_time = timeFromRecord(content);
   }
 
   {
     std::string content;
     getDatabaseValue(kEvents, "optimize_eid." + query_name, content);
-    long long optimize_eid = 0;
-    safeStrtoll(content, 10, optimize_eid);
-    o_eid = static_cast<size_t>(optimize_eid);
+    o_eid = tryTo<std::size_t>(content).takeOr(std::size_t{0});
   }
 }
 
@@ -147,6 +139,15 @@ void EventSubscriberPlugin::genTable(RowYield& yield, QueryContext& context) {
   get(yield, start, stop);
 }
 
+EventContextID EventPublisherPlugin::numEvents() const {
+  return next_ec_id_.load();
+}
+
+size_t EventPublisherPlugin::numSubscriptions() {
+  ReadLock lock(subscription_lock_);
+  return subscriptions_.size();
+}
+
 void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
   if (isEnding()) {
     // Cannot emit/fire while ending
@@ -154,10 +155,7 @@ void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
   }
 
   EventContextID ec_id = 0;
-  {
-    WriteLock lock(ec_id_lock_);
-    ec_id = next_ec_id_++;
-  }
+  ec_id = next_ec_id_.fetch_add(1);
 
   // Fill in EventContext ID and time if needed.
   if (ec != nullptr) {
@@ -170,7 +168,7 @@ void EventPublisherPlugin::fire(const EventContextRef& ec, EventTime time) {
     }
   }
 
-  WriteLock lock(subscription_lock_);
+  ReadLock lock(subscription_lock_);
   for (const auto& subscription : subscriptions_) {
     auto es = EventFactory::getEventSubscriber(subscription->subscriber_name);
     if (es != nullptr && es->state() == EventState::EVENT_RUNNING) {
@@ -329,8 +327,9 @@ void EventSubscriberPlugin::expireCheck() {
     unsigned long min_key_value = 0;
     unsigned long max_key_value = 0;
     for (const auto& key : keys) {
-      unsigned long key_value = 0;
-      safeStrtoul(key.substr(key.rfind('.') + 1), 10, key_value);
+      auto const key_value =
+          tryTo<unsigned long int>(key.substr(key.rfind('.') + 1), 10)
+              .takeOr(0ul);
 
       if (key_value < static_cast<unsigned long>(threshold_key)) {
         min_key_value = (min_key_value == 0 || key_value < min_key_value)
@@ -400,16 +399,20 @@ std::vector<EventRecord> EventSubscriberPlugin::getRecords(
       }
 
       // Each list is tokenized into a record=event_id:time.
-      boost::split(bin_records, record_value, boost::is_any_of(",:"));
+      bin_records = split(record_value, ",");
     }
 
-    auto bin_it = bin_records.begin();
     // Iterate over every 2 items: EID:TIME.
-    for (; bin_it != bin_records.end(); bin_it++) {
-      const auto& eid = *bin_it;
-      EventTime et = timeFromRecord(*(++bin_it));
+    for (const auto& record : bin_records) {
+      const auto vals = split(record, ":");
+      if (vals.size() != 2) {
+        LOG(WARNING) << "Event records mismatch: " << record
+                     << " does not have a matching eid/event_time";
+        continue;
+      }
+      const auto eid = vals[0];
+      const EventTime et = timeFromRecord(vals[1]);
       if (FLAGS_events_optimize && optimize && et <= optimize_time_ + 1) {
-        // There is an optimization collision, check for colliding IDs.
         auto eidr = timeFromRecord(eid);
         if (eidr <= optimize_eid_) {
           continue;
@@ -422,48 +425,54 @@ std::vector<EventRecord> EventSubscriberPlugin::getRecords(
   return records;
 }
 
-Status EventSubscriberPlugin::recordEvent(const std::string& eid,
-                                          EventTime et) {
-  std::string time_value = boost::lexical_cast<std::string>(et);
+Status EventSubscriberPlugin::recordEvents(
+    const std::vector<std::string>& event_id_list, EventTime event_time) {
+  WriteLock lock(event_record_lock_);
 
-  // The record is identified by the event type then module name.
-  std::string index_key = "indexes." + dbNamespace();
-  std::string record_key = "records." + dbNamespace();
+  DatabaseStringValueList database_data;
+  database_data.reserve(2U);
+
   // The list key includes the list type (bin size) and the list ID (bin).
-  std::string list_id;
-
   // The list_id is the MOST-Specific key ID, the bin for this list.
   // If the event time was 13 and the time_list is 5 seconds, lid = 2.
-  list_id = boost::lexical_cast<std::string>(et / 60);
+  auto list_id = boost::lexical_cast<std::string>(event_time / 60);
+  std::string time_value = boost::lexical_cast<std::string>(event_time);
 
-  WriteLock lock(event_record_lock_);
+  // The record is identified by the event type then module name.
   // Append the record (eid, unix_time) to the list bin.
-  std::string record_value;
-  getDatabaseValue(kEvents, record_key + ".60." + list_id, record_value);
+  auto database_key = "records." + dbNamespace() + ".60." + list_id;
+  auto index_key = "indexes." + dbNamespace() + ".60";
 
-  if (record_value.length() == 0) {
-    // This is a new list_id for list_key, append the ID to the indirect
-    // lookup for this list_key.
-    std::string index_value;
-    getDatabaseValue(kEvents, index_key + ".60", index_value);
-    if (index_value.length() == 0) {
-      // A new index.
-      index_value = list_id;
+  std::string record_value;
+  getDatabaseValue(kEvents, database_key, record_value);
+
+  for (const auto& eid : event_id_list) {
+    if (record_value.length() == 0) {
+      // This is a new list_id for list_key, append the ID to the indirect
+      // lookup for this list_key.
+      std::string index_value;
+      getDatabaseValue(kEvents, index_key, index_value);
+      if (index_value.length() == 0) {
+        // A new index.
+        index_value = list_id;
+      } else {
+        index_value += "," + list_id;
+      }
+      database_data.push_back(std::make_pair(index_key, index_value));
+      record_value = eid + ":" + time_value;
     } else {
-      index_value += "," + list_id;
+      // Tokenize a record using ',' and the EID/time using ':'.
+      record_value += "," + eid + ":" + time_value;
     }
-    setDatabaseValue(kEvents, index_key + ".60", index_value);
-    record_value = eid + ":" + time_value;
-  } else {
-    // Tokenize a record using ',' and the EID/time using ':'.
-    record_value += "," + eid + ":" + time_value;
   }
-  auto status =
-      setDatabaseValue(kEvents, record_key + ".60." + list_id, record_value);
+
+  database_data.push_back(std::make_pair(database_key, record_value));
+  auto status = setDatabaseBatch(kEvents, database_data);
   if (!status.ok()) {
-    LOG(ERROR) << "Could not put Event Record key: " << record_key;
+    LOG(ERROR) << "Could not put Event Records";
   }
-  return Status(0, "OK");
+
+  return status;
 }
 
 size_t EventSubscriberPlugin::getEventsExpiry() {
@@ -516,9 +525,9 @@ void EventSubscriberPlugin::get(RowYield& yield,
 
   if (FLAGS_events_optimize && !records.empty()) {
     // If records were returned save the ordered-last as the optimization EID.
-    unsigned long int eidr = 0;
-    if (safeStrtoul(records.back().first, 10, eidr)) {
-      optimize_eid_ = static_cast<size_t>(eidr);
+    auto const eidr_exp = tryTo<unsigned long int>(records.back().first, 10);
+    if (eidr_exp.isValue()) {
+      optimize_eid_ = static_cast<size_t>(eidr_exp.get());
     }
   }
 
@@ -534,7 +543,7 @@ void EventSubscriberPlugin::get(RowYield& yield,
     status = deserializeRowJSON(data_value, r);
     data_value.clear();
     if (status.ok()) {
-      yield(r);
+      yield(TableRowHolder(new DynamicTableRow(std::move(r))));
     }
   }
 
@@ -557,44 +566,72 @@ void EventSubscriberPlugin::get(RowYield& yield,
   }
 }
 
-Status EventSubscriberPlugin::add(Row& r, EventTime event_time) {
-  // Get and increment the EID for this module.
-  const std::string eid = getEventID();
-  // Without encouraging a missing event time, do not support a 0-time.
-  if (event_time == 0) {
-    event_time = getUnixTime();
+Status EventSubscriberPlugin::add(const Row& r) {
+  std::vector<Row> batch = {r};
+  return addBatch(batch, getUnixTime());
+}
+
+Status EventSubscriberPlugin::addBatch(std::vector<Row>& row_list) {
+  return addBatch(row_list, getUnixTime());
+}
+
+Status EventSubscriberPlugin::addBatch(std::vector<Row>& row_list,
+                                       EventTime custom_event_time) {
+  DatabaseStringValueList database_data;
+  database_data.reserve(row_list.size());
+
+  std::vector<std::string> event_id_list;
+  event_id_list.reserve(row_list.size());
+
+  auto event_time = custom_event_time != 0 ? custom_event_time : getUnixTime();
+  auto event_time_str = std::to_string(event_time);
+
+  for (auto& row : row_list) {
+    row["time"] = event_time_str;
+    row["eid"] = getEventID();
+
+    // Serialize and store the row data, for query-time retrieval.
+    std::string serialized_row;
+    auto status = serializeRowJSON(row, serialized_row);
+    if (!status.ok()) {
+      VLOG(1) << status.getMessage();
+      continue;
+    }
+
+    // Then remove the newline.
+    if (serialized_row.size() > 0 && serialized_row.back() == '\n') {
+      serialized_row.pop_back();
+    }
+
+    // Logger plugins may request events to be forwarded directly.
+    // If no active logger is marked 'usesLogEvent' then this is a no-op.
+    EventFactory::forwardEvent(serialized_row);
+
+    // Store the event data in the batch
+    database_data.push_back(std::make_pair(
+        "data." + dbNamespace() + "." + row["eid"], serialized_row));
+
+    event_id_list.push_back(std::move(row["eid"]));
+    event_count_++;
+
+    // Use the last EventID and a checkpoint bucket size to periodically apply
+    // buffer eviction. Eviction occurs if the total count exceeds events_max.
+    if (last_eid_ % EVENTS_CHECKPOINT == 0) {
+      expireCheck();
+    }
   }
 
-  r["time"] = std::to_string(event_time);
-  r["eid"] = eid;
-  // Serialize and store the row data, for query-time retrieval.
-  std::string data;
-  auto status = serializeRowJSON(r, data);
+  if (database_data.empty()) {
+    return Status(1, "Failed to process the rows");
+  }
+
+  // Save the batched data inside the database
+  auto status = setDatabaseBatch(kEvents, database_data);
   if (!status.ok()) {
     return status;
   }
-  // Then remove the newline.
-  if (data.size() > 0 && data.back() == '\n') {
-    data.pop_back();
-  }
 
-  // Use the last EventID and a checkpoint bucket size to periodically apply
-  // buffer eviction. Eviction occurs if the total count exceeds events_max.
-  if (last_eid_ % EVENTS_CHECKPOINT == 0) {
-    expireCheck();
-  }
-
-  // Logger plugins may request events to be forwarded directly.
-  // If no active logger is marked 'usesLogEvent' then this is a no-op.
-  EventFactory::forwardEvent(data);
-
-  // Store the event data.
-  std::string event_key = "data." + dbNamespace() + "." + eid;
-  status = setDatabaseValue(kEvents, event_key, data);
-  // Record the event in the indexing bins, using the index time.
-  recordEvent(eid, event_time);
-  event_count_++;
-  return status;
+  return recordEvents(event_id_list, event_time);
 }
 
 EventPublisherRef EventSubscriberPlugin::getPublisher() const {
@@ -665,31 +702,31 @@ void EventFactory::configUpdate() {
   // Scan the schedule for queries that touch "_events" tables.
   // We will count the queries
   std::map<std::string, SubscriberExpirationDetails> subscriber_details;
-  Config::get().scheduledQueries([&subscriber_details](
-      const std::string& name, const ScheduledQuery& query) {
-    std::vector<std::string> tables;
-    // Convert query string into a list of virtual tables effected.
-    if (!getQueryTables(query.query, tables)) {
-      VLOG(1) << "Cannot get tables from query: " << name;
-      return;
-    }
+  Config::get().scheduledQueries(
+      [&subscriber_details](std::string name, const ScheduledQuery& query) {
+        std::vector<std::string> tables;
+        // Convert query string into a list of virtual tables effected.
+        if (!getQueryTables(query.query, tables)) {
+          VLOG(1) << "Cannot get tables from query: " << name;
+          return;
+        }
 
-    // Remove duplicates and select only the subscriber tables.
-    std::set<std::string> subscribers;
-    for (const auto& table : tables) {
-      if (Registry::get().exists("event_subscriber", table)) {
-        subscribers.insert(table);
-      }
-    }
+        // Remove duplicates and select only the subscriber tables.
+        std::set<std::string> subscribers;
+        for (const auto& table : tables) {
+          if (Registry::get().exists("event_subscriber", table)) {
+            subscribers.insert(table);
+          }
+        }
 
-    for (const auto& subscriber : subscribers) {
-      auto& details = subscriber_details[subscriber];
-      details.max_interval = (query.interval > details.max_interval)
-                                 ? query.interval
-                                 : details.max_interval;
-      details.query_count++;
-    }
-  });
+        for (const auto& subscriber : subscribers) {
+          auto& details = subscriber_details[subscriber];
+          details.max_interval = (query.interval > details.max_interval)
+                                     ? query.interval
+                                     : details.max_interval;
+          details.query_count++;
+        }
+      });
 
   auto& ef = EventFactory::getInstance();
   for (const auto& details : subscriber_details) {
@@ -697,7 +734,7 @@ void EventFactory::configUpdate() {
       continue;
     }
 
-    WriteLock lock(ef.factory_lock_);
+    RecursiveLock lock(ef.factory_lock_);
     auto subscriber = ef.getEventSubscriber(details.first);
     subscriber->min_expiration_ = details.second.max_interval * 3;
     subscriber->min_expiration_ += (60 - (subscriber->min_expiration_ % 60));
@@ -723,7 +760,7 @@ void EventFactory::configUpdate() {
 
 Status EventFactory::run(const std::string& type_id) {
   if (FLAGS_disable_events) {
-    return Status(0, "Events disabled");
+    return Status::success();
   }
 
   // An interesting take on an event dispatched entrypoint.
@@ -734,7 +771,7 @@ Status EventFactory::run(const std::string& type_id) {
   EventPublisherRef publisher = nullptr;
   {
     auto& ef = EventFactory::getInstance();
-    WriteLock lock(ef.factory_lock_);
+    RecursiveLock lock(ef.factory_lock_);
     publisher = ef.getEventPublisher(type_id);
   }
 
@@ -743,6 +780,7 @@ Status EventFactory::run(const std::string& type_id) {
   } else if (publisher->hasStarted()) {
     return Status(1, "Cannot restart an event publisher");
   }
+  setThreadName(publisher->name());
   VLOG(1) << "Starting event publisher run loop: " + type_id;
   publisher->hasStarted(true);
 
@@ -757,7 +795,7 @@ Status EventFactory::run(const std::string& type_id) {
     // This is a 'default' cool-off implemented in InterruptableRunnable.
     // If a publisher fails to perform some sort of interruption point, this
     // prevents the thread from thrashing through exiting checks.
-    publisher->pauseMilli(200);
+    publisher->pause(std::chrono::milliseconds(200));
   }
   if (!status.ok()) {
     // The runloop status is not reflective of the event type's.
@@ -772,7 +810,7 @@ Status EventFactory::run(const std::string& type_id) {
   // If the event factory's `end` method was called these publishers will be
   // cleaned up after their thread context is removed; otherwise, a removed
   // thread context and failed publisher will remain available for stats.
-  return Status(0, "OK");
+  return Status::success();
 }
 
 // There's no reason for the event factory to keep multiple instances.
@@ -792,7 +830,7 @@ Status EventFactory::registerEventPublisher(const PluginRef& pub) {
   }
 
   if (specialized_pub == nullptr || specialized_pub.get() == nullptr) {
-    return Status(0, "Invalid publisher");
+    return Status::success();
   }
 
   auto type_id = specialized_pub->type();
@@ -803,16 +841,16 @@ Status EventFactory::registerEventPublisher(const PluginRef& pub) {
 
   auto& ef = EventFactory::getInstance();
   {
-    WriteLock lock(getInstance().factory_lock_);
+    RecursiveLock lock(ef.factory_lock_);
     if (ef.event_pubs_.count(type_id) != 0) {
       // This is a duplicate event publisher.
       return Status(1, "Duplicate publisher type");
     }
 
-    // Do not set up event publisher if events are disabled.
     ef.event_pubs_[type_id] = specialized_pub;
   }
 
+  // Do not set up event publisher if events are disabled.
   if (!FLAGS_disable_events) {
     if (specialized_pub->state() != EventState::EVENT_NONE) {
       specialized_pub->tearDown();
@@ -829,7 +867,7 @@ Status EventFactory::registerEventPublisher(const PluginRef& pub) {
     }
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status EventFactory::registerEventSubscriber(const PluginRef& sub) {
@@ -900,7 +938,7 @@ Status EventFactory::registerEventSubscriber(const PluginRef& sub) {
 
   auto& ef = EventFactory::getInstance();
   {
-    WriteLock lock(getInstance().factory_lock_);
+    RecursiveLock lock(ef.factory_lock_);
     ef.event_subs_[name] = specialized_sub;
   }
 
@@ -909,7 +947,7 @@ Status EventFactory::registerEventSubscriber(const PluginRef& sub) {
     specialized_sub->state(EventState::EVENT_FAILED);
     return Status(1, status.getMessage());
   } else {
-    return Status(0, "OK");
+    return Status::success();
   }
 }
 
@@ -946,20 +984,26 @@ size_t EventFactory::numSubscriptions(const std::string& type_id) {
 }
 
 EventPublisherRef EventFactory::getEventPublisher(const std::string& type_id) {
-  if (getInstance().event_pubs_.count(type_id) == 0) {
+  auto& ef = EventFactory::getInstance();
+
+  RecursiveLock lock(ef.factory_lock_);
+  if (ef.event_pubs_.count(type_id) == 0) {
     LOG(ERROR) << "Requested unknown/failed event publisher: " + type_id;
     return nullptr;
   }
-  return getInstance().event_pubs_.at(type_id);
+  return ef.event_pubs_.at(type_id);
 }
 
 EventSubscriberRef EventFactory::getEventSubscriber(
     const std::string& name_id) {
+  auto& ef = EventFactory::getInstance();
+
+  RecursiveLock lock(ef.factory_lock_);
   if (!exists(name_id)) {
     LOG(ERROR) << "Requested unknown event subscriber: " + name_id;
     return nullptr;
   }
-  return getInstance().event_subs_.at(name_id);
+  return ef.event_subs_.at(name_id);
 }
 
 bool EventFactory::exists(const std::string& name_id) {
@@ -973,7 +1017,7 @@ Status EventFactory::deregisterEventPublisher(const EventPublisherRef& pub) {
 Status EventFactory::deregisterEventPublisher(const std::string& type_id) {
   auto& ef = EventFactory::getInstance();
 
-  WriteLock lock(ef.factory_lock_);
+  RecursiveLock lock(ef.factory_lock_);
   EventPublisherRef publisher = ef.getEventPublisher(type_id);
   if (publisher == nullptr) {
     return Status(1, "No event publisher to deregister");
@@ -993,13 +1037,13 @@ Status EventFactory::deregisterEventPublisher(const std::string& type_id) {
       publisher->stop();
     }
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status EventFactory::deregisterEventSubscriber(const std::string& sub) {
   auto& ef = EventFactory::getInstance();
 
-  WriteLock lock(ef.factory_lock_);
+  RecursiveLock lock(ef.factory_lock_);
   if (ef.event_subs_.count(sub) == 0) {
     return Status(1, "Event subscriber is missing");
   }
@@ -1012,7 +1056,7 @@ Status EventFactory::deregisterEventSubscriber(const std::string& sub) {
 }
 
 std::vector<std::string> EventFactory::publisherTypes() {
-  WriteLock lock(getInstance().factory_lock_);
+  RecursiveLock lock(getInstance().factory_lock_);
   std::vector<std::string> types;
   for (const auto& publisher : getInstance().event_pubs_) {
     types.push_back(publisher.first);
@@ -1021,7 +1065,7 @@ std::vector<std::string> EventFactory::publisherTypes() {
 }
 
 std::vector<std::string> EventFactory::subscriberNames() {
-  WriteLock lock(getInstance().factory_lock_);
+  RecursiveLock lock(getInstance().factory_lock_);
   std::vector<std::string> names;
   for (const auto& subscriber : getInstance().event_subs_) {
     names.push_back(subscriber.first);
@@ -1047,7 +1091,7 @@ void EventFactory::end(bool join) {
   }
 
   {
-    WriteLock lock(getInstance().factory_lock_);
+    RecursiveLock lock(ef.factory_lock_);
     // A small cool off helps OS API event publisher flushing.
     if (!FLAGS_disable_events) {
       ef.threads_.clear();
@@ -1067,8 +1111,7 @@ void attachEvents() {
 
   const auto& subscribers = RegistryFactory::get().plugins("event_subscriber");
   for (const auto& subscriber : subscribers) {
-    if (subscriber.first.find("_events") == std::string::npos ||
-        subscriber.first.find("_events") + 7 != subscriber.first.size()) {
+    if (!boost::ends_with(subscriber.first, "_events")) {
       LOG(ERROR) << "Error registering subscriber: " << subscriber.first
                  << ": Must use a '_events' suffix";
       continue;
@@ -1084,4 +1127,4 @@ void attachEvents() {
   // Configure the event publishers and subscribers.
   EventFactory::configUpdate();
 }
-}
+} // namespace osquery

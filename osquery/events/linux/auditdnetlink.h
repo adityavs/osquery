@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -44,9 +42,17 @@ struct AuditEventRecord final {
   /// Audit event id that owns this record. Remember: PRIMARY KEY(id, timestamp)
   std::string audit_id;
 
-  /// The field list for this record.
+  /// The field list for this record. Valid for everything except SELinux
+  /// records
   std::map<std::string, std::string> fields;
+
+  /// The raw message, only valid for SELinux records (because they have broken
+  /// syntax)
+  std::string raw_data;
 };
+
+static_assert(std::is_move_constructible<AuditEventRecord>::value,
+              "not move constructible");
 
 // This structure is used to share data between the reading and processing
 // services
@@ -82,7 +88,10 @@ using AuditdContextRef = std::shared_ptr<AuditdContext>;
 class AuditdNetlinkReader final : public InternalRunnable {
  public:
   explicit AuditdNetlinkReader(AuditdContextRef context);
+
+ protected:
   virtual void start() override;
+  virtual void stop() override;
 
  private:
   /// Reads as many audit event records as possible before returning.

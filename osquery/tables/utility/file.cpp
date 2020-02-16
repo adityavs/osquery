@@ -2,24 +2,26 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#if !defined(WIN32)
 #include <sys/stat.h>
+#endif
 
-#include <boost/filesystem.hpp>
-
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
+#include <osquery/filesystem/fileops.h>
 
 namespace fs = boost::filesystem;
 
 namespace osquery {
+
 namespace tables {
+
+#if !defined(WIN32)
 
 const std::map<fs::file_type, std::string> kTypeNames{
     {fs::regular_file, "regular"},
@@ -32,6 +34,8 @@ const std::map<fs::file_type, std::string> kTypeNames{
     {fs::type_unknown, "unknown"},
     {fs::status_error, "error"},
 };
+
+#endif
 
 void genFileInfo(const fs::path& path,
                  const fs::path& parent,
@@ -46,25 +50,22 @@ void genFileInfo(const fs::path& path,
   r["directory"] = parent.string();
   r["symlink"] = "0";
 
-  struct stat file_stat;
 #if !defined(WIN32)
+
+  struct stat file_stat;
+
   // On POSIX systems, first check the link state.
   struct stat link_stat;
   if (lstat(path.string().c_str(), &link_stat) < 0) {
     // Path was not real, had too may links, or could not be accessed.
     return;
   }
-  if ((link_stat.st_mode & S_IFLNK) != 0) {
+  if (S_ISLNK(link_stat.st_mode)) {
     r["symlink"] = "1";
   }
-#endif
 
   if (stat(path.string().c_str(), &file_stat)) {
-#if !defined(WIN32)
     file_stat = link_stat;
-#else
-    return;
-#endif
   }
 
   r["inode"] = BIGINT(file_stat.st_ino);
@@ -73,17 +74,14 @@ void genFileInfo(const fs::path& path,
   r["mode"] = lsperms(file_stat.st_mode);
   r["device"] = BIGINT(file_stat.st_rdev);
   r["size"] = BIGINT(file_stat.st_size);
-
-#if !defined(WIN32)
   r["block_size"] = INTEGER(file_stat.st_blksize);
   r["hard_links"] = INTEGER(file_stat.st_nlink);
-#endif
 
-  // Times
   r["atime"] = BIGINT(file_stat.st_atime);
   r["mtime"] = BIGINT(file_stat.st_mtime);
   r["ctime"] = BIGINT(file_stat.st_ctime);
-#if defined(__linux__) || defined(WIN32)
+
+#if defined(__linux__)
   // No 'birth' or create time in Linux or Windows.
   r["btime"] = "0";
 #else
@@ -98,6 +96,48 @@ void genFileInfo(const fs::path& path,
   } else {
     r["type"] = "unknown";
   }
+
+#if defined(__APPLE__)
+  std::string bsd_file_flags_description;
+  if (!describeBSDFileFlags(bsd_file_flags_description, file_stat.st_flags)) {
+    VLOG(1)
+        << "The following file had undocumented BSD file flags (chflags) set: "
+        << path;
+  }
+
+  r["bsd_flags"] = bsd_file_flags_description;
+#endif
+
+#else
+
+  WINDOWS_STAT file_stat;
+
+  auto rtn = platformStat(path, &file_stat);
+  if (!rtn.ok()) {
+    VLOG(1) << "PlatformStat failed with " << rtn.getMessage();
+    return;
+  }
+
+  r["symlink"] = INTEGER(file_stat.symlink);
+  r["inode"] = BIGINT(file_stat.inode);
+  r["uid"] = BIGINT(file_stat.uid);
+  r["gid"] = BIGINT(file_stat.gid);
+  r["mode"] = TEXT(file_stat.mode);
+  r["device"] = BIGINT(file_stat.device);
+  r["size"] = BIGINT(file_stat.size);
+  r["block_size"] = INTEGER(file_stat.block_size);
+  r["hard_links"] = INTEGER(file_stat.hard_links);
+  r["atime"] = BIGINT(file_stat.atime);
+  r["mtime"] = BIGINT(file_stat.mtime);
+  r["ctime"] = BIGINT(file_stat.ctime);
+  r["btime"] = BIGINT(file_stat.btime);
+  r["type"] = TEXT(file_stat.type);
+  r["attributes"] = TEXT(file_stat.attributes);
+  r["file_id"] = TEXT(file_stat.file_id);
+  r["volume_serial"] = TEXT(file_stat.volume_serial);
+  r["product_version"] = TEXT(file_stat.product_version);
+
+#endif
 
   results.push_back(r);
 }
@@ -167,4 +207,4 @@ QueryData genFile(QueryContext& context) {
   return results;
 }
 }
-}
+} // namespace osquery

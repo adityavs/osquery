@@ -2,21 +2,28 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <map>
 #include <string>
 
-#include <osquery/config.h>
+#include <osquery/config/config.h>
 #include <osquery/logger.h>
-
-#include "osquery/tables/yara/yara_utils.h"
+#include <osquery/registry_factory.h>
+#include <osquery/tables/yara/yara_utils.h>
 
 namespace osquery {
+
+bool yaraShouldSkipFile(const std::string& path, mode_t st_mode) {
+  // avoid special files /dev/x , /proc/x, FIFO's named-pipes, etc.
+  if ((st_mode & S_IFMT) != S_IFREG) {
+    return true;
+  }
+
+  return false;
+}
 
 /**
  * The callback used when there are compilation problems in the rules.
@@ -99,7 +106,7 @@ Status compileSingleFile(const std::string& file, YR_RULES** rules) {
     compiler = nullptr;
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 /**
@@ -195,7 +202,7 @@ Status handleRuleFiles(const std::string& category,
     compiler = nullptr;
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 /**
@@ -254,12 +261,15 @@ Status YARAConfigParserPlugin::setUp() {
     return Status(1, "Unable to initialize YARA");
   }
 
-  return Status();
+  return Status::success();
 }
 
 Status YARAConfigParserPlugin::update(const std::string& source,
                                       const ParserConfig& config) {
   // The YARA config parser requested the "yara" top-level key in the config.
+  if (config.count("yara") == 0) {
+    return Status::success();
+  }
   const auto& yara_config = config.at("yara").doc();
 
   // Look for a "signatures" key with the group/file content.
@@ -304,9 +314,9 @@ Status YARAConfigParserPlugin::update(const std::string& source,
       VLOG(1) << "YARA file_paths key is invalid";
     }
   }
-  return Status();
+  return Status::success();
 }
 
 /// Call the simple YARA ConfigParserPlugin "yara".
 REGISTER(YARAConfigParserPlugin, "config_parser", "yara");
-}
+} // namespace osquery

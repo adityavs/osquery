@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <string>
@@ -13,10 +11,10 @@
 #include <boost/algorithm/string.hpp>
 
 #include <osquery/core.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/tables.h>
-#include <osquery/filesystem.h>
-
-#include "osquery/core/conversions.h"
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/tryto.h>
 
 namespace osquery {
 namespace tables {
@@ -49,9 +47,9 @@ QueryData getMemoryInfo(QueryContext& context) {
       // Look for mapping
       for (const auto& singleMap : kMemInfoMap) {
         if (line.find(singleMap.second) == 0) {
-          long value = 0;
-          if (safeStrtol(tokens[1], 10, value)) {
-            r[singleMap.first] = BIGINT(value * 1024l);
+          auto const value_exp = tryTo<long>(tokens[1], 10);
+          if (value_exp.isValue()) {
+            r[singleMap.first] = BIGINT(value_exp.get() * 1024l);
           }
           break;
         }

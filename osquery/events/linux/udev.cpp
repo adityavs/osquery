@@ -2,17 +2,16 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <poll.h>
 
 #include <osquery/events.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/registry_factory.h>
 
 #include "osquery/events/linux/udev.h"
 
@@ -42,7 +41,7 @@ Status UdevEventPublisher::setUp() {
   }
 
   udev_monitor_enable_receiving(monitor_);
-  return Status(0, "OK");
+  return Status::success();
 }
 
 void UdevEventPublisher::tearDown() {
@@ -59,33 +58,32 @@ void UdevEventPublisher::tearDown() {
 }
 
 Status UdevEventPublisher::run() {
-  int fd = 0;
-
   {
     WriteLock lock(mutex_);
     if (monitor_ == nullptr) {
       return Status(1);
     }
-    fd = udev_monitor_get_fd(monitor_);
-  }
+    int fd = udev_monitor_get_fd(monitor_);
+    if (fd < 0) {
+      LOG(ERROR) << "Could not get udev monitor fd";
+      return Status::failure("udev monitor failed");
+    }
 
-  struct pollfd fds[1];
-  fds[0].fd = fd;
-  fds[0].events = POLLIN;
+    struct pollfd fds[1];
+    fds[0].fd = fd;
+    fds[0].events = POLLIN;
 
-  int selector = ::poll(fds, 1, 1000);
-  if (selector == -1 && errno != EINTR && errno != EAGAIN) {
-    LOG(ERROR) << "Could not read udev monitor";
-    return Status(1, "udev monitor failed.");
-  }
+    int selector = ::poll(fds, 1, 1000);
+    if (selector == -1 && errno != EINTR && errno != EAGAIN) {
+      LOG(ERROR) << "Could not read udev monitor";
+      return Status(1, "udev monitor failed.");
+    }
 
-  if (selector == 0 || !(fds[0].revents & POLLIN)) {
-    // Read timeout.
-    return Status(0, "Finished");
-  }
+    if (selector == 0 || !(fds[0].revents & POLLIN)) {
+      // Read timeout.
+      return Status::success();
+    }
 
-  {
-    WriteLock lock(mutex_);
     struct udev_device* device = udev_monitor_receive_device(monitor_);
     if (device == nullptr) {
       LOG(ERROR) << "udev monitor returned invalid device";
@@ -98,8 +96,8 @@ Status UdevEventPublisher::run() {
     udev_device_unref(device);
   }
 
-  pauseMilli(kUdevMLatency);
-  return Status(0, "OK");
+  pause(std::chrono::milliseconds(kUdevMLatency));
+  return Status::success();
 }
 
 std::string UdevEventPublisher::getValue(struct udev_device* device,
@@ -179,4 +177,4 @@ bool UdevEventPublisher::shouldFire(const UdevSubscriptionContextRef& sc,
 
   return true;
 }
-}
+} // namespace osquery

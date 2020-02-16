@@ -2,27 +2,22 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#include <regex>
 #include <string>
 #include <vector>
 
-#include <boost/xpressive/xpressive.hpp>
-
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
-#include <osquery/posix/system.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tables/system/system_utils.h"
-
-namespace xp = boost::xpressive;
+#include <osquery/tables/system/system_utils.h>
+#include <osquery/tables/system/posix/shell_history.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/system/system.h>
 
 namespace osquery {
 namespace tables {
@@ -31,38 +26,22 @@ const std::vector<std::string> kShellHistoryFiles = {
     ".bash_history", ".zsh_history", ".zhistory", ".history", ".sh_history",
 };
 
-void genShellHistoryForUser(const std::string& uid,
-                            const std::string& gid,
-                            const std::string& directory,
-                            QueryData& results) {
-  auto dropper = DropPrivileges::get();
-  if (!dropper->dropTo(uid, gid)) {
-    VLOG(1) << "Cannot drop privileges to UID " << uid;
-    return;
-  }
-
-  auto bash_timestamp_rx = xp::sregex::compile("^#(?P<timestamp>[0-9]+)$");
-  auto zsh_timestamp_rx = xp::sregex::compile(
-      "^: {0,10}(?P<timestamp>[0-9]{1,11}):[0-9]+;(?P<command>.*)$");
-
-  for (const auto& hfile : kShellHistoryFiles) {
-    boost::filesystem::path history_file = directory;
-    history_file /= hfile;
-
-    std::string history_content;
-    if (!forensicReadFile(history_file, history_content).ok()) {
-      // Cannot read a specific history file.
-      continue;
-    }
+void genShellHistoryFromFile(const std::string& uid,
+                             const boost::filesystem::path& history_file,
+                             QueryData& results) {
+  std::string history_content;
+  if (forensicReadFile(history_file, history_content).ok()) {
+    std::regex bash_timestamp_rx("^#([0-9]+)$");
+    std::regex zsh_timestamp_rx("^: {0,10}([0-9]{1,11}):[0-9]+;(.*)$");
 
     std::string prev_bash_timestamp;
     for (const auto& line : split(history_content, "\n")) {
-      xp::smatch bash_timestamp_matches;
-      xp::smatch zsh_timestamp_matches;
+      std::smatch bash_timestamp_matches;
+      std::smatch zsh_timestamp_matches;
 
       if (prev_bash_timestamp.empty() &&
-          xp::regex_search(line, bash_timestamp_matches, bash_timestamp_rx)) {
-        prev_bash_timestamp = bash_timestamp_matches["timestamp"];
+          std::regex_search(line, bash_timestamp_matches, bash_timestamp_rx)) {
+        prev_bash_timestamp = bash_timestamp_matches[1];
         continue;
       }
 
@@ -72,17 +51,48 @@ void genShellHistoryForUser(const std::string& uid,
         r["time"] = INTEGER(prev_bash_timestamp);
         r["command"] = line;
         prev_bash_timestamp.clear();
-      } else if (xp::regex_search(
+      } else if (std::regex_search(
                      line, zsh_timestamp_matches, zsh_timestamp_rx)) {
-        r["time"] = INTEGER(zsh_timestamp_matches["timestamp"]);
-        r["command"] = zsh_timestamp_matches["command"];
+        std::string timestamp = zsh_timestamp_matches[1];
+        r["time"] = INTEGER(timestamp);
+        r["command"] = zsh_timestamp_matches[2];
       } else {
+        r["time"] = INTEGER(0);
         r["command"] = line;
       }
 
       r["uid"] = uid;
       r["history_file"] = history_file.string();
       results.push_back(r);
+    }
+  }
+}
+
+void genShellHistoryForUser(const std::string& uid,
+                            const std::string& gid,
+                            const std::string& directory,
+                            QueryData& results) {
+  for (const auto& hfile : kShellHistoryFiles) {
+    boost::filesystem::path history_file = directory;
+    history_file /= hfile;
+    genShellHistoryFromFile(uid, history_file, results);
+  }
+}
+
+void genShellHistoryFromBashSessions(const std::string& uid,
+                                     const std::string& directory,
+                                     QueryData& results) {
+  boost::filesystem::path bash_sessions = directory;
+  bash_sessions /= ".bash_sessions";
+
+  if (pathExists(bash_sessions)) {
+    bash_sessions /= "*.history";
+    std::vector<std::string> session_hist_files;
+    resolveFilePattern(bash_sessions, session_hist_files);
+
+    for (const auto& hfile : session_hist_files) {
+      boost::filesystem::path history_file = hfile;
+      genShellHistoryFromFile(uid, history_file, results);
     }
   }
 }
@@ -98,6 +108,7 @@ QueryData genShellHistory(QueryContext& context) {
     auto dir = row.find("directory");
     if (uid != row.end() && gid != row.end() && dir != row.end()) {
       genShellHistoryForUser(uid->second, gid->second, dir->second, results);
+      genShellHistoryFromBashSessions(uid->second, dir->second, results);
     }
   }
 

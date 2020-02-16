@@ -30,7 +30,7 @@ Include line-delimited switches to be interpreted and used as CLI-flags:
 --config_plugin=custom_plugin
 --logger_plugin=custom_plugin
 --distributed_plugin=custom_plugin
---watchlog_level=2
+--watchdog_level=0
 ```
 
 If no `--flagfile` is provided, osquery will try to find and use a "default" flagfile at `/etc/osquery/osquery.flags.default`. Both the shell and daemon will discover and use the defaults.
@@ -65,7 +65,7 @@ Check the format of an osquery config and exit. Arbitrary config plugins may be 
 
 `--config_dump=false`
 
-Request that the configuration JSON be printed to standard out before it is updated. In this case "updated" means applied to the active config. When osquery starts it performs an initial update from the config plugin. To quickly debug the content retrieved by custom config plugins use this in tandem with `--config_check`.
+Request that the configuration JSON be printed to standard out before it is updated, then exit the process. In this case "updated" means applied to the active config. When osquery starts it performs an initial update from the config plugin. To quickly debug the content retrieved by custom config plugins use this in tandem with `--config_check`.
 
 ### Daemon control flags
 
@@ -175,6 +175,10 @@ Extensions are loaded as processes. They are expected to start a thrift service 
 
 Optional comma-delimited set of extension names to require before **osqueryi** or **osqueryd** will start. The tool will fail if the extension has not started according to the interval and timeout.
 
+`--extensions_default_index=true`
+
+Enable INDEX (and thereby constraints) on all extension table columns.  Provides backwards compatiblity for extensions (or SDKs) that don't correctly define indexes in column options. See issue 6006 for more details.
+
 ### Remote settings flags (optional)
 
 When using non-default [remote](../deployment/remote.md) plugins such as the **tls** config, logger and distributed plugins, there are process-wide settings applied to every plugin.
@@ -235,11 +239,15 @@ See the **tls**/[remote](../deployment/remote.md) plugin documentation. This is 
 
 Optionally enable GZIP compression for request bodies when sending. This is optional, and disabled by default, as the deployment must explicitly know that the logging endpoint supports GZIP for content encoding.
 
-`--logger_tls_max=1048576`
+`--logger_tls_max_linesize=1048576`
 
 It is common for TLS/HTTPS servers to enforce a maximum request body size. The default behavior in osquery is to enforce each log line be under 1M bytes. This means each result line from a query's results cannot exceed 1M, this is very unlikely. Each log attempt will try to forward up to 1024 lines. If your service is limited request bodies, configure the client to limit the log line size.
 
 Use this only in emergency situations as size violations are dropped. It is extremely uncommon for this to occur, as the `--value_max` for each column would need to be drastically larger, or the offending table would have to implement several hundred columns.
+
+`--logger_tls_max_lines=1024`
+
+This configures the max number of log lines to send every period (meaning every `logger_tls_period`).
 
 `--distributed_tls_read_endpoint=`
 
@@ -260,6 +268,13 @@ The total number of attempts that will be made to the remote distributed query s
 Percent to splay config times.
 The query schedule often includes several queries with the same interval.
 It is often not the intention of the schedule author to run these queries together at that interval. But rather, each query should run at about the interval. A default schedule splay of 10% is applied to each query when the configuration is loaded.
+
+`--schedule_max_drift=60`
+
+Max time drift in seconds.
+The scheduler tries to compensate the splay drift until the delta exceeds this value.
+If the max drift is exceeded the splay will be reseted to zero and the compensation process will start from the beginning.
+This is needed to avoid the problem of endless compensation (which is CPU greedy) after a long SIGSTOP/SIGCONT pause or something similar. Set it to zero to disable drift compensation.
 
 `--pack_refresh_interval=3600`
 
@@ -358,10 +373,6 @@ The minimum level for status logs written to stderr. Use the following values: `
 
 The default behavior is to also write status logs to stderr. Set this flag to false to disable writing (copying) status logs to stderr. In this case `--verbose` is respected.
 
-`--logger_secondary_status_only=false`
-
-This is a rarely used logger plugin option. When enabled, the "secondary" logger plugins will only receive status logs. For an example if your `-logger_plugin=tls,firehose,syslog` then status logs would be sent to all 3 plugins, and query results will only be sent to `tls`.
-
 `--host_identifier=hostname`
 
 Field used to identify the host running osquery: **hostname**, **uuid**, **ephemeral**, **instance**, **specified**.
@@ -418,6 +429,12 @@ The number of acknowledgments the Kafka leader has to receive before a publish i
 
 Compression codec to use for compressing message sets.  Valid options are ("none", "gzip").  Default is "none".
 
+`--buffered_log_max=1000000`
+
+There are multiple logger plugins that use a "buffered logging" implementation. The TLS and AWS loggers use this approach. This flag sets the maximum number of logs to buffer before dropping new logs. If the buffered logs have not been shuttled to the logger desintation they will be purged in order of their timestamp. The oldest logs are purged first.
+
+Setting this to value to `0` means unlimited logs will be buffered.
+
 ### Distributed query service flags
 
 `--distributed_plugin=tls`
@@ -473,3 +490,32 @@ When prototyping new queries the planner enables verbose decisions made by the S
 `--header=true`
 
 Set this value to `false` to disable column name (header) output. If using the shell in an automation or script the header line in `line` or `csv` mode may not be needed.
+
+### Numeric monitoring flags
+
+`--enable_numeric_monitoring=false`
+
+Enable numeric monitoring system. By default it is disabled.
+
+`--numeric_monitoring_plugins=filesystem`
+
+Comma separated numeric monitoring plugins. By default there is only one - filesystem.
+
+`--numeric_monitoring_pre_aggregation_time=60`
+
+Time period in _seconds_ for numeric monitoring pre-aggreagation buffer. During this period of time monitoring points are going to be pre-aggregated and accumulated in buffer. At the end of this period aggregated points will be flushed to `--numeric_monitoring_plugins`. 0 means work without buffer at all. For the most of monitoring data some aggregation will be applied on the user side. It means for such monitoring particular points means not much. And to reduce a disk usage and a network traffic some pre-aggregation is applied on osquery side.
+
+`--numeric_monitoring_filesystem_path=OSQUERY_LOG_HOME/numeric_monitoring.log`
+
+File to dump numeric monitoring records one per line. The format of the line is `<PATH><TAB><VALUE><TAB><TIMESTAMP>`. File will be opened in append mode.
+
+
+### Whitelisting and blacklisting flags
+
+`--disable_tables=table1,table2`
+
+Comma separated list of tables to blacklist. By default no tables are disabled.
+
+`--enable_tables=table1,table2`
+
+Comma separated list of tables to whitelist. By default every tables are enabled. If a specific table is set in both `--enable_tables` and `--disable_tables`, blacklisting take precedence and the table is disabled. If `--enable_tables` is defined and `--disable_tables` is not set, every tables but the one defined in `-enable_tables` are disabled.

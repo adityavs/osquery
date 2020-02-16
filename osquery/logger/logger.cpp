@@ -2,15 +2,11 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#ifdef WIN32
-#include "osquery/logger/plugins/windows_event_log.h"
-#else
+#ifndef WIN32
 #include <syslog.h>
 #endif
 
@@ -21,25 +17,28 @@
 
 #include <boost/noncopyable.hpp>
 
+#include <osquery/data_logger.h>
 #include <osquery/database.h>
 #include <osquery/events.h>
 #include <osquery/extensions.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/flags.h>
-#include <osquery/logger.h>
+#include <osquery/numeric_monitoring.h>
+#include <osquery/plugins/logger.h>
+#include <osquery/registry_factory.h>
 #include <osquery/system.h>
 
-#include "osquery/core/conversions.h"
-#include "osquery/core/json.h"
+#include <osquery/flagalias.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/info/platform_type.h>
+#include <osquery/utils/json/json.h>
+#include <osquery/utils/system/time.h>
 
-namespace pt = boost::property_tree;
 namespace rj = rapidjson;
 
 namespace osquery {
 
 FLAG(bool, verbose, false, "Enable verbose informational messages");
-FLAG_ALIAS(bool, verbose_debug, verbose);
-FLAG_ALIAS(bool, debug, verbose);
 
 /// Despite being a configurable option, this is only read/used at load.
 FLAG(bool, disable_logging, false, "Disable ERROR/INFO logging");
@@ -48,7 +47,6 @@ FLAG(string, logger_plugin, "filesystem", "Logger plugin name");
 
 /// Log each added or removed line individually, as an "event".
 FLAG(bool, logger_event_type, true, "Log scheduled results as events");
-FLAG_ALIAS(bool, log_result_events, logger_event_type);
 
 /// Log each row from a snapshot query individually, as an "event".
 FLAG(bool,
@@ -58,11 +56,6 @@ FLAG(bool,
 
 /// Alias for the minloglevel used internally by GLOG.
 FLAG(int32, logger_min_status, 0, "Minimum level for status log recording");
-
-FLAG(bool,
-     logger_secondary_status_only,
-     false,
-     "Only send status logs to secondary logger plugins");
 
 /// Alias for the stderrthreshold used internally by GLOG.
 FLAG(int32,
@@ -87,6 +80,8 @@ HIDDEN_FLAG(bool,
             false,
             "Always send status logs synchronously");
 
+DECLARE_bool(enable_numeric_monitoring);
+
 /**
  * @brief Logger plugin registry.
  *
@@ -95,8 +90,6 @@ HIDDEN_FLAG(bool,
  * a helper member for transforming PluginRequest%s to strings.
  */
 CREATE_REGISTRY(LoggerPlugin, "logger");
-
-class LoggerDisabler;
 
 /**
  * @brief A custom Glog log sink for forwarding or buffering status logs.
@@ -135,9 +128,6 @@ class BufferedLogSink : public google::LogSink, private boost::noncopyable {
   /// Accessor/mutator to dump all of the buffered logs.
   std::vector<StatusLogLine>& dump();
 
-  /// Remove the buffered log sink from Glog.
-  void disable();
-
   /// Add the buffered log sink to Glog.
   void enable();
 
@@ -162,26 +152,6 @@ class BufferedLogSink : public google::LogSink, private boost::noncopyable {
   /// Retrieve the list of enabled plugins that should have logs forwarded.
   const std::vector<std::string>& enabledPlugins() const;
 
-  /**
-   * @brief Check if a given logger plugin was the first or 'primary'.
-   *
-   * Within the osquery core the BufferedLogSink acts as a router for status
-   * logs. While initializing it inspects the set of logger plugins and saves
-   * the first as the 'primary'.
-   *
-   * Checks within the core may act on this state. Checks within extensions
-   * cannot, and thus any check for primary logger plugins is true.
-   * While this is a limitation, in practice if a remote logger plugin is called
-   * it is intended to receive all logging data.
-   *
-   * @param plugin Check if this target plugin is primary.
-   * @return true of the provided plugin was the first specified.
-   */
-  bool isPrimaryLogger(const std::string& plugin) const;
-
-  /// Set the primary logger plugin is none has been previously specified.
-  void setPrimary(const std::string& plugin);
-
  public:
   /// Queue of sender functions that relay status logs to all plugins.
   std::queue<std::future<void>> senders;
@@ -194,7 +164,7 @@ class BufferedLogSink : public google::LogSink, private boost::noncopyable {
   /// Create the log sink as buffering or forwarding.
   BufferedLogSink() = default;
 
-  /// Remove the log sink.
+  /// Stop the log sink.
   ~BufferedLogSink();
 
  private:
@@ -204,31 +174,13 @@ class BufferedLogSink : public google::LogSink, private boost::noncopyable {
   /**
    * @Brief Is the logger temporarily disabled.
    *
-   * This is an atomic because the friend class LoggerDisabler will toggle the
-   * enabled/disabled flag and call enable()/disable().
-   *
    * The Google Log Sink will still be active, but the send method also checks
    * enabled and drops log lines to the flood if the forwarder is not enabled.
    */
   std::atomic<bool> enabled_{false};
 
-  /// Boolean to help the logger disabler, no need to take action if not active.
-  bool active_{false};
-
   /// Track multiple loggers that should receive sinks from the send forwarder.
   std::vector<std::string> sinks_;
-
-  /// Keep track of the first, or 'primary' logger.
-  std::string primary_;
-
-  /// Mutex for checking primary status.
-  mutable Mutex primary_mutex_;
-
-  /// Mutex protecting activation and enabling of the buffered status logger.
-  Mutex enable_mutex_;
-
- private:
-  friend class LoggerDisabler;
 };
 
 /// Mutex protecting accesses to buffered status logs.
@@ -236,35 +188,6 @@ Mutex kBufferedLogSinkLogs;
 
 /// Mutex protecting queued status log futures.
 Mutex kBufferedLogSinkSenders;
-
-/// Scoped helper to perform logging actions without races.
-class LoggerDisabler : private boost::noncopyable {
- public:
-  LoggerDisabler();
-  ~LoggerDisabler();
-
- private:
-  /// Value of the 'logtostderr' Glog status when constructed.
-  bool stderr_status_;
-
-  /// Value of the BufferedLogSink's enabled status when constructed.
-  bool enabled_;
-};
-
-LoggerDisabler::LoggerDisabler()
-    : stderr_status_(FLAGS_logtostderr),
-      enabled_(BufferedLogSink::get().enabled_) {
-  BufferedLogSink::get().disable();
-  FLAGS_logtostderr = true;
-}
-
-LoggerDisabler::~LoggerDisabler() {
-  // Only enable if the sink was enabled when the disabler was requested.
-  if (enabled_) {
-    BufferedLogSink::get().enable();
-  }
-  FLAGS_logtostderr = stderr_status_;
-}
 
 static void serializeIntermediateLog(const std::vector<StatusLogLine>& log,
                                      PluginRequest& request) {
@@ -284,46 +207,7 @@ static void serializeIntermediateLog(const std::vector<StatusLogLine>& log,
   doc.toString(request["log"]);
 }
 
-static void deserializeIntermediateLog(const PluginRequest& request,
-                                       std::vector<StatusLogLine>& log) {
-  if (request.count("log") == 0) {
-    return;
-  }
-
-  rj::Document doc;
-  if (doc.Parse(request.at("log").c_str()).HasParseError()) {
-    return;
-  }
-
-  for (auto& line : doc.GetArray()) {
-    log.push_back({
-        static_cast<StatusLogSeverity>(line["s"].GetInt()),
-        line["f"].GetString(),
-        line["i"].GetUint64(),
-        line["m"].GetString(),
-        line["c"].GetString(),
-        line["u"].GetUint64(),
-        line["h"].GetString(),
-    });
-  }
-}
-
-inline bool logStderrOnly() {
-  // Do not write logfiles if filesystem is not included as a plugin.
-  if (Registry::get().external()) {
-    return true;
-  }
-  return Flag::getValue("logger_plugin").find("filesystem") ==
-         std::string::npos;
-}
-
 void setVerboseLevel() {
-  auto default_level = google::GLOG_INFO;
-  if (Initializer::isShell()) {
-    // Do log only WARNING, ERROR to log sinks.
-    default_level = google::GLOG_WARNING;
-  }
-
   if (Flag::getValue("verbose") == "true") {
     // Turn verbosity up to 1.
     // Do log DEBUG, INFO, WARNING, ERROR to their log files.
@@ -332,58 +216,47 @@ void setVerboseLevel() {
     FLAGS_alsologtostderr = true;
     FLAGS_v = 1;
   } else {
-    if (!Flag::isDefault("logger_min_status")) {
-      auto i = Flag::getInt32Value("logger_min_status");
-      FLAGS_minloglevel = static_cast<decltype(FLAGS_minloglevel)>(i);
-    } else if (Flag::isDefault("minloglevel")) {
-      FLAGS_minloglevel = default_level;
+    /* We use a different default for the log level if running as a daemon or if
+     * running as a shell. If the flag was set we just use that in both cases.
+     */
+    if (Flag::isDefault("logger_min_status") && Initializer::isShell()) {
+      FLAGS_minloglevel = google::GLOG_WARNING;
+    } else {
+      FLAGS_minloglevel = Flag::getInt32Value("logger_min_status");
     }
-
-    if (!Flag::isDefault("logger_min_stderr")) {
-      auto i = Flag::getInt32Value("logger_min_stderr");
-      FLAGS_stderrthreshold = static_cast<decltype(FLAGS_logger_min_stderr)>(i);
-    } else if (Flag::isDefault("stderrthreshold")) {
-      FLAGS_stderrthreshold = default_level;
-    }
+    FLAGS_stderrthreshold = Flag::getInt32Value("logger_min_stderr");
   }
 
   if (!FLAGS_logger_stderr) {
-    FLAGS_logtostderr = false;
+    FLAGS_stderrthreshold = 3;
     FLAGS_alsologtostderr = false;
   }
 
-  if (logStderrOnly()) {
-    FLAGS_logtostderr = true;
-  }
-
-  if (FLAGS_disable_logging) {
-    FLAGS_logtostderr = true;
-  }
+  FLAGS_logtostderr = true;
 }
 
 void initStatusLogger(const std::string& name, bool init_glog) {
-  FLAGS_colorlogtostderr = true;
   FLAGS_logbufsecs = 0;
   FLAGS_stop_logging_if_full_disk = true;
   // The max size for individual log file is 10MB.
   FLAGS_max_log_size = 10;
+
+  // Begin with only logging to stderr.
+  FLAGS_logtostderr = true;
+  FLAGS_stderrthreshold = 3;
 
   setVerboseLevel();
   // Start the logging, and announce the daemon is starting.
   if (init_glog) {
     google::InitGoogleLogging(name.c_str());
   }
-  BufferedLogSink::get().setUp();
+
+  if (!FLAGS_disable_logging) {
+    BufferedLogSink::get().setUp();
+  }
 }
 
 void initLogger(const std::string& name) {
-  // Check if logging is disabled, if so then no need to shuttle intermediates.
-  if (FLAGS_disable_logging) {
-    return;
-  }
-
-  // Stop the buffering sink and store the intermediate logs.
-  BufferedLogSink::get().disable();
   BufferedLogSink::get().resetPlugins();
 
   bool forward = false;
@@ -392,7 +265,6 @@ void initLogger(const std::string& name) {
   auto logger_plugin = RegistryFactory::get().getActive("logger");
   // Allow multiple loggers, make sure each is accessible.
   for (const auto& logger : osquery::split(logger_plugin, ",")) {
-    BufferedLogSink::get().setPrimary(logger);
     if (!RegistryFactory::get().exists("logger", logger)) {
       continue;
     }
@@ -425,36 +297,11 @@ BufferedLogSink& BufferedLogSink::get() {
 }
 
 void BufferedLogSink::setUp() {
-  WriteLock lock(enable_mutex_);
-
-  if (!active_) {
-    active_ = true;
-    google::AddLogSink(&get());
-  }
-}
-
-void BufferedLogSink::disable() {
-  WriteLock lock(enable_mutex_);
-
-  if (enabled_) {
-    enabled_ = false;
-    if (active_) {
-      active_ = false;
-      google::RemoveLogSink(&get());
-    }
-  }
+  google::AddLogSink(&get());
 }
 
 void BufferedLogSink::enable() {
-  WriteLock lock(enable_mutex_);
-
-  if (!enabled_) {
-    enabled_ = true;
-    if (!active_) {
-      active_ = true;
-      google::AddLogSink(&get());
-    }
-  }
+  enabled_ = true;
 }
 
 void BufferedLogSink::send(google::LogSeverity severity,
@@ -464,10 +311,6 @@ void BufferedLogSink::send(google::LogSeverity severity,
                            const struct ::tm* tm_time,
                            const char* message,
                            size_t message_len) {
-  if (FLAGS_disable_logging) {
-    return;
-  }
-
   // WARNING, be extremely careful when accessing data here.
   // This should not cause any persistent storage or logging actions.
   {
@@ -507,20 +350,8 @@ void BufferedLogSink::WaitTillSent() {
   }
 }
 
-void BufferedLogSink::setPrimary(const std::string& plugin) {
-  WriteLock lock(primary_mutex_);
-  if (primary_.empty()) {
-    primary_ = plugin;
-  }
-}
-
 std::vector<StatusLogLine>& BufferedLogSink::dump() {
   return logs_;
-}
-
-bool BufferedLogSink::isPrimaryLogger(const std::string& plugin) const {
-  WriteLock lock(primary_mutex_);
-  return (primary_.empty() || plugin == primary_);
 }
 
 void BufferedLogSink::addPlugin(const std::string& name) {
@@ -536,35 +367,7 @@ const std::vector<std::string>& BufferedLogSink::enabledPlugins() const {
 }
 
 BufferedLogSink::~BufferedLogSink() {
-  disable();
-}
-
-Status LoggerPlugin::call(const PluginRequest& request,
-                          PluginResponse& response) {
-  QueryLogItem item;
-  std::vector<StatusLogLine> intermediate_logs;
-  if (request.count("string") > 0) {
-    return this->logString(request.at("string"));
-  } else if (request.count("snapshot") > 0) {
-    return this->logSnapshot(request.at("snapshot"));
-  } else if (request.count("init") > 0) {
-    deserializeIntermediateLog(request, intermediate_logs);
-    this->setProcessName(request.at("init"));
-    this->init(this->name(), intermediate_logs);
-    return Status(0);
-  } else if (request.count("status") > 0) {
-    deserializeIntermediateLog(request, intermediate_logs);
-    return this->logStatus(intermediate_logs);
-  } else if (request.count("event") > 0) {
-    return this->logEvent(request.at("event"));
-  } else if (request.count("action") && request.at("action") == "features") {
-    size_t features = 0;
-    features |= (usesLogStatus()) ? LOGGER_FEATURE_LOGSTATUS : 0;
-    features |= (usesLogEvent()) ? LOGGER_FEATURE_LOGEVENT : 0;
-    return Status(static_cast<int>(features));
-  } else {
-    return Status(1, "Unsupported call to logger plugin");
-  }
+  enabled_ = false;
 }
 
 Status logString(const std::string& message, const std::string& category) {
@@ -576,16 +379,11 @@ Status logString(const std::string& message,
                  const std::string& category,
                  const std::string& receiver) {
   if (FLAGS_disable_logging) {
-    return Status(0, "Logging disabled");
+    return Status::success();
   }
 
   Status status;
   for (const auto& logger : osquery::split(receiver, ",")) {
-    if (FLAGS_logger_secondary_status_only &&
-        !BufferedLogSink::get().isPrimaryLogger(logger)) {
-      continue;
-    }
-
     if (Registry::get().exists("logger", logger, true)) {
       auto plugin = Registry::get().plugin("logger", logger);
       auto logger_plugin = std::dynamic_pointer_cast<LoggerPlugin>(plugin);
@@ -598,6 +396,10 @@ Status logString(const std::string& message,
   return status;
 }
 
+namespace {
+const std::string kTotalQueryCounterMonitorPath("query.total.count");
+}
+
 Status logQueryLogItem(const QueryLogItem& results) {
   return logQueryLogItem(results, RegistryFactory::get().getActive("logger"));
 }
@@ -605,7 +407,12 @@ Status logQueryLogItem(const QueryLogItem& results) {
 Status logQueryLogItem(const QueryLogItem& results,
                        const std::string& receiver) {
   if (FLAGS_disable_logging) {
-    return Status(0, "Logging disabled");
+    return Status::success();
+  }
+
+  if (FLAGS_enable_numeric_monitoring) {
+    monitoring::record(
+        kTotalQueryCounterMonitorPath, 1, monitoring::PreAggregationType::Sum);
   }
 
   std::vector<std::string> json_items;
@@ -629,7 +436,12 @@ Status logQueryLogItem(const QueryLogItem& results,
 
 Status logSnapshotQuery(const QueryLogItem& item) {
   if (FLAGS_disable_logging) {
-    return Status(0, "Logging disabled");
+    return Status::success();
+  }
+
+  if (FLAGS_enable_numeric_monitoring) {
+    monitoring::record(
+        kTotalQueryCounterMonitorPath, 1, monitoring::PreAggregationType::Sum);
   }
 
   std::vector<std::string> json_items;
@@ -648,11 +460,6 @@ Status logSnapshotQuery(const QueryLogItem& item) {
   for (const auto& json : json_items) {
     auto receiver = RegistryFactory::get().getActive("logger");
     for (const auto& logger : osquery::split(receiver, ",")) {
-      if (FLAGS_logger_secondary_status_only &&
-          !BufferedLogSink::get().isPrimaryLogger(logger)) {
-        continue;
-      }
-
       if (Registry::get().exists("logger", logger, true)) {
         auto plugin = Registry::get().plugin("logger", logger);
         auto logger_plugin = std::dynamic_pointer_cast<LoggerPlugin>(plugin);
@@ -739,4 +546,4 @@ void systemLog(const std::string& line) {
   syslog(LOG_NOTICE, "%s", line.c_str());
 #endif
 }
-}
+} // namespace osquery

@@ -1,40 +1,33 @@
-#  Copyright (c) 2014-present, Facebook, Inc.
-#  All rights reserved.
+# Copyright (c) 2014-present, Facebook, Inc.
+# All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
+# This source code is licensed in accordance with the terms specified in
+# the LICENSE file found in the root directory of this source tree.
 
-ADD_OSQUERY_LIBRARY(TRUE osquery_database
-  database.cpp
-  plugins/ephemeral.cpp
-)
+function(osqueryDatabaseMain)
 
-# Optionally (but by default), add the RocksDB database plugin.
-add_definitions(-DROCKSDB_LITE=1)
+  if(OSQUERY_BUILD_TESTS)
+    add_subdirectory("tests")
+  endif()
 
-# Begin with just the SQLite database plugin.
-set(OSQUERY_DATABASE_PLUGINS
-  plugins/sqlite.cpp
-  plugins/rocksdb.cpp
-)
+  generateOsqueryDatabase()
+endfunction()
 
-set(OSQUERY_DATABASE_PLUGIN_TESTS
-  database/tests/plugin_tests.cpp
-  database/plugins/tests/sqlite_tests.cpp
-  database/plugins/tests/rocksdb_tests.cpp
-)
+function(generateOsqueryDatabase)
+  add_osquery_library(osquery_database EXCLUDE_FROM_ALL
+    database.cpp
+  )
 
-# Plugins (which do not include the shim/ephemeral) are 'additional'.
-ADD_OSQUERY_LIBRARY(FALSE osquery_database_plugins ${OSQUERY_DATABASE_PLUGINS})
+  target_link_libraries(osquery_database PUBLIC
+    osquery_cxx_settings
+    osquery_core
+    osquery_utils
+    osquery_utils_conversions
+    thirdparty_boost
+  )
 
-# Non-plugin tests are core.
-file(GLOB OSQUERY_DATABASE_TESTS "tests/*.cpp")
-ADD_OSQUERY_TEST(TRUE ${OSQUERY_DATABASE_TESTS})
+  add_test(NAME osquery_database_tests-test COMMAND osquery_database_tests-test)
+  add_test(NAME osquery_database_tests_results-test COMMAND osquery_database_tests_results-test)
+endfunction()
 
-# Plugin tests are additional.
-ADD_OSQUERY_TEST(FALSE ${OSQUERY_DATABASE_PLUGIN_TESTS})
-
-file(GLOB OSQUERY_DATABASE_BENCHMARKS "benchmarks/*.cpp")
-ADD_OSQUERY_BENCHMARK(${OSQUERY_DATABASE_BENCHMARKS})
+osqueryDatabaseMain()

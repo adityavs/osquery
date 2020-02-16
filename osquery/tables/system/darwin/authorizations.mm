@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -13,11 +11,9 @@
 #include <Security/Security.h>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
 
 namespace osquery {
 namespace tables {
@@ -101,44 +97,41 @@ QueryData genAuthorizationMechanisms(QueryContext& context) {
 QueryData genAuthorizations(QueryContext& context) {
   QueryData results;
 
-  authorizations(
-      context, ([&results](NSString* label) {
-        CFDictionaryRef rights = nullptr;
-        AuthorizationRightGet([label UTF8String], &rights);
-        if (rights == nullptr) {
-          return;
-        }
-
-        CFIndex count = CFDictionaryGetCount(rights);
-        std::vector<const void*> keys(count);
-        std::vector<const void*> values(count);
-        CFDictionaryGetKeysAndValues(rights, keys.data(), values.data());
-        if (keys.data() == nullptr || values.data() == nullptr) {
-          CFRelease(rights);
-          return;
-        }
-
-        Row r;
-        for (CFIndex i = 0; i < count; i++) {
-          r["label"] = TEXT([label UTF8String]);
-          id value = (__bridge id)values[i];
-          auto key = [[(__bridge NSString*)keys[i]
-              stringByReplacingOccurrencesOfString:@"-"
-                                        withString:@"_"] UTF8String];
-
-          if (CFGetTypeID(values[i]) == CFNumberGetTypeID()) {
-            r[key] = TEXT([value intValue]);
-          } else if (CFGetTypeID(values[i]) == CFStringGetTypeID()) {
-            r[key] = TEXT([value UTF8String]);
-          } else if (CFGetTypeID(values[i]) == CFBooleanGetTypeID()) {
-            r[key] = TEXT(([value boolValue]) ? "true" : "false");
+  @autoreleasepool {
+    authorizations(
+        context, ([&results](NSString* label) {
+          CFDictionaryRef rights = nullptr;
+          AuthorizationRightGet([label UTF8String], &rights);
+          if (rights == nullptr) {
+            return;
           }
-        }
 
-        results.push_back(r);
-        CFRelease(rights);
-      }));
+          CFIndex count = CFDictionaryGetCount(rights);
+          std::vector<const void*> keys(count);
+          std::vector<const void*> values(count);
+          CFDictionaryGetKeysAndValues(rights, keys.data(), values.data());
 
+          Row r;
+          for (CFIndex i = 0; i < count; i++) {
+            r["label"] = TEXT([label UTF8String]);
+            id value = (__bridge id)values[i];
+            auto key = [[(__bridge NSString*)keys[i]
+                stringByReplacingOccurrencesOfString:@"-"
+                                          withString:@"_"] UTF8String];
+
+            if (CFGetTypeID(values[i]) == CFNumberGetTypeID()) {
+              r[key] = TEXT([value intValue]);
+            } else if (CFGetTypeID(values[i]) == CFStringGetTypeID()) {
+              r[key] = TEXT([value UTF8String]);
+            } else if (CFGetTypeID(values[i]) == CFBooleanGetTypeID()) {
+              r[key] = TEXT(([value boolValue]) ? "true" : "false");
+            }
+          }
+
+          results.push_back(r);
+          CFRelease(rights);
+        }));
+  }
   return results;
 }
 }

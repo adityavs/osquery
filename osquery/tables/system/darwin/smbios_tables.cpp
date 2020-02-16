@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iomanip>
@@ -15,11 +13,12 @@
 #include <IOKit/IOKitLib.h>
 
 #include <boost/algorithm/string.hpp>
+#include <boost/lexical_cast.hpp>
 
+#include <osquery/utils/conversions/darwin/iokit.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/darwin/iokit.hpp"
-#include "osquery/tables/system/smbios_utils.h"
+#include <osquery/tables/system/smbios_utils.h>
+#include <osquery/utils/conversions/join.h>
 
 namespace osquery {
 namespace tables {
@@ -101,10 +100,125 @@ QueryData genSMBIOSTables(QueryContext& context) {
     parser.tables(([&results](size_t index,
                               const SMBStructHeader* hdr,
                               uint8_t* address,
+                              uint8_t* textAddrs,
                               size_t size) {
       genSMBIOSTable(index, hdr, address, size, results);
     }));
   }
+  return results;
+}
+
+QueryData genMemoryDevices(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSMemoryDevices(index, hdr, address, textAddrs, size, results);
+  });
+
+  return results;
+}
+
+QueryData genMemoryArrays(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSMemoryArrays(index, hdr, address, size, results);
+  });
+
+  return results;
+}
+
+QueryData genMemoryArrayMappedAddresses(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSMemoryArrayMappedAddresses(index, hdr, address, size, results);
+  });
+
+  return results;
+}
+
+QueryData genMemoryErrorInfo(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSMemoryErrorInfo(index, hdr, address, size, results);
+  });
+
+  return results;
+}
+
+QueryData genMemoryDeviceMappedAddresses(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSMemoryDeviceMappedAddresses(index, hdr, address, size, results);
+  });
+
+  return results;
+}
+
+QueryData genOEMStrings(QueryContext& context) {
+  QueryData results;
+
+  DarwinSMBIOSParser parser;
+  if (!parser.discover()) {
+    return results;
+  }
+
+  parser.tables([&results](size_t index,
+                           const SMBStructHeader* hdr,
+                           uint8_t* address,
+                           uint8_t* textAddrs,
+                           size_t size) {
+    genSMBIOSOEMStrings(hdr, address, textAddrs, size, results);
+  });
+
   return results;
 }
 
@@ -166,5 +280,5 @@ QueryData genPlatformInfo(QueryContext& context) {
   CFRelease(details);
   return {r};
 }
-}
-}
+} // namespace tables
+} // namespace osquery

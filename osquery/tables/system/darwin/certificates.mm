@@ -2,18 +2,17 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#include <openssl/x509.h>
+
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
-
-#include "osquery/tables/system/darwin/keychain.h"
+#include <osquery/tables/system/darwin/keychain.h>
 
 namespace osquery {
 namespace tables {
@@ -128,48 +127,50 @@ QueryData genCerts(QueryContext& context) {
         return status;
       }));
 
-  if (!paths.empty()) {
-    for (const auto& path : paths) {
-      SecKeychainRef keychain = nullptr;
-      SecKeychainStatus keychain_status;
-      auto status = SecKeychainOpen(path.c_str(), &keychain);
-      if (status != errSecSuccess || keychain == nullptr ||
-          SecKeychainGetStatus(keychain, &keychain_status) != errSecSuccess) {
-        if (keychain != nullptr) {
+  @autoreleasepool {
+    if (!paths.empty()) {
+      for (const auto& path : paths) {
+        SecKeychainRef keychain = nullptr;
+        SecKeychainStatus keychain_status;
+        auto status = SecKeychainOpen(path.c_str(), &keychain);
+        if (status != errSecSuccess || keychain == nullptr ||
+            SecKeychainGetStatus(keychain, &keychain_status) != errSecSuccess) {
+          if (keychain != nullptr) {
+            CFRelease(keychain);
+          }
+          genFileCertificate(path, results);
+        } else {
+          keychain_paths.insert(path);
           CFRelease(keychain);
         }
-        genFileCertificate(path, results);
-      } else {
+      }
+    } else {
+      for (const auto& path : kSystemKeychainPaths) {
         keychain_paths.insert(path);
-        CFRelease(keychain);
+      }
+      auto homes = osquery::getHomeDirectories();
+      for (const auto& dir : homes) {
+        for (const auto& keychains_dir : kUserKeychainPaths) {
+          keychain_paths.insert((dir / keychains_dir).string());
+        }
       }
     }
-  } else {
-    for (const auto& path : kSystemKeychainPaths) {
-      keychain_paths.insert(path);
-    }
-    auto homes = osquery::getHomeDirectories();
-    for (const auto& dir : homes) {
-      for (const auto& keychains_dir : kUserKeychainPaths) {
-        keychain_paths.insert((dir / keychains_dir).string());
+
+    // Keychains/certificate stores belonging to the OS.
+    CFArrayRef certs =
+        CreateKeychainItems(keychain_paths, kSecClassCertificate);
+    // Must have returned an array of matching certificates.
+    if (certs != nullptr) {
+      if (CFGetTypeID(certs) == CFArrayGetTypeID()) {
+        auto certificate_count = CFArrayGetCount(certs);
+        for (CFIndex i = 0; i < certificate_count; i++) {
+          auto cert = (SecCertificateRef)CFArrayGetValueAtIndex(certs, i);
+          genKeychainCertificate(cert, results);
+        }
       }
+      CFRelease(certs);
     }
   }
-
-  // Keychains/certificate stores belonging to the OS.
-  CFArrayRef certs = CreateKeychainItems(keychain_paths, kSecClassCertificate);
-  // Must have returned an array of matching certificates.
-  if (certs != nullptr) {
-    if (CFGetTypeID(certs) == CFArrayGetTypeID()) {
-      auto certificate_count = CFArrayGetCount(certs);
-      for (CFIndex i = 0; i < certificate_count; i++) {
-        auto cert = (SecCertificateRef)CFArrayGetValueAtIndex(certs, i);
-        genKeychainCertificate(cert, results);
-      }
-    }
-    CFRelease(certs);
-  }
-
   return results;
 }
 }

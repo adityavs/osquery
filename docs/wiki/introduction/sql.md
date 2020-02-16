@@ -44,7 +44,7 @@ CREATE TABLE process_open_sockets(pid INTEGER, fd BIGINT, socket BIGINT, family 
 CREATE TABLE processes(pid BIGINT, name TEXT, path TEXT, cmdline TEXT, state TEXT, cwd TEXT, root TEXT, uid BIGINT, gid BIGINT, euid BIGINT, egid BIGINT, suid BIGINT, sgid BIGINT, on_disk INTEGER, wired_size BIGINT, resident_size BIGINT, phys_footprint BIGINT, user_time BIGINT, system_time BIGINT, start_time BIGINT, parent BIGINT, pgroup BIGINT, nice INTEGER);
 ```
 
-This [complete schema](https://osquery.io/schema/) for all supported platforms is available on the homepage. To see schema in your shell for tables foreign to your OS, like kernel modules on OSX, use the `--enable_foreign` [command line flag](../installation/cli-flags.md).
+This [complete schema](https://osquery.io/schema/) for all supported platforms is available on the homepage. To see schema in your shell for tables foreign to your OS, like kernel modules on macOS, use the `--enable_foreign` [command line flag](../installation/cli-flags.md).
 
 ### Your first query
 
@@ -76,7 +76,7 @@ osquery> SELECT * FROM osquery_info;
           uuid = 4892E1C6-F800-5F8E-92B1-BC2216C29D4F
    instance_id = 94c004b0-49e5-4ece-93e6-96c1939c0f83
        version = 2.4.6
-   config_hash = 
+   config_hash =
   config_valid = 0
     extensions = active
 build_platform = darwin
@@ -154,10 +154,11 @@ osquery> SELECT count(1) FROM file WHERE path LIKE '/dev/%';
 count(1) = 568
 ```
 
-The documentation for [`file`](https://osquery.io/schema/#file) says both `path` and `directory` can be used as input parameters. In *most* cases these columns and tables should "do the right thing" and respond to various operators. String data, like paths, are not easily compared so `=` or `<>` and `LIKE` are the only operators that make sense.
+The documentation for [`file`](https://osquery.io/schema/current/#file) says both `path` and `directory` can be used as input parameters. In *most* cases these columns and tables should "do the right thing" and respond to various operators. String data, like paths, are not easily compared so `=` or `<>` and `LIKE` are the only operators that make sense.
 
 Let's get semi-fancy:
 ```
+osquery> .mode line
 osquery> SELECT path, inode, size, type
     ...>   FROM file
     ...>   WHERE path IN (SELECT '/dev/zero');
@@ -167,8 +168,9 @@ inode = 304
  type = character
 ```
 
-Now let's introduce the [`hash`](https://osquery.io/schema/#hash) table and hopefully show something useful, like the hash of the last file modified in `/etc`:
+Now let's introduce the [`hash`](https://osquery.io/schema/current/#hash) table and hopefully show something useful, like the hash of the last file modified in `/etc`:
 ```
+osquery> .mode line
 osquery> SELECT path, mtime, sha256
     ...>   FROM file
     ...>   JOIN hash USING (path)
@@ -186,30 +188,266 @@ osquery includes various 'additional' SQL functions and aggregations. We try to 
 **Math functions**
 
 osquery includes the following C-math functions: `sqrt`, `log`, `log10`, `ceil`, `floor`, `power`, `pi`.
+<details>
+<summary>C-Math function examples:</summary>
+<p>
+
+    osquery> .mode line
+
+    osquery> select disk_size as disk_size from disk_info;
+    disk_size = 107372805120
+
+    osquery> select sqrt(disk_size) as disk_size from disk_info;
+    disk_size = 327677.898430761
+
+    osquery> select log(disk_size) as disk_size from disk_info;
+    disk_size = 25.3995727757846
+
+    osquery> select log10(disk_size) as disk_size from disk_info;
+    disk_size = 11.0308942992233
+
+    osquery> select ceil(disk_size) as disk_size from disk_info;
+    disk_size = 107372805120
+
+    osquery> select floor(disk_size) as disk_size from disk_info;
+    disk_size = 107372805120
+
+    osquery> select power(disk_size) as disk_size from disk_info;
+    disk_size = 1.15289192793375e+22
+
+    osquery> select pi() * disk_size as disk_size from disk_info;
+    disk_size = 337321615760.32
+
+</p>
+</details>
+
 
 The following trig functions: `sin`, `cos`, `tan`, `cot`, `asin`, `acos`, `atan`, and `radians` to `degrees` conversions.
+<details>
+<summary>Trig functions examples:</summary>
+<p>
+
+    osquery .mode line
+
+    osquery> select sin(30);
+    sin(30) = -0.988031624092862
+
+    osquery> select cos(30);
+    cos(30) = 0.154251449887584
+
+    osquery> select tan(30);
+    tan(30) = -6.40533119664628
+
+    osquery> select cot(30);
+    cot(30) = -0.156119952161659
+
+    osquery> select asin(.5);
+    asin(.5) = 0.523598775598299
+
+    osquery> select acos(.5);
+    acos(.5) = 1.0471975511966
+
+    osquery> select atan(.5);
+    atan(.5) = 0.463647609000806
+
+    osquery> select radians(60);
+    radians(60) = 1.0471975511966
+
+    osquery> select degrees(1.3);
+    degrees(1.3) = 74.484513367007
+
+</p>
+</details>
 
 **String functions**
 
 String parsing functions are always helpful, some help within subqueries so they make sense as local-additions:
 
 - `split(COLUMN, TOKENS, INDEX)`: split `COLUMN` using any character token from `TOKENS` and return the `INDEX` result. If an `INDEX` result does not exist, a `NULL` type is returned.
-- `regex_split(COLUMN, PATTERN, INDEX)`: similar to split, but instead of `TOKENS`, apply the POSIX regex `PATTERN` (as interpreted by boost::regex).
+
+    <details>
+    <summary>Split function example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select uid from users;
+      uid = 500
+
+      uid = 1001
+
+      osquery> select split(uid, 1, 0) from users;
+      split(uid, 1, 0) = 500
+
+      split(uid, 1, 0) = 00
+
+    </p>
+    </details>
+
+- `regex_split(COLUMN, PATTERN, INDEX)`: similar to split, but instead of `TOKENS`, apply the POSIX regex `PATTERN` (as interpreted by std::regex).
+
+    <details>
+    <summary>Regex Split function example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select uid from users;
+      uid = 500
+
+      uid = 1001
+
+      osquery> select split(uid, ("[1-5]"), 0) from users;
+      split(uid, 1, 0) = 00
+
+      split(uid, 1, 0) = 00
+
+    </p>
+    </details>
+
+- `regex_match(COLUMN, PATTERN, INDEX)`: Runs regex match across the column, and returns matched subgroups. (The 0 index is the full match, subsequent numbers are the groups).
+
+    <details>
+    <summary>Regex Match function example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select regex_match('hello world. Goodbye', '(\w+) \w+', 0) as m0,
+	                  regex_match('hello world. Goodbye', '(\w+) \w+', 1) as m1;
+      m0 = hello world
+      m1 = hello
+    </p>
+    </details>
+
+
 - `inet_aton(IPv4_STRING)`: return the integer representation of an IPv4 string.
+
+    <details>
+    <summary>IPv4 Int representation example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select inet_aton("1.0.1.5") as ipInt
+      ipInt = 16777477
+
+    </p>
+    </details>
 
 **Hashing functions**
 
 We have added `sha1`, `sha256`, and `md5` functions that take a single argument and return the hashed value.
+<details>
+<summary>Hashing functions example:</summary>
+<p>
+
+    osquery> .mode line
+
+    osquery> select username from users;
+    username = Guest
+
+    username = System
+
+    osquery> select sha1(username) as usernameHash from users;
+    usernameHash = face83ee3014bdc8f98203cc94e2e89222452e90
+
+    usernameHash = 29d43743c43bda9873fc7a79c99f2ec4b6b442b1
+
+    osquery> select sha256(username) as usernameHash from users;
+    usernameHash = a835887ac13e6558ea6cb404aae6a35b7cbff6796af813d72f7b8d08f3fa0ec9
+
+    usernameHash = 4d2c882abd33183be08ec6f4b47a1f09d3dd211de7556d9b587f7e34eec5ed0b
+
+    osquery> select md5(username) as usernameHash from users;
+    usernameHash = 7d4ef62de50874a4db33e6da3ff79f75
+
+    usernameHash = 2a44946d16fe86e63a7e078744c58d56
+
+</p>
+</details>
+
+- `community_id_v1(SOURCE_ADDR, DEST_ADDR, SOURCE_PORT, DEST_PORT, PROTOCOL, SEED)`: returns the [Community ID v1 hash](https://github.com/corelight/community-id-spec) of the network connection. This can be used to match with the Community ID generated by other tools such as Zeek and Suricata. `SEED` is optional and will be set to `0` if omitted. If some values are missing or cannot be parsed, the function will return an empty result and log a warning. For strict error checking (resulting in failure of the query), use `community_id_v1_strict`.
+
+    <details>
+    <summary>Community ID v1 Example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select community_id_v1('66.35.250.204', '128.232.110.120', 80, 34855, 6) AS community_id;
+      community_id = 1:LQU9qZlK+B5F3KDmev6m5PMibrg=
+      osquery> select community_id_v1('66.35.250.204', '2001:0:3238:DFE1:63::FEFB', 80, 2347, 6) AS community_id;
+      community_id = 1:rxU6O+b2d9kbSWjRmVDoBbowx6g=
+      osquery> select community_id_v1('66.35.250.204', '2001:0:3238:DFE1:63::FEFB', 80, 2347, 6, 37) AS community_id_with_seed;
+      community_id_with_seed = 1:jmJ2ORP31di4mtsQPIKzyoEb3yo=
+      osquery> select community_id_v1(local_address,remote_address,local_port,remote_port,protocol) as community_id from process_open_sockets limit 2;
+      community_id = 1:PaAbtXl8lgQoYFUShUQwXpcNVfw=
+      W0129 10:34:47.759569 195012032 sqlite_hashing.cpp:226] Community ID saddr cannot be parsed as IP
+
+      community_id =
+
+    </p>
+    </details>
+
 
 **Encoding functions**
 
 There are also encoding functions available to you to process query results.
-- `base64`: base64 encode a string.
-- `unbase64`: Decode a base64 encoded string. If the string is not valid base64 an empty string is returned.
-- `conditional_base64`: Encode a string if and only if the string contains non-ASCII characters. 
+- `to_base64`: base64 encode a string.
+    <details>
+    <summary>Base64 encode example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select device_id from cpu_info;
+      device_id = CPU0
+
+      osquery> select to_base64(device_id) as device_id from cpu_info;
+      device_id = Q1BVMA==
+
+    </p>
+    </details>
+- `from_base64`: Decode a base64 encoded string. If the string is not valid base64 an empty string is returned.
+    <details>
+    <summary>Base64 decode example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select device_id from cpu_info;
+      device_id = CPU0
+
+      osquery> select to_base64(device_id) as device_id from cpu_info;
+      device_id = Q1BVMA==
+
+      select from_base64(to_base64(device_id)) as device_id from cpu_info;
+      device_id = CPU0
+
+    </p>
+    </details>
+- `conditional_to_base64`: Encode a string if and only if the string contains non-ASCII characters.
+    <details>
+    <summary>Conditional Base64 encode example:</summary>
+    <p>
+
+      osquery> .mode line
+
+      osquery> select device_id from cpu_info;
+      device_id = CPU0
+
+      osquery> select conditional_to_base64(device_id) as device_id from cpu_info;
+      device_id = CPU0
+
+      osquery> select conditional_to_base64(device_id + char(183)) as device_id from cpu_info;
+      device_id = 0
+
+    </p>
+    </details>
 
 ### Table and column name deprecations
 
 Over time it may makes sense to rename tables and columns. osquery tries to apply plurals to table names and achieve the easiest foreign key JOIN syntax. This often means slightly skewing concept attributes or biasing towards diction used by POSIX.
 
-The tools makes an effort to mark deprecated tables and create 'clone' `VIEW`s so previously scheduled queries continue to work. Similarly for old column names, the column will be marked `HIDDEN` and only returned if explicitly selected. This does not make queries using `*` future-proof, as they will begin using the new column names when the client is updated. All of these changes are considered osquery API changes and marked as such in [release notes](https://github.com/facebook/osquery/releases) on GitHub.
+The tools makes an effort to mark deprecated tables and create 'clone' `VIEW`s so previously scheduled queries continue to work. Similarly for old column names, the column will be marked `HIDDEN` and only returned if explicitly selected. This does not make queries using `*` future-proof, as they will begin using the new column names when the client is updated. All of these changes are considered osquery API changes and marked as such in [release notes](https://github.com/osquery/osquery/releases) on GitHub.

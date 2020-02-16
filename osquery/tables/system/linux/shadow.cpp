@@ -2,27 +2,23 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <mutex>
+#include <regex>
 
 #include <shadow.h>
 
-#include <boost/regex.hpp>
-
 #include <osquery/core.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
+#include <osquery/utils/mutex.h>
 
 namespace osquery {
 namespace tables {
 
-const auto kPasswordHashAlgRegex = boost::regex("^\\$(\\w+)\\$");
+const auto kPasswordHashAlgRegex = std::regex("^\\$(\\w+)\\$");
 
 void genShadowForAccount(const struct spwd* spwd, QueryData& results) {
   Row r;
@@ -38,7 +34,7 @@ void genShadowForAccount(const struct spwd* spwd, QueryData& results) {
 
   if (spwd->sp_pwdp != nullptr) {
     std::string password = std::string(spwd->sp_pwdp);
-    boost::smatch matches;
+    std::smatch matches;
     if (password == "!!") {
       r["password_status"] = "not_set";
     } else if (password[0] == '!' || password[0] == '*' || password[0] == 'x') {
@@ -46,7 +42,7 @@ void genShadowForAccount(const struct spwd* spwd, QueryData& results) {
     } else {
       r["password_status"] = "active";
     }
-    if (boost::regex_search(password, matches, kPasswordHashAlgRegex)) {
+    if (std::regex_search(password, matches, kPasswordHashAlgRegex)) {
       r["hash_alg"] = std::string(matches[1]);
     }
   } else {

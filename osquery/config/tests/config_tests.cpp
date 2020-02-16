@@ -2,38 +2,49 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include <memory>
-#include <vector>
+#include <osquery/config/config.h>
 
-#include <gtest/gtest.h>
+#include <osquery/config/tests/test_utils.h>
 
-#include <osquery/config.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/filesystem/mock_file_structure.h>
+
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/database.h>
+#include <osquery/dispatcher.h>
 #include <osquery/flags.h>
 #include <osquery/packs.h>
 #include <osquery/registry.h>
-#include <osquery/sql.h>
+#include <osquery/system.h>
 
-#include "osquery/core/json.h"
-#include "osquery/core/process.h"
-#include "osquery/tests/test_util.h"
+#include <osquery/utils/info/platform_type.h>
+#include <osquery/utils/json/json.h>
+#include <osquery/utils/system/time.h>
 
-namespace pt = boost::property_tree;
+#include <boost/filesystem/path.hpp>
+
+#include <gtest/gtest.h>
+
+#include <atomic>
+#include <chrono>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
 
 namespace osquery {
 
 DECLARE_uint64(config_refresh);
 DECLARE_uint64(config_accelerated_refresh);
+DECLARE_bool(config_enable_backup);
+DECLARE_bool(disable_database);
 
-const std::string kConfigTestNonBlacklistQuery{
-    "pack_unrestricted_pack_process_heartbeat"};
+namespace fs = boost::filesystem;
 
 // Blacklist testing methods, internal to config implementations.
 extern void restoreScheduleBlacklist(std::map<std::string, size_t>& blacklist);
@@ -43,11 +54,22 @@ extern void saveScheduleBlacklist(
 class ConfigTests : public testing::Test {
  public:
   ConfigTests() {
+    Initializer::platformSetup();
+    registryAndPluginInit();
+    FLAGS_disable_database = true;
+    DatabasePlugin::setAllowOpen(true);
+    DatabasePlugin::initPlugin();
+
     Config::get().reset();
   }
 
  protected:
+  fs::path fake_directory_;
+
+ protected:
   void SetUp() {
+    fake_directory_ = fs::canonical(createMockFileStructure());
+
     refresh_ = FLAGS_config_refresh;
     FLAGS_config_refresh = 0;
 
@@ -55,9 +77,15 @@ class ConfigTests : public testing::Test {
   }
 
   void TearDown() {
-    tearDownMockFileStructure();
-
+    fs::remove_all(fake_directory_);
     FLAGS_config_refresh = refresh_;
+  }
+
+  void resetDispatcher() {
+    auto& dispatcher = Dispatcher::instance();
+    dispatcher.stopServices();
+    dispatcher.joinServices();
+    dispatcher.resetStopping();
   }
 
  protected:
@@ -91,7 +119,7 @@ class TestConfigPlugin : public ConfigPlugin {
     }
 
     std::string content;
-    auto s = readFile(kTestDataPath + "test_noninline_packs.conf", content);
+    auto s = readFile(getTestConfigDirectory() / "test_noninline_packs.conf", content);
     config["data"] = content;
     return s;
   }
@@ -101,13 +129,38 @@ class TestConfigPlugin : public ConfigPlugin {
                  std::string& pack) override {
     gen_pack_count_++;
     getUnrestrictedPack().toString(pack);
-    return Status();
+    return Status::success();
   }
 
  public:
   std::atomic<size_t> gen_config_count_{0};
   std::atomic<size_t> gen_pack_count_{0};
   std::atomic<bool> fail_{false};
+};
+
+class TestDataConfigParserPlugin : public ConfigParserPlugin {
+ public:
+  std::vector<std::string> keys() const override {
+    return {"data"};
+  }
+
+  Status setUp() override {
+    return Status::success();
+  }
+
+  Status update(const std::string& source,
+                const ParserConfig& config) override {
+    source_ = source;
+    config_.clear();
+    for (const auto& entry : config) {
+      std::string content;
+      entry.second.toString(content);
+      config_[entry.first] = content;
+    }
+    return Status::success();
+  }
+  std::string source_{""};
+  std::map<std::string, std::string> config_;
 };
 
 TEST_F(ConfigTests, test_plugin) {
@@ -120,8 +173,7 @@ TEST_F(ConfigTests, test_plugin) {
   PluginResponse response;
   auto status = Registry::call("config", {{"action", "genConfig"}}, response);
 
-  EXPECT_EQ(status.ok(), true);
-  EXPECT_EQ(status.toString(), "OK");
+  EXPECT_EQ(status.ok(), true) << status.what();
 
   Registry::call("config", {{"action", "genConfig"}});
   EXPECT_EQ(2U, plugin->gen_config_count_);
@@ -192,8 +244,7 @@ TEST_F(ConfigTests, test_pack_noninline) {
 
   int total_packs = 0;
   // Expect the config to have recorded a pack for the inline and non-inline.
-  get().packs(
-      [&total_packs](const std::shared_ptr<Pack>& pack) { total_packs++; });
+  get().packs([&total_packs](const Pack& pack) { total_packs++; });
   EXPECT_EQ(total_packs, 2);
   rf.registry("config")->remove("test");
 }
@@ -209,57 +260,60 @@ TEST_F(ConfigTests, test_pack_restrictions) {
       {"unrestricted_pack", true},
       {"discovery_pack", false},
       {"fake_version_pack", false},
-      // Although this is a valid discovery query, there is no SQL plugin in
-      // the core tests.
-      {"valid_discovery_pack", false},
+      {"valid_discovery_pack", true},
       {"restricted_pack", false},
   };
 
-  get().packs(([&results](std::shared_ptr<Pack>& pack) {
-    if (results[pack->getName()]) {
-      EXPECT_TRUE(pack->shouldPackExecute())
-          << "Pack " << pack->getName() << " should have executed";
+  get().packs(([&results](const Pack& pack) {
+    if (results[pack.getName()]) {
+      EXPECT_TRUE(const_cast<Pack&>(pack).shouldPackExecute())
+          << "Pack " << pack.getName() << " should have executed";
     } else {
-      EXPECT_FALSE(pack->shouldPackExecute())
-          << "Pack " << pack->getName() << " should not have executed";
+      EXPECT_FALSE(const_cast<Pack&>(pack).shouldPackExecute())
+          << "Pack " << pack.getName() << " should not have executed";
     }
   }));
 }
 
 TEST_F(ConfigTests, test_pack_removal) {
   size_t pack_count = 0;
-  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  get().packs(([&pack_count](const Pack& pack) { pack_count++; }));
   EXPECT_EQ(pack_count, 0U);
 
   pack_count = 0;
   get().addPack("unrestricted_pack", "", getUnrestrictedPack().doc());
-  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  get().packs(([&pack_count](const Pack& pack) { pack_count++; }));
   EXPECT_EQ(pack_count, 1U);
 
   pack_count = 0;
   get().removePack("unrestricted_pack");
-  get().packs(([&pack_count](std::shared_ptr<Pack>& pack) { pack_count++; }));
+  get().packs(([&pack_count](const Pack& pack) { pack_count++; }));
   EXPECT_EQ(pack_count, 0U);
 }
 
 TEST_F(ConfigTests, test_content_update) {
+  const std::string source{"awesome"};
+
   // Read config content manually.
   std::string content;
-  readFile(kTestDataPath + "test_parse_items.conf", content);
+  readFile(getTestConfigDirectory() / "test_parse_items.conf", content);
 
   // Create the output of a `genConfig`.
   std::map<std::string, std::string> config_data;
-  config_data["awesome"] = content;
+  config_data[source] = content;
 
   // Update, then clear, packs should have been cleared.
   get().update(config_data);
+  auto source_hash = get().getHash(source);
+  EXPECT_EQ("dfae832a62a3e3a51760334184364b7d66468ccc", source_hash);
+
   size_t count = 0;
-  auto packCounter = [&count](std::shared_ptr<Pack>& pack) { count++; };
+  auto packCounter = [&count](const Pack& pack) { count++; };
   get().packs(packCounter);
   EXPECT_GT(count, 0U);
 
   // Now clear.
-  config_data["awesome"] = "";
+  config_data[source] = "";
   get().update(config_data);
   count = 0;
   get().packs(packCounter);
@@ -270,8 +324,8 @@ TEST_F(ConfigTests, test_get_scheduled_queries) {
   std::vector<std::string> query_names;
   get().addPack("unrestricted_pack", "", getUnrestrictedPack().doc());
   get().scheduledQueries(
-      ([&query_names](const std::string& name, const ScheduledQuery& query) {
-        query_names.push_back(name);
+      ([&query_names](std::string name, const ScheduledQuery& query) {
+        query_names.push_back(std::move(name));
       }));
 
   auto expected_size = getUnrestrictedPack().doc()["queries"].MemberCount();
@@ -294,8 +348,8 @@ TEST_F(ConfigTests, test_get_scheduled_queries) {
   // Clear the query names in the scheduled queries and request again.
   query_names.clear();
   get().scheduledQueries(
-      ([&query_names](const std::string& name, const ScheduledQuery&) {
-        query_names.push_back(name);
+      ([&query_names](std::string name, const ScheduledQuery&) {
+        query_names.push_back(std::move(name));
       }));
   // The query should not exist.
   EXPECT_EQ(std::find(query_names.begin(), query_names.end(), query_name),
@@ -304,23 +358,25 @@ TEST_F(ConfigTests, test_get_scheduled_queries) {
   // Try again, this time requesting scheduled queries.
   query_names.clear();
   bool blacklisted = false;
-  get().scheduledQueries(
-      ([&blacklisted, &query_names, &query_name](const std::string& name,
-                                                 const ScheduledQuery& query) {
-        if (name == query_name) {
-          // Only populate the query we've blacklisted.
-          query_names.push_back(name);
-          blacklisted = query.blacklisted;
-        }
-      }),
-      true);
-  ASSERT_EQ(query_names.size(), 1_sz);
+  get().scheduledQueries(([&blacklisted, &query_names, &query_name](
+                              std::string name, const ScheduledQuery& query) {
+                           if (name == query_name) {
+                             // Only populate the query we've blacklisted.
+                             query_names.push_back(std::move(name));
+                             blacklisted = query.blacklisted;
+                           }
+                         }),
+                         true);
+  ASSERT_EQ(query_names.size(), std::size_t{1});
   EXPECT_EQ(query_names[0], query_name);
   EXPECT_TRUE(blacklisted);
 }
 
 TEST_F(ConfigTests, test_nonblacklist_query) {
   std::map<std::string, size_t> blacklist;
+
+  const std::string kConfigTestNonBlacklistQuery{"pack_unrestricted_pack_process_heartbeat"};
+
   blacklist[kConfigTestNonBlacklistQuery] = getUnixTime() * 2;
   saveScheduleBlacklist(blacklist);
 
@@ -329,7 +385,7 @@ TEST_F(ConfigTests, test_nonblacklist_query) {
 
   std::map<std::string, bool> blacklisted;
   get().scheduledQueries(
-      ([&blacklisted](const std::string& name, const ScheduledQuery& query) {
+      ([&blacklisted](std::string name, const ScheduledQuery& query) {
         blacklisted[name] = query.blacklisted;
       }));
 
@@ -361,7 +417,7 @@ class TestConfigParserPlugin : public ConfigParserPlugin {
     auto obj2 = data_.getObject();
     data_.addRef("key2", "value2", obj2);
     data_.add("dictionary3", obj2, data_.doc());
-    return Status();
+    return Status::success();
   }
 
   // Flag tracking that the update method was called.
@@ -379,7 +435,7 @@ TEST_F(ConfigTests, test_get_parser) {
   rf.registry("config_parser")
       ->add("test", std::make_shared<TestConfigParserPlugin>());
 
-  auto s = get().update(getTestConfigMap());
+  auto s = get().update(getTestConfigMap("test_parse_items.conf"));
   EXPECT_TRUE(s.ok());
   EXPECT_EQ(s.toString(), "OK");
 
@@ -402,7 +458,7 @@ class PlaceboConfigParserPlugin : public ConfigParserPlugin {
     return {};
   }
   Status update(const std::string&, const ParserConfig&) override {
-    return Status();
+    return Status::success();
   }
 
   /// Make sure configure is called.
@@ -485,13 +541,14 @@ TEST_F(ConfigTests, test_pack_file_paths) {
 
 void waitForConfig(std::shared_ptr<TestConfigPlugin>& plugin, size_t count) {
   // Max wait of 3 seconds.
-  size_t delay = 3000;
-  while (delay > 0) {
+  auto delay = std::chrono::milliseconds{3000};
+  auto const step = std::chrono::milliseconds{20};
+  while (delay.count() > 0) {
     if (plugin->gen_config_count_ > count) {
       break;
     }
-    delay -= 20;
-    sleepFor(20);
+    delay -= step;
+    std::this_thread::sleep_for(step);
   }
 }
 
@@ -509,13 +566,12 @@ TEST_F(ConfigTests, test_config_refresh) {
   get().reset();
 
   // Stop the existing refresh runner thread.
-  Dispatcher::stopServices();
-  Dispatcher::joinServices();
+  resetDispatcher();
 
   // Set a config_refresh value to convince the Config to start the thread.
   FLAGS_config_refresh = 2;
   FLAGS_config_accelerated_refresh = 1;
-  get().setRefresh(FLAGS_config_refresh, 10);
+  get().setRefresh(FLAGS_config_refresh);
 
   // Fail the first config load.
   plugin->fail_ = true;
@@ -552,11 +608,62 @@ TEST_F(ConfigTests, test_config_refresh) {
   EXPECT_EQ(get().getRefresh(), FLAGS_config_refresh);
 
   // Stop the new refresh runner thread.
-  Dispatcher::stopServices();
-  Dispatcher::joinServices();
+  resetDispatcher();
 
   FLAGS_config_refresh = refresh;
   FLAGS_config_accelerated_refresh = refresh_acceleratred;
   rf.registry("config")->remove("test");
+}
+
+TEST_F(ConfigTests, test_config_backup) {
+  get().reset();
+  const std::map<std::string, std::string> expected_config = {{"a", "b"},
+                                                              {"c", "d"}};
+  get().backupConfig(expected_config);
+  const auto config = get().restoreConfigBackup();
+  EXPECT_TRUE(config);
+  EXPECT_EQ(*config, expected_config);
+}
+
+TEST_F(ConfigTests, test_config_backup_integrate) {
+  const auto config_enable_backup_saved = FLAGS_config_enable_backup;
+  FLAGS_config_enable_backup = true;
+
+  get().reset();
+  auto& rf = RegistryFactory::get();
+  auto data_parser = std::make_shared<TestDataConfigParserPlugin>();
+  auto success_plugin = std::make_shared<TestConfigPlugin>();
+  auto fail_plugin = std::make_shared<TestConfigPlugin>();
+  fail_plugin->fail_ = true;
+  success_plugin->fail_ = false;
+
+  rf.registry("config")->add("test_success", success_plugin);
+  rf.registry("config")->add("test_fail", fail_plugin);
+  rf.registry("config_parser")->add("test", data_parser);
+  // Change the active config plugin.
+  EXPECT_TRUE(rf.setActive("config", "test_success").ok());
+
+  auto status = get().refresh();
+  EXPECT_TRUE(status.ok());
+  EXPECT_EQ(success_plugin->gen_config_count_, 1);
+
+  auto source_backup = data_parser->source_;
+  auto config_backup = data_parser->config_;
+
+  EXPECT_TRUE(source_backup.length() > 0);
+
+  get().reset();
+  data_parser->source_.clear();
+  data_parser->config_.clear();
+  EXPECT_TRUE(rf.setActive("config", "test_fail").ok());
+
+  status = get().refresh();
+  EXPECT_FALSE(status.ok());
+  EXPECT_EQ(fail_plugin->gen_config_count_, 1);
+
+  EXPECT_EQ(data_parser->source_, source_backup);
+  EXPECT_EQ(data_parser->config_, config_backup);
+
+  FLAGS_config_enable_backup = config_enable_backup_saved;
 }
 }

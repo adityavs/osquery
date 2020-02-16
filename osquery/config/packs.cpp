@@ -2,24 +2,24 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <algorithm>
 #include <random>
 
-#include <osquery/core.h>
 #include <osquery/database.h>
+#include <osquery/hashing/hashing.h>
 #include <osquery/logger.h>
 #include <osquery/packs.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/core/json.h"
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/info/version.h>
+#include <osquery/utils/json/json.h>
+#include <osquery/utils/system/time.h>
 
 namespace rj = rapidjson;
 
@@ -71,12 +71,15 @@ size_t getMachineShard(const std::string& hostname = "", bool force = false) {
 
   // An optional input hostname may override hostname detection for testing.
   auto hn = (hostname.empty()) ? getHostname() : hostname;
-  auto hn_hash = getBufferSHA1(hn.c_str(), hn.size());
+
+  Hash hash(HASH_TYPE_SHA1);
+  hash.update(hn.c_str(), hn.size());
+  auto hn_hash = hash.digest();
 
   if (hn_hash.size() >= 2) {
-    long hn_char;
-    if (safeStrtol(hn_hash.substr(0, 2), 16, hn_char)) {
-      shard = (hn_char * 100) / 255;
+    auto const hn_num = tryTo<long>(hn_hash.substr(0, 2), 16);
+    if (hn_num.isValue()) {
+      shard = (hn_num.get() * 100) / 255;
     }
   }
   return shard;
@@ -90,12 +93,13 @@ size_t restoreSplayedValue(const std::string& name, size_t interval) {
     // This query name existed before, check the last requested interval.
     auto details = osquery::split(content, ":");
     if (details.size() == 2) {
-      long last_interval, last_splay;
-      if (safeStrtol(details[0], 10, last_interval) &&
-          safeStrtol(details[1], 10, last_splay)) {
-        if (last_interval == static_cast<long>(interval) && last_splay > 0) {
+      auto const last_interval_exp = tryTo<long>(details[0], 10);
+      auto const last_splay_exp = tryTo<long>(details[1], 10);
+      if (last_interval_exp.isValue() && last_splay_exp.isValue()) {
+        if (last_interval_exp.get() == static_cast<long>(interval) &&
+            last_splay_exp.get() > 0) {
           // This is a matching interval, use the previous splay.
-          return static_cast<size_t>(last_splay);
+          return static_cast<size_t>(last_splay_exp.get());
         }
       }
     }
@@ -130,6 +134,13 @@ void Pack::initialize(const std::string& name,
     version_ = obj["version"].GetString();
   }
 
+  std::string oncall;
+  if (obj.HasMember("oncall") && obj["oncall"].IsString()) {
+    oncall = obj["oncall"].GetString();
+  } else {
+    oncall = "unknown";
+  }
+
   // Apply the shard, platform, and version checking.
   // It is important to set each value such that the packs meta-table can report
   // each of the restrictions.
@@ -141,7 +152,9 @@ void Pack::initialize(const std::string& name,
   discovery_queries_.clear();
   if (obj.HasMember("discovery") && obj["discovery"].IsArray()) {
     for (const auto& item : obj["discovery"].GetArray()) {
-      discovery_queries_.push_back(item.GetString());
+      if (item.IsString()) {
+        discovery_queries_.push_back(item.GetString());
+      }
     }
   }
 
@@ -163,8 +176,8 @@ void Pack::initialize(const std::string& name,
 
   // Iterate the queries (or schedule) and check platform/version/sanity.
   for (const auto& q : obj["queries"].GetObject()) {
-    if (!q.value.IsObject()) {
-      VLOG(1) << "The pack " << name << " must contain a dictionary of queries";
+    if (!q.value.IsObject() || !q.name.IsString()) {
+      VLOG(1) << "The pack " << name << " contains an invalid query";
       continue;
     }
 
@@ -192,13 +205,17 @@ void Pack::initialize(const std::string& name,
       continue;
     }
 
-    ScheduledQuery query;
-    query.query = q.value["query"].GetString();
+    ScheduledQuery query(
+        name_, q.name.GetString(), q.value["query"].GetString());
+
+    query.oncall = oncall;
+
     if (!q.value.HasMember("interval")) {
       query.interval = FLAGS_schedule_default_interval;
     } else {
       query.interval = JSON::valueToSize(q.value["interval"]);
     }
+
     if (query.interval <= 0 || query.query.empty() ||
         query.interval > kMaxQueryInterval) {
       // Invalid pack query.
@@ -221,9 +238,11 @@ void Pack::initialize(const std::string& name,
     } else {
       query.options["removed"] = JSON::valueToBool(q.value["removed"]);
     }
-    query.options["blacklist"] = (q.value.HasMember("blacklist"))
-                                     ? q.value["blacklist"].GetBool()
-                                     : true;
+
+    query.options["blacklist"] = true;
+    if (q.value.HasMember("blacklist")) {
+      query.options["blacklist"] = JSON::valueToBool(q.value["blacklist"]);
+    }
 
     schedule_.emplace(std::make_pair(q.name.GetString(), std::move(query)));
   }
@@ -266,37 +285,12 @@ const std::string& Pack::getSource() const {
   return source_;
 }
 
-void Pack::setName(const std::string& name) {
-  name_ = name;
-}
-
 bool Pack::checkPlatform() const {
   return checkPlatform(platform_);
 }
 
 bool Pack::checkPlatform(const std::string& platform) const {
-  if (platform.empty() || platform == "null") {
-    return true;
-  }
-
-  if (platform.find("any") != std::string::npos ||
-      platform.find("all") != std::string::npos) {
-    return true;
-  }
-
-  auto linux_type = (platform.find("linux") != std::string::npos ||
-                     platform.find("ubuntu") != std::string::npos ||
-                     platform.find("centos") != std::string::npos);
-  if (linux_type && isPlatform(PlatformType::TYPE_LINUX)) {
-    return true;
-  }
-
-  auto posix_type = (platform.find("posix") != std::string::npos);
-  if (posix_type && isPlatform(PlatformType::TYPE_POSIX)) {
-    return true;
-  }
-
-  return (platform.find(kSDKPlatform) != std::string::npos);
+  return ::osquery::checkPlatform(platform);
 }
 
 bool Pack::checkVersion() const {

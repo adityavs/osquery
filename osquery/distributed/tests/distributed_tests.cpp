@@ -2,36 +2,41 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iostream>
 
-#include <boost/property_tree/ptree.hpp>
-
 #include <gtest/gtest.h>
 
 #include <osquery/core.h>
+#include <osquery/database.h>
 #include <osquery/distributed.h>
 #include <osquery/enroll.h>
+#include <osquery/registry_factory.h>
 #include <osquery/sql.h>
 
-#include "osquery/core/json.h"
+#include "osquery/remote/tests/test_utils.h"
 #include "osquery/sql/sqlite_util.h"
-#include "osquery/tests/test_additional_util.h"
-#include "osquery/tests/test_util.h"
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/json/json.h>
 
-namespace pt = boost::property_tree;
-
+namespace osquery {
+DECLARE_bool(disable_database);
 DECLARE_string(distributed_tls_read_endpoint);
 DECLARE_string(distributed_tls_write_endpoint);
 
-namespace osquery {
-
 class DistributedTests : public testing::Test {
+ protected:
+  void SetUp() override {
+    Initializer::platformSetup();
+    registryAndPluginInit();
+    FLAGS_disable_database = true;
+    DatabasePlugin::setAllowOpen(true);
+    DatabasePlugin::initPlugin();
+  }
+
  protected:
   void TearDown() override {
     if (server_started_) {
@@ -46,8 +51,11 @@ class DistributedTests : public testing::Test {
     }
   }
 
-  void startServer() {
-    TLSServerRunner::start();
+  bool startServer() {
+    if (!TLSServerRunner::start()) {
+      return false;
+    }
+
     TLSServerRunner::setClientConfig();
     clearNodeKey();
 
@@ -61,6 +69,7 @@ class DistributedTests : public testing::Test {
 
     Registry::get().setActive("distributed", "tls");
     server_started_ = true;
+    return true;
   }
 
  protected:
@@ -182,20 +191,20 @@ TEST_F(DistributedTests, test_deserialize_distributed_query_result_json) {
 }
 
 TEST_F(DistributedTests, test_workflow) {
-  startServer();
+  ASSERT_TRUE(startServer());
 
   auto dist = Distributed();
   auto s = dist.pullUpdates();
-  EXPECT_TRUE(s.ok());
+  ASSERT_TRUE(s.ok()) << s.getMessage();
   EXPECT_EQ(s.toString(), "OK");
 
   EXPECT_EQ(dist.getPendingQueryCount(), 2U);
   EXPECT_EQ(dist.results_.size(), 0U);
   s = dist.runQueries();
-  EXPECT_TRUE(s.ok());
+  ASSERT_TRUE(s.ok());
   EXPECT_EQ(s.toString(), "OK");
 
   EXPECT_EQ(dist.getPendingQueryCount(), 0U);
   EXPECT_EQ(dist.results_.size(), 0U);
 }
-}
+} // namespace osquery

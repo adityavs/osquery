@@ -2,17 +2,15 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
 
 #include <string>
 
-#include <osquery/status.h>
+#include <osquery/utils/status/status.h>
 
 namespace osquery {
 
@@ -26,13 +24,11 @@ namespace osquery {
  * This disconnect of install flows is a limitation. The POSIX install flows
  * should be refactored into install/uninstall service methods.
  */
-Status installService(const char* const path);
+Status installService(const std::string& path);
 
 /// See installService.
 Status uninstallService();
 
 /// Begin the platform-agnostic shell and daemon initialization.
-int startOsquery(int argc,
-                 char* argv[],
-                 std::function<void()> shutdown = nullptr);
+int startOsquery(int argc, char* argv[]);
 } // namespace osquery

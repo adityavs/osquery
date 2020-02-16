@@ -2,10 +2,8 @@
  *  Copyright (c) 2017-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <boost/algorithm/string/join.hpp>
@@ -13,15 +11,12 @@
 #include <boost/filesystem/path.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/sql/sqlite_util.h>
 #include <osquery/tables.h>
 
-#include "osquery/core/conversions.h"
-#include "osquery/sql/sqlite_util.h"
-
 namespace fs = boost::filesystem;
-namespace pt = boost::property_tree;
 
 namespace osquery {
 namespace tables {
@@ -55,6 +50,13 @@ bool isGateKeeperDevIdEnabled() {
       "SELECT disabled FROM authority WHERE label = 'Developer ID'";
   sqlite3_stmt* stmt = nullptr;
   rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+  if (rc != SQLITE_OK) {
+    if (stmt != nullptr) {
+      sqlite3_finalize(stmt);
+    }
+    sqlite3_close(db);
+    return false;
+  }
 
   while ((sqlite3_step(stmt)) == SQLITE_ROW) {
     int value = sqlite3_column_int(stmt, 0);
@@ -77,7 +79,9 @@ QueryData genGateKeeper(QueryContext& context) {
   auto gke_status = SQL::selectAllFrom("plist", "path", EQUALS, kGkeStatusPath);
 
   if (gke_status.empty()) {
-    r["assessments_enabled"] = INTEGER(0);
+    // The absence of the file indicates that Gatekeeper is fully enabled
+    r["assessments_enabled"] = INTEGER(1);
+    r["dev_id_enabled"] = INTEGER(1);
   }
 
   for (const auto& row : gke_status) {

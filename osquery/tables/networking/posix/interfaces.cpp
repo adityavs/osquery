@@ -2,12 +2,11 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -17,20 +16,32 @@
 #include <sys/socket.h>
 
 #ifdef __linux__
+#include <limits>
+#include <linux/ethtool.h>
 #include <linux/if_link.h>
-#include <sys/ioctl.h>
+#include <linux/sockios.h>
+#else //  Apple || FreeBSD
+#include <net/if_media.h>
+#include <sys/sockio.h>
 #endif
+#include <sys/ioctl.h>
 
-#include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tables/networking/utils.h"
+#include <osquery/tables/networking/posix/interfaces.h>
+#include <osquery/tables/networking/posix/utils.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/tryto.h>
 
 namespace osquery {
 namespace tables {
+
+#ifdef __linux__
+const size_t sysfsFlags = IFF_UP | IFF_DEBUG | IFF_NOTRAILERS | IFF_NOARP |
+                          IFF_PROMISC | IFF_ALLMULTI | IFF_MULTICAST |
+                          IFF_PORTSEL | IFF_AUTOMEDIA | IFF_DYNAMIC;
+#endif
 
 // Functions for safe sign-extension
 std::basic_string<char> INTEGER_FROM_UCHAR(unsigned char x) {
@@ -64,27 +75,69 @@ void genAddressesFromAddr(const struct ifaddrs* addr, QueryData& results) {
       r["point_to_point"] = dest_address;
     }
   }
-
+  r["type"] = "unknown";
   results.push_back(r);
 }
 
-static inline void flagsFromSysfs(const std::string& name, std::string& flags) {
+#ifdef __linux__
+static inline void flagsFromSysfs(const std::string& name, size_t& flags) {
   auto flags_path = "/sys/class/net/" + name + "/flags";
-  if (pathExists(flags_path)) {
-    std::string content;
-    // This will take the form, 0xVALUE\n.
-    if (readFile(flags_path, content) && content.size() > 3) {
-      if (content[0] == '0' && content[1] == 'x') {
-        unsigned long int lflags = 0;
-        if (safeStrtoul(content.substr(2, content.size() - 3), 16, lflags)) {
-          flags = std::to_string(lflags);
-        }
-      }
+  std::string content;
+  if (!pathExists(flags_path) || !readFile(flags_path, content) ||
+      content.size() <= 3) {
+    return;
+  }
+
+  // This will take the form, 0xVALUE\n.
+  if (content[0] == '0' && content[1] == 'x') {
+    auto const lflags_exp =
+        tryTo<unsigned long int>(content.substr(2, content.size() - 3), 16);
+    if (lflags_exp.isValue()) {
+      flags |= lflags_exp.get() & sysfsFlags;
     }
   }
 }
+#else //  Apple || FreeBSD
+// Based on IFM_SUBTYPE_ETHERNET_DESCRIPTIONS in if_media.h
+static int get_linkspeed(int ifm_subtype) {
+  switch (ifm_subtype) {
+  case IFM_HPNA_1:
+    return 1;
+  case IFM_10_T:
+  case IFM_10_2:
+  case IFM_10_5:
+  case IFM_10_STP:
+  case IFM_10_FL:
+    return 10;
+  case IFM_100_TX:
+  case IFM_100_FX:
+  case IFM_100_T4:
+  case IFM_100_VG:
+  case IFM_100_T2:
+    return 100;
+  case IFM_1000_SX:
+  case IFM_1000_LX:
+  case IFM_1000_CX:
+  case IFM_1000_T:
+    return 1'000;
+  case IFM_2500_T:
+    return 2'500;
+  case IFM_5000_T:
+    return 5'000;
+  case IFM_10G_SR:
+  case IFM_10G_LR:
+  case IFM_10G_CX4:
+  case IFM_10G_T:
+    return 10'000;
+  }
+  return 0;
+}
 
-void genDetailsFromAddr(const struct ifaddrs* addr, QueryData& results) {
+#endif
+
+void genDetailsFromAddr(const struct ifaddrs* addr,
+                        QueryData& results,
+                        QueryContext& context) {
   Row r;
   if (addr->ifa_name != nullptr) {
     r["interface"] = std::string(addr->ifa_name);
@@ -92,6 +145,8 @@ void genDetailsFromAddr(const struct ifaddrs* addr, QueryData& results) {
     r["interface"] = "";
   }
   r["mac"] = macAsString(addr);
+
+  size_t flags = addr->ifa_flags;
 
   if (addr->ifa_data != nullptr && addr->ifa_name != nullptr) {
 #ifdef __linux__
@@ -112,8 +167,12 @@ void genDetailsFromAddr(const struct ifaddrs* addr, QueryData& results) {
     // Get Linux physical properties for the AF_PACKET entry.
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd >= 0) {
-      struct ifreq ifr;
-      memcpy(ifr.ifr_name, addr->ifa_name, IFNAMSIZ);
+      struct ifreq ifr = {};
+      auto ifa_name_length = strlen(addr->ifa_name);
+      snprintf(ifr.ifr_name,
+               std::min<size_t>(ifa_name_length + 1, IFNAMSIZ),
+               "%s",
+               addr->ifa_name);
       if (ioctl(fd, SIOCGIFMTU, &ifr) >= 0) {
         r["mtu"] = BIGINT_FROM_UINT32(ifr.ifr_mtu);
       }
@@ -126,14 +185,38 @@ void genDetailsFromAddr(const struct ifaddrs* addr, QueryData& results) {
         r["type"] = INTEGER_FROM_UCHAR(ifr.ifr_hwaddr.sa_family);
       }
 
-      if (ioctl(fd, SIOCGIFFLAGS, &ifr) >= 0) {
-        r["flags"] = INTEGER(static_cast<size_t>(ifr.ifr_flags));
+      r["link_speed"] = "0";
+      if (context.isColumnUsed("link_speed")) {
+        struct ethtool_cmd cmd;
+        ifr.ifr_data = reinterpret_cast<char*>(&cmd);
+        cmd.cmd = ETHTOOL_GSET;
+
+        if (ioctl(fd, SIOCETHTOOL, &ifr) >= 0) {
+          auto speed = ethtool_cmd_speed(&cmd);
+
+          if (speed != std::numeric_limits<uint32_t>::max()) {
+            r["link_speed"] = BIGINT_FROM_UINT32(speed);
+          }
+        }
       }
+      struct ethtool_drvinfo drvInfo;
+      ifr.ifr_data = reinterpret_cast<char*>(&drvInfo);
+      drvInfo.cmd = ETHTOOL_GDRVINFO;
+
+      if (ioctl(fd, SIOCETHTOOL, &ifr) >= 0) {
+        r["pci_slot"] = drvInfo.bus_info;
+      } else {
+        r["pci_slot"] = "-1";
+      }
+
       close(fd);
     }
 
-    // Flags populated by sysfs are more reliable.
-    flagsFromSysfs(r["interface"], r["flags"]);
+    // Filter out sysfs flags.
+    flags &= ~sysfsFlags;
+
+    // Populate sysfs flags from sysfs.
+    flagsFromSysfs(r["interface"], flags);
 
     // Last change is not implemented in Linux.
     r["last_change"] = "-1";
@@ -153,9 +236,30 @@ void genDetailsFromAddr(const struct ifaddrs* addr, QueryData& results) {
     r["odrops"] = INTEGER(0);
     r["collisions"] = BIGINT_FROM_UINT32(ifd->ifi_collisions);
     r["last_change"] = BIGINT_FROM_UINT32(ifd->ifi_lastchange.tv_sec);
+    r["link_speed"] = "0";
+    if (context.isColumnUsed("link_speed")) {
+      int fd = socket(AF_INET, SOCK_DGRAM, 0);
+      if (fd >= 0) {
+        struct ifmediareq ifmr = {};
+        auto ifa_name_length = strlen(addr->ifa_name);
+        snprintf(ifmr.ifm_name,
+                 std::min<size_t>(ifa_name_length + 1, IFNAMSIZ),
+                 "%s",
+                 addr->ifa_name);
+        if (ioctl(fd, SIOCGIFMEDIA, &ifmr) >= 0) {
+          if (IFM_TYPE(ifmr.ifm_active) == IFM_ETHER) {
+            int ifmls = get_linkspeed(IFM_SUBTYPE(ifmr.ifm_active));
+            if (ifmls > 0) {
+              r["link_speed"] = BIGINT_FROM_UINT32(ifmls);
+            }
+          }
+        }
+        close(fd);
+      }
+    }
+#endif // Apple and FreeBSD interface details parsing.
 
-    r["flags"] = INTEGER(addr->ifa_flags);
-#endif
+    r["flags"] = INTEGER(flags);
   }
 
   results.push_back(r);
@@ -200,11 +304,11 @@ QueryData genInterfaceDetails(QueryContext& context) {
       continue;
     }
 
-    genDetailsFromAddr(if_addr, results);
+    genDetailsFromAddr(if_addr, results, context);
   }
 
   freeifaddrs(if_addrs);
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery

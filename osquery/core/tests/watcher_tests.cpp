@@ -2,16 +2,17 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <osquery/config/config.h>
 #include <osquery/core.h>
+#include <osquery/registry.h>
+#include <osquery/system.h>
 #include <osquery/tables.h>
 
 #include "osquery/core/watcher.h"
@@ -22,8 +23,20 @@ using namespace testing;
 namespace osquery {
 
 DECLARE_uint64(watchdog_delay);
+DECLARE_bool(disable_database);
 
-class WatcherTests : public testing::Test {};
+class WatcherTests : public testing::Test {
+ protected:
+  WatcherTests() {
+    Initializer::platformSetup();
+    registryAndPluginInit();
+    FLAGS_disable_database = true;
+    DatabasePlugin::setAllowOpen(true);
+    DatabasePlugin::initPlugin();
+
+    Config::get().reset();
+  }
+};
 
 /**
  * @brief Begin with a mock watcher runner.
@@ -242,8 +255,7 @@ TEST_F(WatcherTests, test_watcherrunner_watcherhealth) {
   EXPECT_EQ(100U, state.initial_footprint);
 
   // The measurement of latency applies an interval value normalization.
-  auto iv = std::max(getWorkerLimit(WatchdogLimitType::INTERVAL), 1_sz);
-  EXPECT_EQ(100U / iv, state.user_time);
+  EXPECT_EQ(100U, state.user_time);
   EXPECT_EQ(0U, state.sustained_latency);
 
   // Now we can alter the performance.
@@ -277,9 +289,7 @@ TEST_F(WatcherTests, test_watcherrunner_unhealthy_delay) {
 
   // Set up a fake test process and place it into an healthy state.
   Row r;
-  r["parent"] = isPlatform(PlatformType::TYPE_WINDOWS)
-                    ? INTEGER(test_process->pid())
-                    : INTEGER(test_process->nativeHandle());
+  r["parent"] = INTEGER(test_process->pid());
   r["user_time"] = INTEGER(100);
   r["system_time"] = INTEGER(100);
   r["resident_size"] = INTEGER(100);

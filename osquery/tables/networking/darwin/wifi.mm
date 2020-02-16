@@ -2,23 +2,20 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <Foundation/Foundation.h>
 
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tables/networking/darwin/wifi_utils.h"
+#include <osquery/tables/networking/darwin/wifi_utils.h>
+#include <osquery/utils/conversions/darwin/cfstring.h>
 
 namespace osquery {
 namespace tables {
@@ -79,8 +76,8 @@ void parseNetworks(const CFDictionaryRef& network, QueryData& results) {
 
   Row r;
   for (const auto& kv : kKnownWifiNetworkKeys) {
-    auto key = CFStringCreateWithCString(kCFAllocatorDefault, kv.second.c_str(),
-                                         kCFStringEncodingUTF8);
+    auto key = CFStringCreateWithCString(
+        kCFAllocatorDefault, kv.second.c_str(), kCFStringEncodingUTF8);
     CFTypeRef value = nullptr;
     if (key != nullptr) {
       if (CFDictionaryGetValueIfPresent(network, key, &value)) {
@@ -116,36 +113,38 @@ QueryData genKnownWifiNetworks(QueryContext& context) {
     return {};
   }
 
-  auto plist = (__bridge CFDictionaryRef)[NSDictionary
-      dictionaryWithContentsOfFile:@(kAirPortPreferencesPath.c_str())];
-  if (plist == nullptr || CFDictionaryGetCount(plist) == 0) {
-    return {};
-  }
-  auto cfkey = CFStringCreateWithCString(kCFAllocatorDefault, key.c_str(),
-                                         kCFStringEncodingUTF8);
-  CFTypeRef networks = CFDictionaryGetValue(plist, cfkey);
-  CFRelease(cfkey);
-  if (networks == nullptr) {
-    VLOG(1) << "Key not found : " << key;
-    return {};
-  }
-
   QueryData results;
-  if (CFGetTypeID(networks) == CFArrayGetTypeID()) {
-    auto count = CFArrayGetCount((CFArrayRef)networks);
-    for (CFIndex i = 0; i < count; i++) {
-      parseNetworks(
-          (CFDictionaryRef)CFArrayGetValueAtIndex((CFArrayRef)networks, i),
-          results);
+  @autoreleasepool {
+    auto plist = (__bridge CFDictionaryRef)[NSDictionary
+        dictionaryWithContentsOfFile:@(kAirPortPreferencesPath.c_str())];
+    if (plist == nullptr || CFDictionaryGetCount(plist) == 0) {
+      return {};
     }
-  } else if (CFGetTypeID(networks) == CFDictionaryGetTypeID()) {
-    auto count = CFDictionaryGetCount((CFDictionaryRef)networks);
-    std::vector<const void *> keys(count);
-    std::vector<const void *> values(count);
-    CFDictionaryGetKeysAndValues((CFDictionaryRef)networks, keys.data(),
-                                 values.data());
-    for (CFIndex i = 0; i < count; i++) {
-      parseNetworks((CFDictionaryRef)values[i], results);
+    auto cfkey = CFStringCreateWithCString(
+        kCFAllocatorDefault, key.c_str(), kCFStringEncodingUTF8);
+    CFTypeRef networks = CFDictionaryGetValue(plist, cfkey);
+    CFRelease(cfkey);
+    if (networks == nullptr) {
+      VLOG(1) << "Key not found : " << key;
+      return {};
+    }
+
+    if (CFGetTypeID(networks) == CFArrayGetTypeID()) {
+      auto count = CFArrayGetCount((CFArrayRef)networks);
+      for (CFIndex i = 0; i < count; i++) {
+        parseNetworks(
+            (CFDictionaryRef)CFArrayGetValueAtIndex((CFArrayRef)networks, i),
+            results);
+      }
+    } else if (CFGetTypeID(networks) == CFDictionaryGetTypeID()) {
+      auto count = CFDictionaryGetCount((CFDictionaryRef)networks);
+      std::vector<const void*> keys(count);
+      std::vector<const void*> values(count);
+      CFDictionaryGetKeysAndValues(
+          (CFDictionaryRef)networks, keys.data(), values.data());
+      for (CFIndex i = 0; i < count; i++) {
+        parseNetworks((CFDictionaryRef)values[i], results);
+      }
     }
   }
   return results;

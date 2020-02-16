@@ -2,21 +2,20 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iostream>
 #include <sstream>
 
 #include <osquery/core.h>
+#include <osquery/devtools/devtools.h>
 #include <osquery/flags.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/core/process.h"
-#include "osquery/devtools/devtools.h"
+#include <osquery/process/process.h>
+#include <osquery/utils/chars.h>
+#include <osquery/utils/map_take.h>
+#include <osquery/utils/system/env.h>
 
 namespace osquery {
 
@@ -29,7 +28,7 @@ std::string generateToken(const std::map<std::string, size_t>& lengths,
                           const std::vector<std::string>& columns) {
   std::string out = "+";
   for (const auto& col : columns) {
-    size_t size = ((lengths.count(col) > 0) ? lengths.at(col) : col.size()) + 2;
+    size_t size = tryTakeCopy(lengths, col).takeOr(col.size()) + 2;
     if (getEnvVar("ENHANCE").is_initialized()) {
       std::string e = "\xF0\x9F\x90\x8C";
       e[2] += kOffset[1];
@@ -150,7 +149,7 @@ void computeRowLengths(const Row& r,
                        std::map<std::string, size_t>& lengths,
                        bool use_columns) {
   for (const auto& col : r) {
-    size_t current = (lengths.count(col.first) > 0) ? lengths.at(col.first) : 0;
+    size_t current = tryTakeCopy(lengths, col.first).takeOr(std::size_t{0});
     size_t size =
         (use_columns) ? utf8StringSize(col.first) : utf8StringSize(col.second);
     lengths[col.first] = (size > current) ? size : current;

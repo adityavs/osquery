@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <pwd.h>
@@ -14,8 +12,8 @@
 
 #include <osquery/core.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
+#include <osquery/utils/mutex.h>
+#include <osquery/utils/conversions/tryto.h>
 
 namespace osquery {
 namespace tables {
@@ -54,10 +52,10 @@ QueryData genUsers(QueryContext& context) {
   if (context.constraints["uid"].exists(EQUALS)) {
     auto uids = context.constraints["uid"].getAll(EQUALS);
     for (const auto& uid : uids) {
-      long auid{0};
-      if (safeStrtol(uid, 10, auid)) {
+      auto const auid_exp = tryTo<long>(uid, 10);
+      if (auid_exp.isValue()) {
         WriteLock lock(pwdEnumerationMutex);
-        pwd = getpwuid(auid);
+        pwd = getpwuid(auid_exp.get());
         if (pwd != nullptr) {
           genUser(pwd, results);
         }
@@ -83,10 +81,6 @@ QueryData genUsers(QueryContext& context) {
   }
 
   return results;
-}
-
-QueryData genStartupItems(QueryContext& context) {
-  return QueryData();
 }
 }
 }

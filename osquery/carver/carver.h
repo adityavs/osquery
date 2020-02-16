@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -14,7 +12,8 @@
 #include <string>
 
 #include <osquery/dispatcher.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/utils/status/status.h>
 
 namespace osquery {
 
@@ -45,16 +44,24 @@ class Carver : public InternalRunnable {
    * in one fell swoop. Use of this class should largely happen through
    * this function.
    */
-  void start();
+  void start() override;
 
  private:
   /*
-   * @brief A helper function to 'carve' files from disk
+   * @brief A helper function that 'carves' all files from disk
    *
-   * This function performs a "forensic carve" of a specified path to the
-   * users tmp directory
+   * This function copies all source files to a temporary directory and returns
+   * a list of all destination files.
    */
-  Status carve(const boost::filesystem::path& path);
+  std::set<boost::filesystem::path> carveAll();
+
+  /*
+   * @brief A helper function that does a blockwise copy from src to dst
+   *
+   * This function copies the source file to the destination file, doing so
+   * by blocks specified with FLAGS_carver_block_size (defaults to 8K)
+   */
+  Status blockwiseCopy(PlatformFile& src, PlatformFile& dst);
 
   /*
    * @brief Helper function to POST a carve to the graph endpoint.
@@ -142,6 +149,7 @@ class Carver : public InternalRunnable {
  private:
   friend class CarverTests;
   FRIEND_TEST(CarverTests, test_carve_files_locally);
+  FRIEND_TEST(CarverTests, test_carve_files_not_exists);
 };
 
 /**

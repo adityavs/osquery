@@ -2,14 +2,14 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include "osquery/tables/system/user_groups.h"
-#include "osquery/core/conversions.h"
+#include <osquery/tables/system/user_groups.h>
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/expected/expected.h>
+#include <osquery/utils/mutex.h>
 
 namespace osquery {
 namespace tables {
@@ -23,8 +23,8 @@ QueryData genUserGroups(QueryContext& context) {
   if (context.constraints["uid"].exists(EQUALS)) {
     std::set<std::string> uids = context.constraints["uid"].getAll(EQUALS);
     for (const auto& uid : uids) {
-      long auid{0};
-      if (safeStrtol(uid, 10, auid) && (pwd = getpwuid(auid)) != nullptr) {
+      auto const auid_exp = tryTo<long>(uid, 10);
+      if (auid_exp.isValue() && (pwd = getpwuid(auid_exp.get())) != nullptr) {
         user_t<uid_t, gid_t> user;
         user.name = pwd->pw_name;
         user.uid = pwd->pw_uid;

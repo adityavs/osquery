@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -19,12 +17,12 @@
 #include <boost/tokenizer.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 
 namespace osquery {
 
 /**
- * @brief multiset based implemention for path search.
+ * @brief multiset based implementation for path search.
  *
  * 'multiset' is used because with patterns we can serach for equivalent keys.
  * Since  '/This/Path/is' ~= '/This/Path/%' ~= '/This/Path/%%' (equivalent).
@@ -38,10 +36,6 @@ namespace osquery {
  *                    Path components containing partial patterns are not
  *                    supported e.g. '/This/Path/xyz%' ('xyz%' will not be
  *                    treated as pattern).
- *
- * 2. resolvedPath - path is resolved before being inserted into set.
- *                   But path can match recursively.
- *
  */
 template <typename PathType>
 class PathSet : private boost::noncopyable {
@@ -156,62 +150,6 @@ class patternedPath {
       path.push_back(std::move(component));
     }
     vpath.push_back(std::move(path));
-    return vpath;
-  }
-};
-
-class resolvedPath {
- public:
-  struct Path {
-    Path(const std::string& str, bool r = false) : path(str), recursive(r) {}
-    const std::string path;
-    bool recursive{false};
-  };
-  typedef std::vector<Path> VPath;
-
-  struct Compare {
-    bool operator()(const Path& lhs, const Path& rhs) const {
-      size_t size = (lhs.path.size() < rhs.path.size()) ? lhs.path.size()
-                                                        : rhs.path.size();
-
-      int rc = lhs.path.compare(0, size, rhs.path, 0, size);
-
-      if (rc > 0) {
-        return false;
-      }
-
-      if (rc < 0) {
-        return true;
-      }
-
-      if ((size < rhs.path.size() && lhs.recursive) ||
-          (size < lhs.path.size() && rhs.recursive)) {
-        return false;
-      }
-
-      return (lhs.path.size() < rhs.path.size());
-    }
-  };
-
-  static Path createPath(const std::string& str) {
-    return Path(str);
-  }
-
-  static VPath createVPath(const std::string& str) {
-    bool recursive = false;
-    std::string pattern(str);
-    if (pattern.find("**") != std::string::npos) {
-      recursive = true;
-      pattern = pattern.substr(0, pattern.find("**"));
-    }
-
-    std::vector<std::string> paths;
-    resolveFilePattern(pattern, paths);
-
-    VPath vpath;
-    for (const auto& path : paths) {
-      vpath.push_back(Path(path, recursive));
-    }
     return vpath;
   }
 };

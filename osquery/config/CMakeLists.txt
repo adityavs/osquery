@@ -1,34 +1,50 @@
-#  Copyright (c) 2014-present, Facebook, Inc.
-#  All rights reserved.
+# Copyright (c) 2014-present, Facebook, Inc.
+# All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
+# This source code is licensed in accordance with the terms specified in
+# the LICENSE file found in the root directory of this source tree.
 
-ADD_OSQUERY_LIBRARY(TRUE osquery_config
-  config.cpp
-  packs.cpp
-)
+function(osqueryConfigMain)
+  if(OSQUERY_BUILD_TESTS)
+    add_subdirectory("tests")
+  endif()
 
-file(GLOB OSQUERY_CONFIG_PLUGINS "plugins/*.cpp")
+  generateOsqueryConfig()
+endfunction()
 
-ADD_OSQUERY_LIBRARY(FALSE osquery_config_plugins
-  ${OSQUERY_CONFIG_PLUGINS}
-  update.cpp
-)
+function(generateOsqueryConfig)
+  add_osquery_library(osquery_config EXCLUDE_FROM_ALL
+    config.cpp
+    packs.cpp
+  )
 
-file(GLOB OSQUERY_CONFIG_PARSERS "parsers/*.cpp")
-ADD_OSQUERY_LIBRARY(TRUE osquery_config_parsers
-  ${OSQUERY_CONFIG_PARSERS}
-)
+  enableLinkWholeArchive(osquery_config)
 
-file(GLOB OSQUERY_CONFIG_TESTS "tests/config_tests.cpp")
-ADD_OSQUERY_TEST(TRUE ${OSQUERY_CONFIG_TESTS})
+  target_link_libraries(osquery_config PUBLIC
+    osquery_cxx_settings
+    osquery_headers
+    osquery_filesystem
+    osquery_hashing
+    osquery_utils
+    osquery_utils_system_time
+  )
 
-# The packs tests will attempt to execute SQL, they must be additional
-file(GLOB OSQUERY_PACKS_TESTS "tests/packs_tests.cpp")
-ADD_OSQUERY_TEST(FALSE ${OSQUERY_PACKS_TESTS})
+  set(public_header_files
+    config.h
+  )
 
-file(GLOB OSQUERY_CONFIG_PLUGIN_TESTS "*/tests/*.cpp")
-ADD_OSQUERY_TEST(FALSE ${OSQUERY_CONFIG_PLUGIN_TESTS})
+  generateIncludeNamespace(osquery_config "osquery/config" "FILE_ONLY" ${public_header_files})
+
+  add_test(NAME osquery_config_tests-test COMMAND osquery_config_tests-test)
+
+  add_test(NAME osquery_config_tests_packs-test COMMAND osquery_config_tests_packs-test)
+
+  set_tests_properties(
+    osquery_config_tests-test
+    osquery_config_tests_packs-test
+    PROPERTIES ENVIRONMENT "TEST_CONF_FILES_DIR=${TEST_CONFIGS_DIR}"
+  )
+
+endfunction()
+
+osqueryConfigMain()

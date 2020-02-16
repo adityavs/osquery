@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -15,8 +13,9 @@
 #include <sys/types.h>
 
 #ifdef WIN32
-
-#include <windows.h>
+#include <iomanip>
+#include <map>
+#include <osquery/utils/system/system.h>
 #else
 #include <unistd.h>
 #endif
@@ -28,7 +27,8 @@
 #include <boost/noncopyable.hpp>
 #include <boost/optional.hpp>
 
-#include <osquery/status.h>
+#include <osquery/utils/status/status.h>
+#include <osquery/utils/system/env.h>
 
 namespace osquery {
 
@@ -61,6 +61,39 @@ using PlatformTimeType = FILETIME;
 #define S_IXOTH (S_IXGRP >> 3)
 #define S_IRWXO (S_IRWXG >> 3)
 
+const std::map<std::int32_t, std::string> kDriveLetters{
+    {0, "A:\\"},  {1, "B:\\"},  {2, "C:\\"},  {3, "D:\\"},  {4, "E:\\"},
+    {5, "F:\\"},  {6, "G:\\"},  {7, "H:\\"},  {8, "I:\\"},  {9, "J:\\"},
+    {10, "K:\\"}, {11, "L:\\"}, {12, "M:\\"}, {13, "N:\\"}, {14, "O:\\"},
+    {15, "P:\\"}, {16, "Q:\\"}, {17, "R:\\"}, {18, "S:\\"}, {19, "T:\\"},
+    {20, "U:\\"}, {21, "V:\\"}, {22, "W:\\"}, {23, "X:\\"}, {24, "Y:\\"},
+    {25, "Z:\\"},
+};
+
+typedef struct win_stat {
+  std::string path;
+  std::string filename;
+  int symlink;
+  std::string file_id;
+  LONGLONG inode;
+  unsigned long uid;
+  unsigned long gid;
+  std::string mode;
+  LONGLONG device;
+  LONGLONG size;
+  int block_size;
+  LONGLONG atime;
+  LONGLONG mtime;
+  LONGLONG ctime;
+  LONGLONG btime;
+  int hard_links;
+  std::string type;
+  std::string attributes;
+  std::string volume_serial;
+  std::string product_version;
+
+} WINDOWS_STAT;
+
 #else
 
 using PlatformHandle = int;
@@ -71,6 +104,8 @@ typedef struct { PlatformTimeType times[2]; } PlatformTime;
 
 /// Constant for an invalid handle.
 const PlatformHandle kInvalidHandle = (PlatformHandle)-1;
+
+std::string lastErrorMessage(unsigned long);
 
 /**
  * @brief File access modes for PlatformFile.
@@ -85,9 +120,13 @@ const PlatformHandle kInvalidHandle = (PlatformHandle)-1;
 
 #define PF_OPTIONS_MASK 0x001c
 #define PF_GET_OPTIONS(x) ((x & PF_OPTIONS_MASK) >> 2)
+// Create new file only if it does not exist, or else fail.
 #define PF_CREATE_NEW (0 << 2)
+// If file exists truncate it, or else create new one.
 #define PF_CREATE_ALWAYS (1 << 2)
+// If file exists open it, or else fail.
 #define PF_OPEN_EXISTING (2 << 2)
+// If file exists open it, or else create new one.
 #define PF_OPEN_ALWAYS (3 << 2)
 #define PF_TRUNCATE (4 << 2)
 
@@ -105,6 +144,14 @@ enum SeekMode { PF_SEEK_BEGIN = 0, PF_SEEK_CURRENT, PF_SEEK_END };
 #ifdef WIN32
 /// Takes a Windows FILETIME object and returns seconds since epoch
 LONGLONG filetimeToUnixtime(const FILETIME& ft);
+
+LONGLONG longIntToUnixtime(LARGE_INTEGER& ft);
+
+std::string getFileAttribStr(unsigned long);
+
+Status platformStat(const boost::filesystem::path&, WINDOWS_STAT*);
+
+std::unique_ptr<BYTE[]> getCurrentUserInfo();
 
 /**
  * @brief Stores information about the last Windows async request
@@ -292,6 +339,15 @@ boost::optional<std::string> getHomeDirectory();
 bool platformChmod(const std::string& path, mode_t perms);
 
 /**
+ * @brief Sets 'safe' permissions for the database backing osquery
+ *
+ * @note Safe DB perms are equivalent to a chmod 0700 for root on posix
+ * so we emulate this by granting Full perms to SYSTEM and Administrators
+ * only.
+ */
+bool platformSetSafeDbPerms(const std::string& path);
+
+/**
  * @brief Multi-platform implementation of glob.
  * @note glob support is not 100% congruent with Linux glob. There are slight
  *       differences in how GLOB_TILDE and GLOB_BRACE are implemented.
@@ -362,7 +418,7 @@ Status socketExists(const boost::filesystem::path& path,
 boost::filesystem::path getSystemRoot();
 
 /**
- * @brief Returns the succesfully and fills d_stat if lstat was successful.
+ * @brief Returns the successfully and fills d_stat if lstat was successful.
  *
  *
  * On Windows systems this does not touch the structure.
@@ -370,4 +426,15 @@ boost::filesystem::path getSystemRoot();
  * @return osquery::Status
  */
 Status platformLstat(const std::string& path, struct stat& d_stat);
+
+/**
+ * @brief Populates the provided string with a textual representation of the
+ * provided file flags.
+ *
+ * Returns failure if unrecognized flags are set, success in all other cases.
+ *
+ *
+ * @return osquery::Status
+ */
+Status describeBSDFileFlags(std::string& output, std::uint32_t st_flags);
 }

@@ -2,20 +2,22 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/io/detail/quoted_manip.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
 #include <osquery/database.h>
+#include <osquery/flagalias.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/registry.h>
-
-#include "osquery/core/json.h"
+#include <osquery/utils/config/default_paths.h>
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/json/json.h>
 
 namespace pt = boost::property_tree;
 namespace rj = rapidjson;
@@ -29,7 +31,7 @@ CLI_FLAG(bool, database_dump, false, "Dump the contents of the backing store");
 
 CLI_FLAG(string,
          database_path,
-         OSQUERY_DB_HOME "/osquery.db",
+         OSQUERY_DB_HOME "osquery.db",
          "If using a disk-based backing store, specify a path");
 FLAG_ALIAS(std::string, db_path, database_path);
 
@@ -45,7 +47,7 @@ const std::string kLogs = "logs";
 const std::string kDbEpochSuffix = "epoch";
 const std::string kDbCounterSuffix = "counter";
 
-const std::string kDatabaseResultsVersion = "1";
+const std::string kDbVersionKey = "results_version";
 
 const std::vector<std::string> kDomains = {
     kPersistentSettings, kQueries, kEvents, kLogs, kCarves};
@@ -66,20 +68,27 @@ Mutex kDatabaseReset;
 Status DatabasePlugin::initPlugin() {
   // Initialize the database plugin using the flag.
   auto plugin = (FLAGS_disable_database) ? "ephemeral" : kInternalDatabase;
-  auto status = RegistryFactory::get().setActive("database", plugin);
-  if (!status.ok()) {
-    // If the database did not setUp override the active plugin.
-    RegistryFactory::get().setActive("database", "ephemeral");
+  {
+    auto const status = RegistryFactory::get().setActive("database", plugin);
+    if (status.ok()) {
+      kDBInitialized = true;
+      return status;
+    }
+    LOG(WARNING) << "Failed to activate database plugin " << boost::io::quoted(plugin) << ": " << status.what();
   }
-
-  kDBInitialized = true;
+  // If the database did not setUp override the active plugin.
+  auto const status = RegistryFactory::get().setActive("database", "ephemeral");
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to activate database plugin \"ephemeral\": " << status.what();
+  }
+  kDBInitialized = status.ok();
   return status;
 }
 
 void DatabasePlugin::shutdown() {
-  auto datbase_registry = RegistryFactory::get().registry("database");
+  auto database_registry = RegistryFactory::get().registry("database");
   for (auto& plugin : RegistryFactory::get().names("database")) {
-    datbase_registry->remove(plugin);
+    database_registry->remove(plugin);
   }
 }
 
@@ -111,7 +120,7 @@ Status DatabasePlugin::scan(const std::string& domain,
                             std::vector<std::string>& results,
                             const std::string& prefix,
                             size_t max) const {
-  return Status(0, "Not used");
+  return Status::success();
 }
 
 Status DatabasePlugin::call(const PluginRequest& request,
@@ -151,10 +160,43 @@ Status DatabasePlugin::call(const PluginRequest& request,
       return Status(1, "Database plugin put action requires a value");
     }
     return this->put(domain, key, request.at("value"));
+  } else if (request.at("action") == "putBatch") {
+    if (request.count("json") == 0) {
+      return Status(
+          1,
+          "Database plugin putBatch action requires a json-encoded value list");
+    }
+
+    auto json_object = JSON::newObject();
+
+    auto status = json_object.fromString(request.at("json"));
+    if (!status.ok()) {
+      VLOG(1) << status.getMessage();
+      return status;
+    }
+
+    const auto& json_object_list = json_object.doc().GetObject();
+
+    DatabaseStringValueList data;
+    data.reserve(json_object_list.MemberCount());
+
+    for (auto& item : json_object_list) {
+      if (!item.value.IsString()) {
+        return Status(1,
+                      "Database plugin putBatch action with an invalid json "
+                      "received. Only string values are supported");
+      }
+
+      data.push_back(
+          std::make_pair(item.name.GetString(), item.value.GetString()));
+    }
+
+    return this->putBatch(domain, data);
   } else if (request.at("action") == "remove") {
     return this->remove(domain, key);
   } else if (request.at("action") == "remove_range") {
-    auto key_high = (request.count("high") > 0) ? request.at("key_high") : "";
+    auto key_high =
+        (request.count("key_high") > 0) ? request.at("key_high") : "";
     if (!key_high.empty() && !key.empty()) {
       return this->removeRange(domain, key, key_high);
     }
@@ -186,6 +228,53 @@ static inline std::shared_ptr<DatabasePlugin> getDatabasePlugin() {
   auto plugin = rf.plugin("database", rf.getActive("database"));
   return std::dynamic_pointer_cast<DatabasePlugin>(plugin);
 }
+
+namespace {
+Status sendPutBatchDatabaseRequest(const std::string& domain,
+                                   const DatabaseStringValueList& data) {
+  auto json_object = JSON::newObject();
+  for (const auto& p : data) {
+    const auto& key = p.first;
+    const auto& value = p.second;
+
+    json_object.addRef(key, value);
+  }
+
+  std::string serialized_data;
+  auto status = json_object.toString(serialized_data);
+  if (!status.ok()) {
+    VLOG(1) << status.getMessage();
+    return status;
+  }
+
+  PluginRequest request = {{"action", "putBatch"},
+                           {"domain", domain},
+                           {"json", std::move(serialized_data)}};
+
+  status = Registry::call("database", request);
+  if (!status.ok()) {
+    VLOG(1) << status.getMessage();
+  }
+
+  return status;
+}
+
+Status sendPutDatabaseRequest(const std::string& domain,
+                              const DatabaseStringValueList& data) {
+  const auto& key = data[0].first;
+  const auto& value = data[0].second;
+
+  PluginRequest request = {
+      {"action", "put"}, {"domain", domain}, {"key", key}, {"value", value}};
+
+  auto status = Registry::call("database", request);
+  if (!status.ok()) {
+    VLOG(1) << status.getMessage();
+  }
+
+  return status;
+}
+} // namespace
 
 Status getDatabaseValue(const std::string& domain,
                         const std::string& key,
@@ -219,28 +308,52 @@ Status getDatabaseValue(const std::string& domain,
   }
 }
 
+Status getDatabaseValue(const std::string& domain,
+                        const std::string& key,
+                        int& value) {
+  std::string result;
+  auto s = getDatabaseValue(domain, key, result);
+  if (s.ok()) {
+    value = std::stoi(result);
+  }
+  return s;
+}
+
 Status setDatabaseValue(const std::string& domain,
                         const std::string& key,
                         const std::string& value) {
+  return setDatabaseBatch(domain, {std::make_pair(key, value)});
+}
+
+Status setDatabaseBatch(const std::string& domain,
+                        const DatabaseStringValueList& data) {
   if (domain.empty()) {
     return Status(1, "Missing domain");
   }
 
+  // External registries (extensions) do not have databases active.
+  // It is not possible to use an extension-based database.
   if (RegistryFactory::get().external()) {
-    // External registries (extensions) do not have databases active.
-    // It is not possible to use an extension-based database.
-    PluginRequest request = {
-        {"action", "put"}, {"domain", domain}, {"key", key}, {"value", value}};
-    return Registry::call("database", request);
+    if (data.size() > 1) {
+      return sendPutBatchDatabaseRequest(domain, data);
+    } else {
+      return sendPutDatabaseRequest(domain, data);
+    }
   }
 
   ReadLock lock(kDatabaseReset);
   if (!DatabasePlugin::kDBInitialized) {
-    throw std::runtime_error("Cannot set database value: " + key);
-  } else {
-    auto plugin = getDatabasePlugin();
-    return plugin->put(domain, key, value);
+    throw std::runtime_error("Cannot set database values");
   }
+
+  auto plugin = getDatabasePlugin();
+  return plugin->putBatch(domain, data);
+}
+
+Status setDatabaseValue(const std::string& domain,
+                        const std::string& key,
+                        int value) {
+  return setDatabaseBatch(domain, {std::make_pair(key, std::to_string(value))});
 }
 
 Status deleteDatabaseValue(const std::string& domain, const std::string& key) {
@@ -340,20 +453,8 @@ void resetDatabase() {
 }
 
 void dumpDatabase() {
-  for (const auto& domain : kDomains) {
-    std::vector<std::string> keys;
-    if (!scanDatabaseKeys(domain, keys)) {
-      continue;
-    }
-    for (const auto& key : keys) {
-      std::string value;
-      if (!getDatabaseValue(domain, key, value)) {
-        continue;
-      }
-      fprintf(
-          stdout, "%s[%s]: %s\n", domain.c_str(), key.c_str(), value.c_str());
-    }
-  }
+  auto plugin = getDatabasePlugin();
+  plugin->dumpDatabase();
 }
 
 Status ptreeToRapidJSON(const std::string& in, std::string& out) {
@@ -380,7 +481,7 @@ Status ptreeToRapidJSON(const std::string& in, std::string& out) {
 
   json.toString(out);
 
-  return Status();
+  return Status::success();
 }
 
 static Status migrateV0V1(void) {
@@ -418,25 +519,109 @@ static Status migrateV0V1(void) {
     }
   }
 
-  return Status();
+  return Status::success();
 }
 
-Status upgradeDatabase() {
-  std::string db_results_version{""};
-  getDatabaseValue(kPersistentSettings, "results_version", db_results_version);
+static Status migrateV1V2(void) {
+  std::vector<std::string> keys;
+  const std::string audit_str(".audit.");
 
-  if (db_results_version == kDatabaseResultsVersion) {
-    return Status();
-  }
-
-  auto s = migrateV0V1();
+  Status s = scanDatabaseKeys(kEvents, keys);
   if (!s.ok()) {
-    LOG(WARNING) << "Failed to migrate V0 to V1: " << s.what();
-    return Status(1, "DB migration failed");
+    return Status::failure(
+        1, "Failed to scan event keys from database: " + s.what());
   }
 
-  setDatabaseValue(
-      kPersistentSettings, "results_version", kDatabaseResultsVersion);
-  return Status();
+  for (const auto& key : keys) {
+    const auto pos = key.find(audit_str);
+    if (pos != std::string::npos) {
+      std::string value;
+      std::string new_key = key;
+      new_key.replace(pos, audit_str.length(), ".auditeventpublisher.");
+
+      s = getDatabaseValue(kEvents, key, value);
+      if (!s.ok()) {
+        LOG(ERROR) << "Failed to read value for key '" << key
+                   << "'. Key will be kept but won't be migrated!";
+        continue;
+      }
+
+      s = setDatabaseValue(kEvents, new_key, value);
+      if (!s.ok()) {
+        LOG(ERROR) << "Failed to set value for key '" << new_key
+                   << "' migrated from '" << key
+                   << "'. Original key will be kept but won't be migrated!";
+        continue;
+      }
+
+      s = deleteDatabaseValue(kEvents, key);
+      if (!s.ok()) {
+        LOG(WARNING) << "Failed to delete key '" << key
+                     << "' after migration to new key '" << new_key
+                     << "'. Original key will be kept but data was migrated!";
+      }
+    }
+  }
+
+  return Status::success();
 }
+
+Status upgradeDatabase(int to_version) {
+  std::string value;
+  Status st = getDatabaseValue(kPersistentSettings, kDbVersionKey, value);
+
+  int db_version = 0;
+  /* Since there isn't a reliable way to determined what happen when the read
+   * fails we just assume the key doesn't exist which indicates database
+   * version 0.
+   */
+  if (st.ok()) {
+    auto ret = tryTo<int>(value);
+    if (ret.isError()) {
+      LOG(ERROR) << "Invalid value '" << value << "'for " << kDbVersionKey
+                 << " key. Database is corrupted.";
+      return Status::failure("Invalid value for database version.");
+    } else {
+      db_version = ret.get();
+    }
+  }
+
+  while (db_version != to_version) {
+    Status migrate_status;
+    switch (db_version) {
+    case 0:
+      migrate_status = migrateV0V1();
+      break;
+
+    case 1:
+      migrate_status = migrateV1V2();
+      break;
+
+    default:
+      LOG(ERROR) << "Logic error: the migration code is broken!";
+      migrate_status = Status::failure("Migration code broken.");
+      break;
+    }
+
+    if (!migrate_status.ok()) {
+      LOG(ERROR) << "Failed to migrate the database to version '" << db_version
+                 << "': " << migrate_status.getMessage();
+      return Status::failure("Database migration failed.");
+    }
+
+    st = setDatabaseValue(
+        kPersistentSettings, kDbVersionKey, std::to_string(db_version + 1));
+    if (!st.ok()) {
+      LOG(ERROR) << "Failed to set new database version after migration. "
+                 << "The DB was correctly migrated from version " << db_version
+                 << " to version " << (db_version + 1)
+                 << " but persisting the new version failed.";
+      return Status::failure("Database version commit failed.");
+    }
+
+    db_version++;
+  }
+
+  return Status::success();
 }
+} // namespace osquery

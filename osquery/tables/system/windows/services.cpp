@@ -2,13 +2,13 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include <Windows.h>
+#include <osquery/utils/system/env.h>
+#include <osquery/utils/system/system.h>
+
 #include <Winsvc.h>
 
 #include <string>
@@ -129,12 +129,17 @@ static inline Status getService(const SC_HANDLE& scmHandle,
            regResults);
   for (const auto& aKey : regResults) {
     if (aKey.at("name") == "ServiceDll") {
-      r["module_path"] = SQL_TEXT(aKey.at("data"));
+      auto module_path = aKey.at("data");
+      if (const auto expanded_path = expandEnvString(module_path)) {
+        module_path = *expanded_path;
+      }
+
+      r["module_path"] = SQL_TEXT(module_path);
     }
   }
 
   results.push_back(r);
-  return Status();
+  return Status::success();
 }
 
 static inline Status getServices(QueryData& results) {
@@ -189,7 +194,7 @@ static inline Status getServices(QueryData& results) {
     }
   }
 
-  return Status();
+  return Status::success();
 }
 
 QueryData genServices(QueryContext& context) {

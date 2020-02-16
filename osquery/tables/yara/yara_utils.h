@@ -1,15 +1,18 @@
-/*
- *  Copyright (c) 2015, Welsey Shields
- *  All rights reserved.
+/**
+ *  Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include <osquery/config.h>
+#pragma once
+
+#include <boost/property_tree/ptree.hpp>
+
+#include <osquery/config/config.h>
+#include <osquery/filesystem/fileops.h>
 #include <osquery/tables.h>
+#include <osquery/utils/config/default_paths.h>
 
 #ifdef CONCAT
 #undef CONCAT
@@ -20,7 +23,7 @@ namespace pt = boost::property_tree;
 
 namespace osquery {
 
-const std::string kYARAHome{OSQUERY_HOME "/yara/"};
+const std::string kYARAHome{OSQUERY_HOME "yara/"};
 
 void YARACompilerCallback(int error_level,
                           const char* file_name,
@@ -33,6 +36,11 @@ Status compileSingleFile(const std::string& file, YR_RULES** rule);
 Status handleRuleFiles(const std::string& category,
                        const pt::ptree& rule_files,
                        std::map<std::string, YR_RULES*>& rules);
+
+/**
+ * Avoid scanning files that could cause hangs or issues.
+ */
+bool yaraShouldSkipFile(const std::string& path, mode_t st_mode);
 
 int YARACallback(int message, void* message_data, void* user_data);
 
@@ -67,4 +75,4 @@ class YARAConfigParserPlugin : public ConfigParserPlugin {
   /// Store the signatures and file_paths and compile the rules.
   Status update(const std::string& source, const ParserConfig& config) override;
 };
-}
+} // namespace osquery

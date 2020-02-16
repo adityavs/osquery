@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <chrono>
@@ -14,11 +12,17 @@
 #include <vector>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/registry_factory.h>
 #include <osquery/system.h>
+#include <osquery/sql.h>
 
 #include "osquery/extensions/interface.h"
+
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/info/platform_type.h>
+#include <osquery/utils/info/version.h>
 
 using chrono_clock = std::chrono::high_resolution_clock;
 
@@ -94,16 +98,16 @@ Status ExtensionManagerInterface::registerExtension(
     }
   }
 
-  // srand must be called in the active thread on Windows due to thread saftey
+  // srand must be called in the active thread on Windows due to thread safety
   if (isPlatform(PlatformType::TYPE_WINDOWS)) {
     std::srand(static_cast<unsigned int>(
         chrono_clock::now().time_since_epoch().count()));
   }
   // Every call to registerExtension is assigned a new RouteUUID.
   uuid = static_cast<uint16_t>(rand());
-  VLOG(1) << "Registering extension (" << info.name << ", " << uuid
-          << ", version=" << info.version << ", sdk=" << info.sdk_version
-          << ")";
+  LOG(INFO) << "Registering extension (" << info.name << ", " << uuid
+            << ", version=" << info.version << ", sdk=" << info.sdk_version
+            << ")";
 
   auto status = RegistryFactory::get().addBroadcast(uuid, registry);
   if (!status.ok()) {
@@ -115,7 +119,7 @@ Status ExtensionManagerInterface::registerExtension(
 
   WriteLock lock(extensions_mutex_);
   extensions_[uuid] = info;
-  return Status();
+  return Status::success();
 }
 
 Status ExtensionManagerInterface::query(const std::string& sql, QueryData& qd) {
@@ -135,7 +139,7 @@ Status ExtensionManagerInterface::deregisterExtension(RouteUUID uuid) {
 
   WriteLock lock(extensions_mutex_);
   extensions_.erase(uuid);
-  return Status();
+  return Status::success();
 }
 
 Status ExtensionManagerInterface::getQueryColumns(const std::string& sql,
@@ -237,6 +241,7 @@ RouteUUID ExtensionRunner::getUUID() const {
 }
 
 void ExtensionRunner::start() {
+  setThreadName(name() + " " + path_);
   init(uuid_);
 
   VLOG(1) << "Extension service starting: " << path_;

@@ -2,7 +2,7 @@ SQL tables are used to represent abstract operating system concepts, such as run
 
 A table can be used in conjunction with other tables via operations like sub-queries and joins. This allows for a rich data exploration experience. While osquery ships with a default set of tables, osquery provides an API that allows you to create new tables.
 
-You can explore current schema here: [https://osquery.io/schema](https://osquery.io/schema/). Tables that are up for grabs in terms of development can be found on Github issues using the "virtual tables" + "[up for grabs tag](https://github.com/facebook/osquery/issues?q=is%3Aopen+is%3Aissue+label%3A%22virtual+tables%22)".
+You can explore current schema here: [https://osquery.io/schema](https://osquery.io/schema/). Tables that are up for grabs in terms of development can be found on Github issues using the "virtual tables" + "[up for grabs tag](https://github.com/osquery/osquery/issues?q=is%3Aopen+is%3Aissue+label%3A%22virtual+tables%22)".
 
 ## New Table Walkthrough
 
@@ -15,7 +15,7 @@ Column values (a single row) will be dynamically computed at query time.
 Under the hood, osquery uses libraries from SQLite core to create "virtual tables". The default API for creating virtual tables is relatively complex. osquery has abstracted this complexity away, allowing you to write a simple table declaration.
 
 To make table-creation simple osquery uses a *table spec* file.
-The current specs are organized by operating system in the [specs](https://github.com/facebook/osquery/tree/master/specs) source folder.
+The current specs are organized by operating system in the [specs](https://github.com/osquery/osquery/tree/master/specs) source folder.
 For our time exercise, a spec file would look like the following:
 
 ```python
@@ -48,12 +48,12 @@ You might wonder "this syntax looks similar to Python?". Well, it is! The build 
 
 You may be wondering how osquery handles cross-platform support while still allowing operating-system specific tables. The osquery build process takes care of this by only generating the relevant code based on a directory structure convention.
 
-- Cross-platform: [specs/](https://github.com/facebook/osquery/tree/master/specs/)
-- MacOS: [specs/darwin/](https://github.com/facebook/osquery/tree/master/specs/darwin)
-- General Linux: [specs/linux/](https://github.com/facebook/osquery/tree/master/specs/linux)
-- Windows: [specs/windows/](https://github.com/facebook/osquery/tree/master/specs/windows)
-- POSIX: [specs/posix/](https://github.com/facebook/osquery/tree/master/specs/posix)
-- FreeBSD: [specs/freebsd/](https://github.com/facebook/osquery/tree/master/specs/freebsd)
+- Cross-platform: [specs/](https://github.com/osquery/osquery/tree/master/specs/)
+- MacOS: [specs/darwin/](https://github.com/osquery/osquery/tree/master/specs/darwin)
+- General Linux: [specs/linux/](https://github.com/osquery/osquery/tree/master/specs/linux)
+- Windows: [specs/windows/](https://github.com/osquery/osquery/tree/master/specs/windows)
+- POSIX: [specs/posix/](https://github.com/osquery/osquery/tree/master/specs/posix)
+- FreeBSD: [specs/freebsd/](https://github.com/osquery/osquery/tree/master/specs/freebsd)
 - You get the picture ;)
 
 > NOTICE: the CMake build provides custom defines for each platform and platform version.
@@ -78,7 +78,6 @@ There are several attributes that help with table documentation and optimization
 - **user_data=True**: This tells the caller that they should provide a `uid` in the query predicate. By default the table will inspect the current user's content, but may be asked to include results from others.
 - **cacheable=True**: The results from the table can be cached within the query schedule. If this table generates a lot of data it is best to cache the results so that queries needing access in the schedule with a shorter interval can simply copy the already generated structures.
 - **utility=True**: This table will be included in the osquery SDK, it is considered a core/non-platform specific utility.
-- **kernel_required=True**: This is rare, but tells the caller that results are only available if the osquery kernel extension is running.
 
 Specs may also include an **extended_schema** for a specific platform. They are the same as **schema** but the first argument is a function returning a bool. If true the columns are added and not marked hidden, otherwise they are all appended with `hidden=True`. This allows tables to keep a consistent set of columns and types while providing a good user experience for default selects.
 
@@ -92,23 +91,29 @@ Here is that code for *osquery/tables/utility/time.cpp*:
 // Copyright 2004-present Facebook. All Rights Reserved.
 
 #include <ctime>
+#include <osquery/rows/time.h>
 #include <osquery/tables.h>
 
 namespace osquery {
 namespace tables {
 
-QueryData genTime(QueryContext &context) {
-  Row r;
-  QueryData results;
+TableRows genTime(QueryContext &context) {
+  TableRows results;
+  if (!context.isAnyColumnUsed({TimeRow::HOUR, TimeRow::MINUTES, TimeRow::SECONDS})) {
+    return results;
+  }
+
+  TimeRow* r = new TimeRow();
 
   time_t _time = time(0);
   struct tm* now = localtime(&_time);
 
-  r["hour"] = INTEGER(now->tm_hour);
-  r["minutes"] = INTEGER(now->tm_min);
-  r["seconds"] = INTEGER(now->tm_sec);
+  r->hour_col = now->tm_hour;
+  r->minutes_col = now->tm_min;
+  r->seconds_col = now->tm_sec;
 
-  results.push_back(r);
+  std::unique_ptr<TableRow> tr(r);
+  results.push_back(std::move(tr));
   return results;
 }
 }
@@ -118,11 +123,12 @@ QueryData genTime(QueryContext &context) {
 Key points to remember:
 
 - Your implementation function should be in the `osquery::tables` namespace.
-- Your implementation function should accept on `QueryContext&` parameter and return an instance of `QueryData`.
+- Your implementation function should accept on `QueryContext&` parameter and return an instance of `TableRows`.
+- Your implementation function should use `context.isAnyColumnUsed` to run only the code necessary for the query
 
 ## Using where clauses
 
-The `QueryContext` data type is osquery's abstraction of the underlying SQL engine's query parsing. It is defined in [include/osquery/tables.h](https://github.com/facebook/osquery/blob/master/include/osquery/tables.h).
+The `QueryContext` data type is osquery's abstraction of the underlying SQL engine's query parsing. It is defined in [osquery/tables.h](/osquery/include/osquery/tables.h).
 
 The most important use of the context is query predicate constraints (e.g., `WHERE col = 'value'`). Some tables MUST have a predicate constraint, others may optionally use the constraints to increase performance.
 
@@ -150,21 +156,21 @@ Examples:
 
 ## SQL data types
 
-Data types like `QueryData`, `Row`, `DiffResults`, etc. are osquery's built-in data result types. They're all defined in [include/osquery/database.h](https://github.com/facebook/osquery/blob/master/include/osquery/database.h).
+Data types like `TableRows`, `TableRow`, `DiffResults`, etc. are osquery's built-in data result types. They're all defined in [include/osquery/database.h](https://github.com/osquery/osquery/blob/master/include/osquery/database.h).
 
-`Row` is just a `typedef` for a `std::map<std::string, std::string>`. That's it. A row of data is just a mapping of strings that represent column names to strings that represent column values. Note that, currently, even if your SQL table type is an `int` and not a `std::string`, we need to cast the ints as strings to comply with the type definition of the `Row` object. They'll be casted back to `int`s later. This is all handled transparently by osquery's supporting infrastructure as long as you use the macros like `TEXT`, `INTEGER`, `BIGINT`, etc. when inserting columns into your row.
+`TableRow` is an interface; each table has a generated implementation with strongly-typed fields for each column in the table. There's also `DynamicTableRow`, which is backed by a `std::map<std::string, std::string>` mapping column names to the string representations of their values. `DynamicTableRow` exists to support tables that were written before the strongly-typed row support was added, and for plugins.
 
-`QueryData` is just a `typedef` for a `std::vector<Row>`. Query data is just a list of rows. Simple enough.
+`TableRows` is just a `typedef` for a `std::vector<TableRow>`. Table rows is just a list of rows. Simple enough.
 
-To populate the data that will be returned to the user at runtime, your implementation function must generate the data that you'd like to display and populate a `QueryData` map with the appropriate `Row`s. Then, just return the `QueryData`.
+To populate the data that will be returned to the user at runtime, your implementation function must generate the data that you'd like to display and populate a `TableRows` list with the appropriate `TableRow`s. Then, just return the `TableRows`.
 
-In our case, we used system APIs to create a struct of type `tm` which has fields such as `tm_hour`, `tm_min` and `tm_sec` which represent the current time. We can then create our three entries in our `Row` variable: hour, minutes and seconds. Then we push that single row onto the `QueryData` variable and return it. Note that if we wanted our table to have many rows (a more common use-case), we would just push back more `Row` maps onto `results`.
+In our case, we used system APIs to create a struct of type `tm` which has fields such as `tm_hour`, `tm_min` and `tm_sec` which represent the current time. We can then set our three fields in our `TimeRow` variable: hour_col, minutes_col and seconds_col. Then we push that single row onto the `TableRows` variable and return it. Note that if we wanted our table to have many rows (a more common use-case), we would just push back more `TableRow` maps onto `results`.
 
 ## Building new tables
 
 If you've created a new **.{c,cpp,mm}** file in the correct folder within *osquery/tables*, CMake will discover and attempt to compile your implementation.
 
-Return to the root of the repository and execute `make`. This will generate the appropriate code and link everything properly. If you need to add additional linking it gets a tad more complicated. Consider the following code within the table's [CMakeLists.txt](https://github.com/facebook/osquery/blob/master/osquery/tables/CMakeLists.txt):
+Return to the root of the repository and execute `make`. This will generate the appropriate code and link everything properly. If you need to add additional linking it gets a tad more complicated. Consider the following code within the table's [CMakeLists.txt](https://github.com/osquery/osquery/blob/master/osquery/tables/CMakeLists.txt):
 
 ```cmake
 
@@ -191,7 +197,7 @@ When supplying the "second type", a search name, CMake will decide to link using
 
 ### Testing your table
 
-If your code compiled properly, launch the interactive query console by executing `./build/[darwin|linux]/osquery/osqueryi` and try issuing your new table a command: `SELECT * FROM time;`.
+If your code compiled properly, launch the interactive query console by executing `./build/[darwin|linux]/osquery/osqueryi` and try issuing your new table a command: `SELECT * FROM time;`. (If your table implementation has nontrivial conditional code based on the columns used in the query, try issuing more focused commands to test that logic as well.)
 
 Run the leaks analysis to check for memory leaks:
 

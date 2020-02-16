@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <sstream>
@@ -22,15 +20,16 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/property_tree/json_parser.hpp>
 
-#include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
+#include <osquery/utils/system/system.h>
 
-#include "osquery/core/json.h"
-#include "osquery/filesystem/fileops.h"
+#include <osquery/utils/json/json.h>
 
 namespace pt = boost::property_tree;
 namespace fs = boost::filesystem;
@@ -51,10 +50,9 @@ static const size_t kMaxRecursiveGlobs = 64;
 Status writeTextFile(const fs::path& path,
                      const std::string& content,
                      int permissions,
-                     bool force_permissions) {
+                     int mode) {
   // Open the file with the request permissions.
-  PlatformFile output_fd(
-      path, PF_OPEN_ALWAYS | PF_WRITE | PF_APPEND, permissions);
+  PlatformFile output_fd(path, mode, permissions);
   if (!output_fd.isValid()) {
     return Status(1, "Could not create file: " + path.string());
   }
@@ -71,7 +69,7 @@ Status writeTextFile(const fs::path& path,
     return Status(1, "Failed to write contents to file: " + path.string());
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 struct OpenReadableFile : private boost::noncopyable {
@@ -169,7 +167,7 @@ Status readFile(const fs::path& path,
   if (preserve_time && !FLAGS_disable_forensic) {
     handle.fd->setFileTimes(times);
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status readFile(const fs::path& path,
@@ -214,7 +212,7 @@ Status isWritable(const fs::path& path, bool effective) {
     PlatformFile fd(path, PF_OPEN_EXISTING | PF_WRITE);
     return Status(fd.isValid() ? 0 : 1);
   } else if (platformAccess(path.string(), W_OK) == 0) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "Path is not writable: " + path.string());
@@ -230,7 +228,7 @@ Status isReadable(const fs::path& path, bool effective) {
     PlatformFile fd(path, PF_OPEN_EXISTING | PF_READ);
     return Status(fd.isValid() ? 0 : 1);
   } else if (platformAccess(path.string(), R_OK) == 0) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "Path is not readable: " + path.string());
@@ -246,7 +244,7 @@ Status pathExists(const fs::path& path) {
   if (!fs::exists(path, ec) || ec.value() != errc::success) {
     return Status(1, ec.message());
   }
-  return Status(0, "1");
+  return Status::success();
 }
 
 Status movePath(const fs::path& from, const fs::path& to) {
@@ -320,7 +318,7 @@ static void genGlobs(std::string path,
     size_t wild = path.rfind("**");
     // Allow a trailing slash after the double wild indicator.
     if (glob_results.size() == 0 || wild > path.size() ||
-        wild < path.size() - 3) {
+        wild + 3 < path.size()) {
       break;
     }
 
@@ -349,7 +347,7 @@ Status resolveFilePattern(const fs::path& fs_path,
                           std::vector<std::string>& results,
                           GlobLimits setting) {
   genGlobs(fs_path.string(), results, setting);
-  return Status(0, "OK");
+  return Status::success();
 }
 
 inline void replaceGlobWildcards(std::string& pattern, GlobLimits limits) {
@@ -407,7 +405,7 @@ inline Status listInAbsoluteDirectory(const fs::path& path,
   }
 
   genGlobs(path.string(), results, limits);
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status listFilesInDirectory(const fs::path& path,
@@ -427,7 +425,7 @@ Status listDirectoriesInDirectory(const fs::path& path,
 Status isDirectory(const fs::path& path) {
   boost::system::error_code ec;
   if (fs::is_directory(path, ec)) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   // The success error code is returned for as a failure (undefined error)
@@ -437,6 +435,32 @@ Status isDirectory(const fs::path& path) {
     return Status(1, "Path is not a directory: " + path.string());
   }
   return Status(ec.value(), ec.message());
+}
+
+Status createDirectory(const boost::filesystem::path& dir_path,
+                       bool const recursive,
+                       bool const ignore_existence) {
+  auto err = boost::system::error_code{};
+  bool is_created = false;
+  if (recursive) {
+    is_created = boost::filesystem::create_directories(dir_path, err);
+  } else {
+    is_created = boost::filesystem::create_directory(dir_path, err);
+  }
+  if (is_created) {
+    return Status::success();
+  }
+  if (ignore_existence && isDirectory(dir_path).ok()) {
+    return Status::success();
+  }
+  auto msg = std::string{"Could not create directory \""};
+  msg += dir_path.string();
+  msg += '"';
+  if (err) {
+    msg += ": ";
+    msg += err.message();
+  }
+  return Status::failure(msg);
 }
 
 std::set<fs::path> getHomeDirectories() {
@@ -543,12 +567,12 @@ std::string lsperms(int mode) {
 }
 
 Status parseJSON(const fs::path& path, pt::ptree& tree) {
-  std::string json_data;
-  if (!readFile(path, json_data).ok()) {
-    return Status(1, "Could not read JSON from file");
+  try {
+    pt::read_json(path.string(), tree);
+  } catch (const pt::json_parser::json_parser_error& e) {
+    return Status(1, "Could not parse JSON from file");
   }
-
-  return parseJSONContent(json_data, tree);
+  return Status::success();
 }
 
 Status parseJSONContent(const std::string& content, pt::ptree& tree) {
@@ -560,6 +584,6 @@ Status parseJSONContent(const std::string& content, pt::ptree& tree) {
   } catch (const pt::json_parser::json_parser_error& /* e */) {
     return Status(1, "Could not parse JSON from file");
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 } // namespace osquery

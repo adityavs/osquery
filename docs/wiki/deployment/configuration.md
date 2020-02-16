@@ -1,6 +1,6 @@
 An osquery deployment consists of:
 
-* Installing the tools for [Windows](../installation/install-windows.md), [macOS](../installation/install-osx.md), or [Linux](../installation/install-linux.md)
+* Installing the tools for [Windows](../installation/install-windows.md), [macOS](../installation/install-macos.md), or [Linux](../installation/install-linux.md)
 * Reviewing the [osqueryd](../introduction/using-osqueryd.md) introduction
 * Configuring and starting the **osqueryd** service (this page)
 * Managing and [collecting](log-aggregation.md) the query results
@@ -29,7 +29,7 @@ The default config plugin, **filesystem**, reads from a file and optional
 directory ".d" based on the filename. The included initscripts set the default
 config path as follows:
 
-* Windows: **C:\ProgramData\osquery\osquery.conf**
+* Windows: **C:\Program Files\osquery\osquery.conf**
 * Linux: **/etc/osquery/osquery.conf** and **/etc/osquery/osquery.conf.d/**
 * MacOS: **/var/osquery/osquery.conf** and **/var/osquery/osquery.conf.d/**
 
@@ -70,7 +70,7 @@ tooling](performance-safety.md) to understand the performance impact for each
 query.
 
 The results of your query are cached on disk using
-[RocksDB](http://rocksdb.org/). On the first query run, all of the results are
+[RocksDB](https://rocksdb.org). On the first query run, all of the results are
 stored in RocksDB. On subsequent runs, only result-set-difference (changes) are logged to RocksDB.
 
 Scheduled queries can also set: `"removed":false` and `"snapshot":true`. See
@@ -215,9 +215,6 @@ Consider the following example:
 
 ```json
 {
-  "options": {
-    "enable_monitor": "true"
-  },
   "packs": {
     "foo": {
       "queries": {}
@@ -234,9 +231,6 @@ string. Consider the following example:
 
 ```json
 {
-  "options": {
-    "enable_monitor": "true"
-  },
   "packs": {
     "foo": "/tmp/foo.json",
     "bar": "/tmp/bar.json"
@@ -249,7 +243,7 @@ When osquery's config parser is provided a string instead of inline dictionary t
 
 **Where can I get more packs?**
 
-We release (and bundle alongside RPMs/DEBs/PKGs/etc.) query packs that emit high signal events as well as event data that is worth storing in the case of future incidents and security events. The queries within each pack will be performance tested and well-formed (JOIN, select-limited, etc.). But it is always an exercise for the user to make sure queries are useful and are not impacting performance critical hosts. You can find the query packs that are released by the osquery team documented at [https://osquery.io/docs/packs](https://osquery.io/docs/packs) and the content in [**/packs**](https://github.com/facebook/osquery/blob/master/packs) within the osquery repository.
+We release (and bundle alongside RPMs/DEBs/PKGs/etc.) query packs that emit high signal events as well as event data that is worth storing in the case of future incidents and security events. The queries within each pack will be performance tested and well-formed (JOIN, select-limited, etc.). But it is always an exercise for the user to make sure queries are useful and are not impacting performance critical hosts. You can find the query packs that are released by the osquery team documented at [https://osquery.io/docs/packs](https://osquery.io/docs/packs) and the content in [**/packs**](https://github.com/osquery/osquery/blob/master/packs) within the osquery repository.
 
 **How do I modify the default options in the provided packs?**
 
@@ -272,7 +266,6 @@ Example:
   "options": {
     "read_max": 100000,
     "events_max": 100000,
-    "enable_monitor": true,
     "host_identifier": "uuid"
   }
 }
@@ -326,7 +319,7 @@ The `platform` key can be:
 - `darwin` for MacOS hosts
 - `freebsd` for FreeBSD hosts
 - `linux` for any RedHat or Debian-based hosts
-- `posix` for `linux`, `freebsd`, and `linux` hosts
+- `posix` for `darwin`, `freebsd`, and `linux` hosts
 - `windows` for any Windows desktop or server hosts
 - `any` or `all` for all, alternatively no platform key selects all
 
@@ -439,7 +432,7 @@ Example:
 ```json
 {
   "views": {
-    "kernel_hashses" : "SELECT hash.path AS kernel_binary, version, hash.sha256 AS sha256, hash.sha1 AS sha1, hash.md5 AS md5 FROM (SELECT path || '/Contents/MacOS/' AS directory, name, version FROM kernel_extensions) JOIN hash USING (directory);"
+    "kernel_hashes" : "SELECT hash.path AS kernel_binary, version, hash.sha256 AS sha256, hash.sha1 AS sha1, hash.md5 AS md5 FROM (SELECT path || '/Contents/MacOS/' AS directory, name, version FROM kernel_extensions) JOIN hash USING (directory);"
   }
 }
 ```
@@ -451,6 +444,10 @@ SELECT * FROM kernel_hashes WHERE kernel_binary NOT LIKE "%apple%";
 ### EC2
 
 There are two tables that provide EC2 instance related information. On non-EC2 instances these tables return empty results. `ec2_instance_metadata` table contains instance meta data information. `ec2_instance_tags` returns tags for the EC2 instance osquery is running on. Retrieving tags for EC2 instance requires authentication and appropriate permission. There are multiple ways credentials can be provided to osquery. See [AWS logging configuration](../deployment/aws-logging.md#configuration) for configuring credentials. AWS region (`--aws_region`) argument is not required and will be ignored by `ec2_instance_tags` implementation. The credentials configured should have permission to perform `ec2:DescribeTags` action.
+
+### Azure
+
+Like EC2, there are two tables that provide Azure instance related information. These tables query a REST endpoint that may or may not exist outside of Azure, so querying them outside of Azure is not recommended. The `azure_instance_metadata` table contains general metadata for the instance. The `azure_instance_tags` table contains tags for the Azure instance that osquery is running on. These tables don't require any special Azure permissions or credentials.
 
 ### Decorator queries
 
@@ -490,7 +487,7 @@ The columns, and their values, will be appended to each log line as follows. Ass
 
 Expect the normal set of log keys to be included and note that `decorations` is a top-level key in the log line whose value is an embedded map.
 
-The configuration flag `decorators_top_level` can be set to `true` to make decorator data populate as top level key/value objects instead of being contained as a child of `decorations`.  When using this feature, you must be weary of key collisions in existing, reserved, top-level keys.  When collisions do occur, existing key/value data will likely be overwritten by the decorator key/value.  The following example shows the results of collisions on various top-level keys:
+The configuration flag `decorations_top_level` can be set to `true` to make decorator data populate as top level key/value objects instead of being contained as a child of `decorations`.  When using this feature, you must be weary of key collisions in existing, reserved, top-level keys.  When collisions do occur, existing key/value data will likely be overwritten by the decorator key/value.  The following example shows the results of collisions on various top-level keys:
 
 Example configuration:
 
@@ -592,7 +589,7 @@ And the following files/templates used by the recipe:
 **templates/default/launchd.plist.erb**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>

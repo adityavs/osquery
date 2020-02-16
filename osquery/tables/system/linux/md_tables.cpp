@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <errno.h>
@@ -25,12 +23,12 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/trim.hpp>
 
-#include <osquery/core/conversions.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
-
-#include "osquery/events/linux/udev.h"
-#include "osquery/tables/system/linux/md_tables.h"
+#include <osquery/events/linux/udev.h>
+#include <osquery/tables/system/linux/md_tables.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/conversions/tryto.h>
 
 namespace osquery {
 namespace tables {
@@ -122,19 +120,15 @@ std::string MD::getPathByDevName(const std::string& name) {
   std::string devPath;
 
   walkUdevDevices("block", [&](udev_device* const& device) {
-    const char* devName = udev_device_get_property_value(device, "DEVNAME");
-    size_t devNameLen = strlen(devName);
-    if (name.length() > devNameLen) {
-      return false;
-    }
-
-    if (name.compare(devNameLen - name.length(), std::string::npos, devName) ==
-        0) {
-      devPath = devName;
+    auto const devName = std::string(
+      udev_device_get_property_value(device, "DEVNAME")
+    );
+    if (boost::ends_with(devName, name)) {
       if (!boost::starts_with(devPath, "/")) {
         devPath = "/dev/" + devPath;
+      } else {
+        devPath = devName;
       }
-
       return true;
     }
 
@@ -285,15 +279,14 @@ std::string getSuperBlkStateStr(int state) {
   return s;
 }
 
-// For use with unique_ptr of file close as a hacky way of preventing fd leaks
-auto const kFClose = [](int* fd) { close(*fd); };
-
 bool MD::getDiskInfo(const std::string& arrayName, mdu_disk_info_t& diskInfo) {
-  int fd = 0;
+  int fd = open(arrayName.c_str(), O_RDONLY);
+  if (fd == -1) {
+    return false;
+  }
 
-  std::unique_ptr<int, decltype(kFClose)> _(
-      &(fd = open(arrayName.c_str(), O_RDONLY)), kFClose);
   auto status = ioctl(fd, GET_DISK_INFO, &diskInfo);
+  close(fd);
 
   if (status == -1) {
     LOG(WARNING) << "Call to ioctl 'GET_DISK_INFO' " << arrayName
@@ -305,11 +298,13 @@ bool MD::getDiskInfo(const std::string& arrayName, mdu_disk_info_t& diskInfo) {
 }
 
 bool MD::getArrayInfo(const std::string& name, mdu_array_info_t& array) {
-  int fd = 0;
+  int fd = open(name.c_str(), O_RDONLY);
+  if (fd == -1) {
+    return false;
+  }
 
-  std::unique_ptr<int, decltype(kFClose)> _(
-      &(fd = open(name.c_str(), O_RDONLY)), kFClose);
   auto status = ioctl(fd, GET_ARRAY_INFO, &array);
+  close(fd);
 
   if (status == -1) {
     LOG(ERROR) << "Call to ioctl 'GET_ARRAY_INFO' for " << name
@@ -451,7 +446,7 @@ void MD::parseMDStat(const std::vector<std::string>& lines, MDStat& result) {
     n = 1;
 
   } else {
-    LOG(WARNING) << "mdstat Personalites not found at line 0: " << lines[0];
+    LOG(WARNING) << "mdstat Personalities not found at line 0: " << lines[0];
   }
 
   while (n < lines.size()) {
@@ -463,7 +458,7 @@ void MD::parseMDStat(const std::vector<std::string>& lines, MDStat& result) {
     // Work off of first 2 character instead of just the first to be safe.
     std::string firstTwo = lines[n].substr(0, 2);
     if (firstTwo == "md") {
-      auto mdline(split(lines[n], ":", 1));
+      auto mdline(split(lines[n], ':', 1));
       if (mdline.size() < 2) {
         LOG(WARNING) << "Unexpected md device line structure: " << lines[n];
         n += 1;
@@ -501,9 +496,11 @@ void MD::parseMDStat(const std::vector<std::string>& lines, MDStat& result) {
         trimStrs(configline);
 
         if (configline[1] == "blocks") {
-          Status status = safeStrtol(configline[0], 10, mdd.usableSize);
-          if (!status.ok()) {
+          auto const exp = tryTo<long>(configline[0], 10);
+          if (exp.isError()) {
             LOG(WARNING) << "Could not parse usable size of " << mdd.name;
+          } else {
+            mdd.usableSize = exp.get();
           }
 
         } else {

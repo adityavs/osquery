@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <fcntl.h>
@@ -29,9 +27,17 @@
 #include <WinSock2.h>
 #endif
 
-#include <ctime>
+#if defined(__FreeBSD__)
+#include <pthread_np.h>
+#endif
+
+#if defined(__APPLE__)
+#include <sys/kauth.h>
+#endif
+
 #include <sstream>
 
+#include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/lexical_cast.hpp>
@@ -41,18 +47,23 @@
 
 #include <osquery/core.h>
 #include <osquery/database.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/process/process.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
 
 #ifdef WIN32
 #include "osquery/core/windows/wmi.h"
 #endif
-#include "osquery/core/conversions.h"
-#include "osquery/core/process.h"
-#include "osquery/core/utils.h"
+#include "osquery/utils/info/tool_type.h"
+#include "osquery/utils/info/platform_type.h"
+#include "osquery/utils/conversions/tryto.h"
+#include "osquery/utils/config/default_paths.h"
+#ifdef WIN32
+#include <osquery/utils/conversions/windows/strings.h>
+#endif
 
 namespace fs = boost::filesystem;
 
@@ -86,6 +97,13 @@ FLAG(string,
 
 FLAG(bool, utc, true, "Convert all UNIX times to UTC");
 
+const std::vector<std::string> kPlaceholderHardwareUUIDList{
+    "00000000-0000-0000-0000-000000000000",
+    "03000200-0400-0500-0006-000700080009",
+    "03020100-0504-0706-0809-0a0b0c0d0e0f",
+    "10000000-0000-8000-0040-000000000000",
+};
+
 #ifdef WIN32
 struct tm* gmtime_r(time_t* t, struct tm* result) {
   _gmtime64_s(result, t);
@@ -111,10 +129,8 @@ std::string getHostname() {
 
   std::vector<char> hostname(size, 0x0);
   std::string hostname_string;
-  if (hostname.data() != nullptr) {
-    gethostname(hostname.data(), size - 1);
-    hostname_string = std::string(hostname.data());
-  }
+  gethostname(hostname.data(), size - 1);
+  hostname_string = std::string(hostname.data());
   boost::algorithm::trim(hostname_string);
   return hostname_string;
 }
@@ -155,6 +171,14 @@ std::string generateNewUUID() {
   return boost::uuids::to_string(uuid);
 }
 
+bool isPlaceholderHardwareUUID(const std::string& uuid) {
+  std::string lower_uuid = boost::to_lower_copy(uuid);
+
+  return std::find(kPlaceholderHardwareUUIDList.begin(),
+                   kPlaceholderHardwareUUIDList.end(),
+                   lower_uuid) != kPlaceholderHardwareUUIDList.end();
+}
+
 std::string generateHostUUID() {
   std::string hardware_uuid;
 #ifdef __APPLE__
@@ -168,8 +192,8 @@ std::string generateHostUUID() {
     hardware_uuid = std::string(out);
   }
 #elif WIN32
-  WmiRequest wmiUUIDReq("Select UUID from Win32_ComputerSystemProduct");
-  std::vector<WmiResultItem>& wmiUUIDResults = wmiUUIDReq.results();
+  const WmiRequest wmiUUIDReq("Select UUID from Win32_ComputerSystemProduct");
+  const std::vector<WmiResultItem>& wmiUUIDResults = wmiUUIDReq.results();
   if (wmiUUIDResults.size() != 0) {
     wmiUUIDResults[0].GetString("UUID", hardware_uuid);
   }
@@ -184,12 +208,20 @@ std::string generateHostUUID() {
   boost::algorithm::trim(hardware_uuid);
   if (!hardware_uuid.empty()) {
     // Construct a new string to remove trailing nulls.
-    return std::string(hardware_uuid.c_str());
+    hardware_uuid = std::string(hardware_uuid.c_str());
   }
 
-  // Unable to get the hardware UUID, just return a new UUID
-  VLOG(1) << "Failed to read system uuid, returning ephemeral uuid";
-  return generateNewUUID();
+  // Check whether the UUID is valid. If not generate an ephemeral UUID.
+  if (hardware_uuid.empty()) {
+    VLOG(1) << "Failed to read system uuid, returning ephemeral uuid";
+    return generateNewUUID();
+  } else if (isPlaceholderHardwareUUID(hardware_uuid)) {
+    VLOG(1) << "Hardware uuid '" << hardware_uuid
+            << "' is a placeholder, returning ephemeral uuid";
+    return generateNewUUID();
+  } else {
+    return hardware_uuid;
+  }
 }
 
 Status getInstanceUUID(std::string& ident) {
@@ -209,7 +241,7 @@ Status getEphemeralUUID(std::string& ident) {
   if (ident.size() == 0) {
     ident = osquery::generateNewUUID();
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status getHostUUID(std::string& ident) {
@@ -228,7 +260,7 @@ Status getSpecifiedUUID(std::string& ident) {
     return Status(1, "No specified identifier for host");
   }
   ident = FLAGS_specified_identifier;
-  return Status(0, "OK");
+  return Status::success();
 }
 
 std::string getHostIdentifier() {
@@ -260,58 +292,12 @@ std::string getHostIdentifier() {
   return ident;
 }
 
-std::string toAsciiTime(const struct tm* tm_time) {
-  if (tm_time == nullptr) {
-    return "";
-  }
-
-  auto time_str = platformAsctime(tm_time);
-  boost::algorithm::trim(time_str);
-  return time_str + " UTC";
-}
-
-std::string toAsciiTimeUTC(const struct tm* tm_time) {
-  size_t epoch = toUnixTime(tm_time);
-  struct tm tptr;
-
-  memset(&tptr, 0, sizeof(tptr));
-
-  if (epoch == (size_t)-1) {
-    return "";
-  }
-
-  gmtime_r((time_t*)&epoch, &tptr);
-  return toAsciiTime(&tptr);
-}
-
-std::string getAsciiTime() {
-  auto result = std::time(nullptr);
-
-  struct tm now;
-  gmtime_r(&result, &now);
-
-  return toAsciiTime(&now);
-}
-
-size_t toUnixTime(const struct tm* tm_time) {
-  struct tm result;
-  memset(&result, 0, sizeof(result));
-
-  memcpy(&result, tm_time, sizeof(result));
-  return mktime(&result);
-}
-
-size_t getUnixTime() {
-  std::time_t ut = std::time(nullptr);
-  return ut < 0 ? 0 : ut;
-}
-
 Status checkStalePid(const std::string& content) {
   int pid;
   try {
     pid = boost::lexical_cast<int>(content);
   } catch (const boost::bad_lexical_cast& /* e */) {
-    return Status(0, "Could not parse pid from existing pidfile");
+    return Status::success();
   }
 
   PlatformProcess target(pid);
@@ -344,7 +330,7 @@ Status checkStalePid(const std::string& content) {
     VLOG(1) << "Found stale process for osqueryd (" << content << ")";
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status createPidFile() {
@@ -402,11 +388,20 @@ bool PlatformProcess::cleanup() const {
 #ifndef WIN32
 
 static inline bool ownerFromResult(const Row& row, long& uid, long& gid) {
-  if (!safeStrtol(row.at("uid"), 10, uid) ||
-      !safeStrtol(row.at("gid"), 10, gid)) {
-    return false;
+  auto const uid_exp = tryTo<long>(row.at("uid"), 10);
+  auto const gid_exp = tryTo<long>(row.at("gid"), 10);
+  if (uid_exp.isValue()) {
+    uid = uid_exp.get();
   }
-  return true;
+  if (gid_exp.isValue()) {
+    gid = gid_exp.get();
+  }
+  return uid_exp.isValue() && gid_exp.isValue();
+}
+
+DropPrivilegesRef DropPrivileges::get() {
+  DropPrivilegesRef handle = DropPrivilegesRef(new DropPrivileges());
+  return handle;
 }
 
 bool DropPrivileges::dropToParent(const fs::path& path) {
@@ -452,7 +447,10 @@ bool DropPrivileges::dropTo(const std::string& user) {
 
 bool setThreadEffective(uid_t uid, gid_t gid) {
 #if defined(__APPLE__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated"
   return (pthread_setugid_np(uid, gid) == 0);
+#pragma GCC diagnostic pop
 #elif defined(__linux__)
   return (syscall(SYS_setresgid, -1, gid, -1) == 0 &&
           syscall(SYS_setresuid, -1, uid, -1) == 0);
@@ -461,10 +459,10 @@ bool setThreadEffective(uid_t uid, gid_t gid) {
 }
 
 bool DropPrivileges::dropTo(const std::string& uid, const std::string& gid) {
-  unsigned long int _uid = 0;
-  unsigned long int _gid = 0;
-  if (!safeStrtoul(uid, 10, _uid).ok() || !safeStrtoul(gid, 10, _gid).ok() ||
-      !dropTo(static_cast<uid_t>(_uid), static_cast<gid_t>(_gid))) {
+  auto const uid_exp = tryTo<uid_t>(uid, 10);
+  auto const gid_exp = tryTo<gid_t>(gid, 10);
+  if (uid_exp.isError() || gid_exp.isError() ||
+      !dropTo(uid_exp.get(), gid_exp.get())) {
     return false;
   }
   return true;
@@ -531,4 +529,70 @@ DropPrivileges::~DropPrivileges() {
   }
 }
 #endif
+
+Status setThreadName(const std::string& name) {
+#if defined(__APPLE__)
+  int return_code = pthread_setname_np(name.c_str());
+  return return_code == 0
+             ? Status::success()
+             : Status::failure("pthread_setname_np failed with error " +
+                               std::to_string(return_code));
+#elif defined(__linux__)
+  int return_code = pthread_setname_np(pthread_self(), name.c_str());
+  return return_code == 0
+             ? Status::success()
+             : Status::failure("pthread_setname_np failed with error " +
+                               std::to_string(return_code));
+#elif defined(__FreeBSD__)
+  // FreeBSD silently ignores errors and does not return an error code
+  pthread_set_name_np(pthread_self(), name.c_str());
+  return Status::success();
+#elif defined(WIN32)
+  // SetThreadDescription is available in builds newer than 1607 of windows 10
+  // and works even if there is no debugger.
+  typedef HRESULT(WINAPI * PFNSetThreadDescription)(HANDLE hThread,
+                                                    PCWSTR lpThreadDescription);
+  auto pfnSetThreadDescription = reinterpret_cast<PFNSetThreadDescription>(
+      GetProcAddress(GetModuleHandleA("Kernel32.dll"), "SetThreadDescription"));
+  if (pfnSetThreadDescription != nullptr) {
+    std::wstring wideName{stringToWstring(name)};
+    HRESULT hr = pfnSetThreadDescription(GetCurrentThread(), wideName.c_str());
+    if (!FAILED(hr)) {
+      return Status::success();
+    }
+  }
+  return Status::failure(
+      "setThreadName failed due to GetProcAddress returning null");
+#else
+  return Status::failure("setThreadName not supported on this OS");
+#endif
+}
+
+bool checkPlatform(const std::string& platform) {
+  if (platform.empty() || platform == "null") {
+    return true;
+  }
+
+  if (platform.find("any") != std::string::npos ||
+      platform.find("all") != std::string::npos) {
+    return true;
+  }
+
+  // Technically "centos" and "ubuntu" are no longer supported. We have never
+  // differentiated between Linux distributions, but rather execute all Linux
+  // based queries on any Linux system.
+  auto linux_type = (platform.find("linux") != std::string::npos ||
+                     platform.find("ubuntu") != std::string::npos ||
+                     platform.find("centos") != std::string::npos);
+  if (linux_type && isPlatform(osquery::PlatformType::TYPE_LINUX)) {
+    return true;
+  }
+
+  auto posix_type = (platform.find("posix") != std::string::npos);
+  if (posix_type && isPlatform(osquery::PlatformType::TYPE_POSIX)) {
+    return true;
+  }
+
+  return (platform.find(osquery::kSDKPlatform) != std::string::npos);
+}
 } // namespace osquery

@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <unistd.h>
@@ -16,12 +14,17 @@
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/tables.h>
+#include <osquery/utils/conversions/join.h>
 
 extern "C" {
 #include <libcryptsetup.h>
 }
 
-#include "osquery/core/conversions.h"
+// FIXME: Add enum generation for tables and remove following code
+// Copy of values in disk_encryption.mm
+const std::string kEncryptionStatusEncrypted = "encrypted";
+const std::string kEncryptionStatusUndefined = "undefined";
+const std::string kEncryptionStatusNotEncrypted = "not encrypted";
 
 namespace osquery {
 namespace tables {
@@ -42,6 +45,7 @@ void genFDEStatusForBlockDevice(const std::string& name,
   case CRYPT_ACTIVE:
   case CRYPT_BUSY: {
     r["encrypted"] = "1";
+    r["encryption_status"] = kEncryptionStatusEncrypted;
 
     auto crypt_init = crypt_init_by_name_and_header(&cd, name.c_str(), nullptr);
     if (crypt_init < 0) {
@@ -81,9 +85,11 @@ void genFDEStatusForBlockDevice(const std::string& name,
   default:
     if (encrypted_rows.count(parent_name)) {
       auto parent_row = encrypted_rows[parent_name];
+      r["encryption_status"] = kEncryptionStatusEncrypted;
       r["encrypted"] = "1";
       r["type"] = parent_row["type"];
     } else {
+      r["encryption_status"] = kEncryptionStatusNotEncrypted;
       r["encrypted"] = "0";
     }
   }

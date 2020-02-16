@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <sys/socket.h>
@@ -18,8 +16,7 @@
 #include <osquery/core.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-
-#include "osquery/tables/networking/utils.h"
+#include <osquery/tables/networking/posix/utils.h>
 
 namespace osquery {
 namespace tables {
@@ -27,14 +24,32 @@ namespace tables {
 #define MAX_NETLINK_SIZE 8192
 #define MAX_NETLINK_ATTEMPTS 8
 
+constexpr auto kDefaultIpv6Route = "::";
+constexpr auto kDefaultIpv4Route = "0.0.0.0";
+
 std::string getNetlinkIP(int family, const char* buffer) {
   char dst[INET6_ADDRSTRLEN] = {0};
 
-  inet_ntop(family, buffer, dst, INET6_ADDRSTRLEN);
+  if (inet_ntop(family, buffer, dst, INET6_ADDRSTRLEN) == nullptr) {
+    LOG(ERROR) << "Unsupported address family: " << family;
+    return "";
+  }
   std::string address(dst);
   boost::trim(address);
 
   return address;
+}
+
+std::string getDefaultRouteIP(int family) {
+  switch (family) {
+  case AF_INET:
+    return kDefaultIpv4Route;
+  case AF_INET6:
+    return kDefaultIpv6Route;
+  default:
+    LOG(ERROR) << "Unsupported address family: " << family;
+    return "";
+  }
 }
 
 Status readNetlink(int socket_fd, int seq, char* output, size_t* size) {
@@ -89,7 +104,7 @@ Status readNetlink(int socket_fd, int seq, char* output, size_t* size) {
            static_cast<pid_t>(nl_hdr->nlmsg_pid) != getpid());
 
   *size = message_size;
-  return Status(0, "OK");
+  return Status::success();
 }
 
 void genNetlinkRoutes(const struct nlmsghdr* netlink_msg, QueryData& results) {
@@ -106,6 +121,8 @@ void genNetlinkRoutes(const struct nlmsghdr* netlink_msg, QueryData& results) {
   // Iterate over each route in the netlink message
   bool has_destination = false;
   r["metric"] = "0";
+  r["hopcount"] = INTEGER(0);
+  r["mtu"] = INTEGER(0);
   while (RTA_OK(attr, attr_size)) {
     switch (attr->rta_type) {
     case RTA_OIF:
@@ -131,12 +148,27 @@ void genNetlinkRoutes(const struct nlmsghdr* netlink_msg, QueryData& results) {
     case RTA_PRIORITY:
       r["metric"] = INTEGER(*(int*)RTA_DATA(attr));
       break;
+    case RTA_METRICS:
+      struct rtattr* xattr = static_cast<struct rtattr*> RTA_DATA(attr);
+      auto xattr_size = RTA_PAYLOAD(attr);
+      while (RTA_OK(xattr, xattr_size)) {
+        switch (xattr->rta_type) {
+        case RTAX_MTU:
+          r["mtu"] = INTEGER(*reinterpret_cast<int*>(RTA_DATA(xattr)));
+          break;
+        case RTAX_HOPLIMIT:
+          r["hopcount"] = INTEGER(*reinterpret_cast<int*>(RTA_DATA(xattr)));
+          break;
+        }
+        xattr = RTA_NEXT(xattr, xattr_size);
+      }
+      break;
     }
     attr = RTA_NEXT(attr, attr_size);
   }
 
   if (!has_destination) {
-    r["destination"] = "0.0.0.0";
+    r["destination"] = getDefaultRouteIP(message->rtm_family);
     if (message->rtm_dst_len) {
       mask = (int)message->rtm_dst_len;
     }
@@ -160,8 +192,6 @@ void genNetlinkRoutes(const struct nlmsghdr* netlink_msg, QueryData& results) {
   // This is the cidr-formatted mask
   r["netmask"] = INTEGER(mask);
 
-  // Fields not supported by Linux routes:
-  r["mtu"] = "0";
   results.push_back(r);
 }
 

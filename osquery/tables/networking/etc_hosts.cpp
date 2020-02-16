@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <string>
@@ -16,12 +14,11 @@
 #include <boost/filesystem/path.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/filesystem/fileops.h"
+#include <osquery/filesystem/fileops.h>
+#include <osquery/utils/conversions/split.h>
 
 namespace fs = boost::filesystem;
 
@@ -32,6 +29,7 @@ namespace tables {
 fs::path kEtcHosts = "/etc/hosts";
 #else
 fs::path kEtcHosts = (getSystemRoot() / "system32\\drivers\\etc\\hosts");
+fs::path kEtcHostsIcs = (getSystemRoot() / "system32\\drivers\\etc\\hosts.ics");
 #endif
 QueryData parseEtcHostsContent(const std::string& content) {
   QueryData results;
@@ -62,11 +60,22 @@ QueryData parseEtcHostsContent(const std::string& content) {
 
 QueryData genEtcHosts(QueryContext& context) {
   std::string content;
+  QueryData qres = {};
+
   if (readFile(kEtcHosts, content).ok()) {
-    return parseEtcHostsContent(content);
-  } else {
-    return {};
+    qres = parseEtcHostsContent(content);
   }
+
+#ifdef WIN32
+  content.clear();
+  QueryData qres_ics = {};
+  if (readFile(kEtcHostsIcs, content).ok()) {
+    qres_ics = parseEtcHostsContent(content);
+    qres.insert(qres.end(), qres_ics.begin(), qres_ics.end());
+  }
+#endif
+
+  return qres;
 }
 }
 }

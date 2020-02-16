@@ -2,15 +2,12 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#define _WIN32_DCOM
+#include <osquery/utils/system/system.h>
 
-#include <Windows.h>
 // clang-format off
 #include <LM.h>
 // clang-format on
@@ -18,58 +15,16 @@
 #include <osquery/core.h>
 #include <osquery/tables.h>
 #include <osquery/logger.h>
+#include <osquery/process/process.h>
+#include <osquery/process/windows/process_ops.h>
 
-#include "osquery/core/process.h"
-#include "osquery/core/windows/wmi.h"
-#include "osquery/core/windows/process_ops.h"
 #include "osquery/tables/system/windows/registry.h"
-#include "osquery/core/conversions.h"
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/conversions/windows/strings.h>
 
 namespace osquery {
 
 namespace tables {
-
-std::unique_ptr<BYTE[]> getSid(LPCWSTR accountName) {
-  if (accountName == nullptr) {
-    LOG(INFO) << "No account name provided.";
-    return nullptr;
-  }
-
-  // Call LookupAccountNameW() once to retrieve the necessary buffer sizes for
-  // the SID (in bytes) and the domain name (in TCHARS):
-  unsigned long sidBufferSize = 0;
-  unsigned long domainNameSize = 0;
-  auto eSidType = SidTypeUnknown;
-  LookupAccountNameW(nullptr,
-                     accountName,
-                     nullptr,
-                     &sidBufferSize,
-                     nullptr,
-                     &domainNameSize,
-                     &eSidType);
-
-  // Allocate buffers for the (binary data) SID and (wide string) domain name:
-  auto sidBuffer = std::make_unique<BYTE[]>(sidBufferSize);
-  std::vector<wchar_t> domainName(domainNameSize);
-
-  // Call LookupAccountNameW() a second time to actually obtain the SID for the
-  // given account name:
-  auto ret = LookupAccountNameW(nullptr,
-                                accountName,
-                                sidBuffer.get(),
-                                &sidBufferSize,
-                                domainName.data(),
-                                &domainNameSize,
-                                &eSidType);
-  if (ret == 0) {
-    LOG(INFO) << "Failed to LookupAccountNameW(): " << accountName;
-  } else if (IsValidSid(sidBuffer.get()) == FALSE) {
-    LOG(INFO) << "The SID for " << accountName << " is invalid.";
-  }
-
-  // Implicit move operation. Caller "owns" returned pointer:
-  return sidBuffer;
-}
 
 void processLocalGroups(QueryData& results) {
   unsigned long groupInfoLevel = 1;
@@ -98,7 +53,7 @@ void processLocalGroups(QueryData& results) {
 
     for (size_t i = 0; i < numGroupsRead; i++) {
       Row r;
-      sidSmartPtr = getSid(lginfo[i].lgrpi1_name);
+      sidSmartPtr = getSidFromUsername(lginfo[i].lgrpi1_name);
 
       if (sidSmartPtr != nullptr) {
         sidPtr = static_cast<PSID>(sidSmartPtr.get());
@@ -108,8 +63,9 @@ void processLocalGroups(QueryData& results) {
         r["comment"] = wstringToString(lginfo[i].lgrpi1_comment);
 
         // Common schema, normalizing group information with POSIX:
-        r["gid"] = INTEGER(getRidFromSid(sidPtr));
-        r["gid_signed"] = INTEGER(getRidFromSid(sidPtr));
+        auto rid = getRidFromSid(sidPtr);
+        r["gid"] = BIGINT(rid);
+        r["gid_signed"] = INTEGER(rid);
         r["groupname"] = wstringToString(lginfo[i].lgrpi1_name);
         results.push_back(r);
       } else {

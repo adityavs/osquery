@@ -2,16 +2,14 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include "osquery/tables/applications/browser_utils.h"
+#include <osquery/tables/applications/browser_utils.h>
+#include <osquery/utils/info/platform_type.h>
 
 namespace fs = boost::filesystem;
-namespace pt = boost::property_tree;
 
 namespace osquery {
 namespace tables {
@@ -21,18 +19,38 @@ namespace tables {
 #endif
 
 QueryData genChromeExtensions(QueryContext& context) {
-  fs::path chromePath;
 
   /// Each home directory will include custom extensions.
+  fs::path chrome_path;
   if (isPlatform(PlatformType::TYPE_WINDOWS)) {
-    chromePath = "\\AppData\\Local\\Google\\Chrome\\User Data\\%\\Extensions\\";
+    chrome_path =
+        "\\AppData\\Local\\Google\\Chrome\\User Data\\%\\Extensions\\";
   } else if (isPlatform(PlatformType::TYPE_OSX)) {
-    chromePath = "/Library/Application Support/Google/Chrome/%/Extensions/";
+    chrome_path = "/Library/Application Support/Google/Chrome/%/Extensions/";
   } else {
-    chromePath = "/.config/google-chrome/%/Extensions/";
+    chrome_path = "/.config/google-chrome/%/Extensions/";
+  }
+  fs::path brave_path;
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    brave_path = "\\AppData\\Roaming\\brave\\Extensions\\";
+  } else if (isPlatform(PlatformType::TYPE_OSX)) {
+    brave_path =
+        "/Library/Application "
+        "Support/BraveSoftware/Brave-Browser/%/Extensions/";
+  } else {
+    brave_path = "/.config/BraveSoftware/Brave-Browser/%/Extensions/";
+  }
+  fs::path chromium_path;
+  if (isPlatform(PlatformType::TYPE_WINDOWS)) {
+    chromium_path = "\\AppData\\Local\\Chromium\\Extensions\\";
+  } else if (isPlatform(PlatformType::TYPE_OSX)) {
+    chromium_path = "/Library/Application Support/Chromium/%/Extensions/";
+  } else {
+    chromium_path = "/.config/chromium/%/Extensions/";
   }
 
-  return genChromeBasedExtensions(context, chromePath);
+  return genChromeBasedExtensions(context,
+                                  {chrome_path, brave_path, chromium_path});
 }
 }
 }

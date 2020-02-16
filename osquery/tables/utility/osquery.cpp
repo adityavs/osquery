@@ -2,26 +2,26 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
-#include <osquery/config.h>
+#include <osquery/config/config.h>
 #include <osquery/core.h>
 #include <osquery/events.h>
 #include <osquery/extensions.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
 #include <osquery/packs.h>
+#include <osquery/process/process.h>
 #include <osquery/registry.h>
 #include <osquery/sql.h>
 #include <osquery/system.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/process.h"
+#include <osquery/utils/info/platform_type.h>
+#include <osquery/utils/info/version.h>
+#include <osquery/utils/macros/macros.h>
 
 namespace osquery {
 
@@ -85,15 +85,15 @@ QueryData genOsqueryEvents(QueryContext& context) {
 QueryData genOsqueryPacks(QueryContext& context) {
   QueryData results;
 
-  Config::get().packs([&results](std::shared_ptr<Pack>& pack) {
+  Config::get().packs([&results](const Pack& pack) {
     Row r;
-    r["name"] = pack->getName();
-    r["version"] = pack->getVersion();
-    r["platform"] = pack->getPlatform();
-    r["shard"] = INTEGER(pack->getShard());
-    r["active"] = INTEGER(pack->isActive() ? 1 : 0);
+    r["name"] = pack.getName();
+    r["version"] = pack.getVersion();
+    r["platform"] = pack.getPlatform();
+    r["shard"] = INTEGER(pack.getShard());
+    r["active"] = INTEGER(pack.isActive() ? 1 : 0);
 
-    auto stats = pack->getStats();
+    auto stats = pack.getStats();
     r["discovery_cache_hits"] = INTEGER(stats.hits);
     r["discovery_executions"] = INTEGER(stats.misses);
     results.push_back(r);
@@ -216,6 +216,7 @@ QueryData genOsqueryInfo(QueryContext& context) {
   } else {
     r["watcher"] = "-1";
   }
+  r["platform_mask"] = INTEGER(static_cast<uint64_t>(kPlatformType));
 
   std::string uuid;
   r["uuid"] = (getHostUUID(uuid)) ? uuid : "";
@@ -231,7 +232,7 @@ QueryData genOsquerySchedule(QueryContext& context) {
   QueryData results;
 
   Config::get().scheduledQueries(
-      [&results](const std::string& name, const ScheduledQuery& query) {
+      [&results](std::string name, const ScheduledQuery& query) {
         Row r;
         r["name"] = name;
         r["query"] = query.query;
@@ -239,7 +240,6 @@ QueryData genOsquerySchedule(QueryContext& context) {
         r["blacklisted"] = (query.blacklisted) ? "1" : "0";
         // Set default (0) values for each query if it has not yet executed.
         r["executions"] = "0";
-        r["output_size"] = "0";
         r["wall_time"] = "0";
         r["user_time"] = "0";
         r["system_time"] = "0";
@@ -251,7 +251,6 @@ QueryData genOsquerySchedule(QueryContext& context) {
             name, [&r](const QueryPerformance& perf) {
               r["executions"] = BIGINT(perf.executions);
               r["last_executed"] = BIGINT(perf.last_executed);
-              r["output_size"] = BIGINT(perf.output_size);
               r["wall_time"] = BIGINT(perf.wall_time);
               r["user_time"] = BIGINT(perf.user_time);
               r["system_time"] = BIGINT(perf.system_time);

@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <map>
@@ -17,16 +15,21 @@
 #include <boost/algorithm/string/trim.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/core/watcher.h>
+#include <osquery/extensions/interface.h>
+#include <osquery/filesystem/fileops.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/flagalias.h>
 #include <osquery/logger.h>
+#include <osquery/process/process.h>
 #include <osquery/registry.h>
+#include <osquery/sql.h>
 #include <osquery/system.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/core/process.h"
-#include "osquery/core/watcher.h"
-#include "osquery/extensions/interface.h"
-#include "osquery/filesystem/fileops.h"
+#include <osquery/utils/config/default_paths.h>
+#include <osquery/utils/conversions/join.h>
+#include <osquery/utils/conversions/split.h>
+#include <osquery/utils/info/platform_type.h>
+#include <osquery/utils/info/version.h>
 
 namespace fs = boost::filesystem;
 
@@ -57,7 +60,7 @@ CLI_FLAG(string,
 
 CLI_FLAG(string,
          extensions_autoload,
-         OSQUERY_HOME "/extensions.load",
+         OSQUERY_HOME "extensions.load",
          "Optional path to a list of autoloaded & managed extensions");
 
 CLI_FLAG(string,
@@ -165,7 +168,7 @@ Status extensionPathActive(const std::string& path, bool use_timeout = false) {
         // Create a client with a 10-second receive timeout.
         ExtensionManagerClient client(path, 10 * 1000);
         auto status = client.ping();
-        return Status(0, "OK");
+        return Status::success();
       } catch (const std::exception& /* e */) {
         // Path might exist without a connected extension or extension manager.
       }
@@ -195,7 +198,7 @@ void ExtensionWatcher::start() {
   // service is added and started.
   while (!interrupted()) {
     watch();
-    pauseMilli(interval_);
+    pause(std::chrono::milliseconds(interval_));
   }
 }
 
@@ -203,7 +206,7 @@ void ExtensionManagerWatcher::start() {
   // Watch each extension.
   while (!interrupted()) {
     watch();
-    pauseMilli(interval_);
+    pause(std::chrono::milliseconds(interval_));
   }
 
   // When interrupted, request each extension tear down.
@@ -309,6 +312,10 @@ void ExtensionManagerWatcher::watch() {
 }
 
 void initShellSocket(const std::string& homedir) {
+  if (FLAGS_disable_extensions) {
+    return;
+  }
+
   if (!Flag::isDefault("extensions_socket")) {
     return;
   }
@@ -373,6 +380,10 @@ static bool isFileSafe(std::string& path, ExtendableType type) {
   fs::path extendable(path);
   // Set the output sanitized path.
   path = extendable.string();
+  if (!pathExists(path).ok()) {
+    LOG(WARNING) << type_name << " doesn't exist at: " << path;
+    return false;
+  }
   if (!safePermissions(extendable.parent_path().string(), path, true)) {
     LOG(WARNING) << "Will not autoload " << type_name
                  << " with unsafe directory permissions: " << path;
@@ -423,7 +434,7 @@ Status loadExtensions(const std::string& loadfile) {
     // forking and executing the extension binary.
     Watcher::get().addExtensionPath(binary);
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status startExtension(const std::string& name, const std::string& version) {
@@ -517,18 +528,18 @@ Status startExtension(const std::string& manager_path,
           << sdk_version << ") registered";
   return Status(0, std::to_string(uuid));
 }
-
-Status queryExternal(const std::string& manager_path,
-                     const std::string& query,
-                     QueryData& results) {
+Status ExternalSQLPlugin::query(const std::string& query,
+                                QueryData& results,
+                                bool use_cache) const {
+  static_cast<void>(use_cache);
   // Make sure the extension path exists, and is writable.
-  auto status = extensionPathActive(manager_path);
+  auto status = extensionPathActive(FLAGS_extensions_socket);
   if (!status.ok()) {
     return status;
   }
 
   try {
-    ExtensionManagerClient client(manager_path);
+    ExtensionManagerClient client(FLAGS_extensions_socket);
     status = client.query(query, results);
   } catch (const std::exception& e) {
     return Status(1, "Extension call failed: " + std::string(e.what()));
@@ -537,22 +548,17 @@ Status queryExternal(const std::string& manager_path,
   return status;
 }
 
-Status queryExternal(const std::string& query, QueryData& results) {
-  return queryExternal(FLAGS_extensions_socket, query, results);
-}
-
-Status getQueryColumnsExternal(const std::string& manager_path,
-                               const std::string& query,
-                               TableColumns& columns) {
+Status ExternalSQLPlugin::getQueryColumns(const std::string& query,
+                                          TableColumns& columns) const {
   // Make sure the extension path exists, and is writable.
-  auto status = extensionPathActive(manager_path);
+  auto status = extensionPathActive(FLAGS_extensions_socket);
   if (!status.ok()) {
     return status;
   }
 
   QueryData qd;
   try {
-    ExtensionManagerClient client(manager_path);
+    ExtensionManagerClient client(FLAGS_extensions_socket);
     status = client.getQueryColumns(query, qd);
   } catch (const std::exception& e) {
     return Status(1, "Extension call failed: " + std::string(e.what()));
@@ -567,11 +573,6 @@ Status getQueryColumnsExternal(const std::string& manager_path,
   }
 
   return status;
-}
-
-Status getQueryColumnsExternal(const std::string& query,
-                               TableColumns& columns) {
-  return getQueryColumnsExternal(FLAGS_extensions_socket, query, columns);
 }
 
 Status pingExtension(const std::string& path) {
@@ -629,7 +630,7 @@ Status getExtensions(const std::string& manager_path,
                              ext.second.sdk_version};
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status callExtension(const RouteUUID uuid,
@@ -677,7 +678,7 @@ Status startExtensionWatcher(const std::string& manager_path,
   // Start a extension watcher, if the manager dies, so should we.
   Dispatcher::addService(
       std::make_shared<ExtensionWatcher>(manager_path, interval, fatal));
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status startExtensionManager() {
@@ -698,12 +699,20 @@ Status startExtensionManager(const std::string& manager_path) {
   // Seconds converted to milliseconds, used as a thread interruptible.
   auto latency = atoi(FLAGS_extensions_interval.c_str()) * 1000;
   // Start a extension manager watcher, to monitor all registered extensions.
-  Dispatcher::addService(
+  status = Dispatcher::addService(
       std::make_shared<ExtensionManagerWatcher>(manager_path, latency));
 
+  if (!status.ok()) {
+    return status;
+  }
+
   // Start the extension manager thread.
-  Dispatcher::addService(
+  status = Dispatcher::addService(
       std::make_shared<ExtensionManagerRunner>(manager_path));
+
+  if (!status.ok()) {
+    return status;
+  }
 
   // The shell or daemon flag configuration may require an extension.
   if (!FLAGS_extensions_require.empty()) {
@@ -724,7 +733,8 @@ Status startExtensionManager(const std::string& manager_path) {
           // If we have already waited for the timeout period, stop early.
           stop = true;
         }
-        return Status(1, "Extension not autoloaded: " + extension);
+        return Status(
+            1, "Required extension not found or not loaded: " + extension);
       }));
 
       // A required extension was not loaded.
@@ -736,6 +746,6 @@ Status startExtensionManager(const std::string& manager_path) {
     }
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 } // namespace osquery

@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <boost/algorithm/string.hpp>
@@ -14,7 +12,7 @@
 #include <osquery/system.h>
 #include <osquery/tables.h>
 
-#include "osquery/core/conversions.h"
+#include <osquery/utils/conversions/tryto.h>
 #include "osquery/core/windows/wmi.h"
 #include "osquery/tables/system/windows/registry.h"
 
@@ -36,10 +34,10 @@ QueryData genSystemInfo(QueryContext& context) {
     }
   }
 
-  WmiRequest wmiSystemReq("select * from Win32_ComputerSystem");
-  WmiRequest wmiSystemReqProc("select * from Win32_Processor");
-  std::vector<WmiResultItem>& wmiResults = wmiSystemReq.results();
-  std::vector<WmiResultItem>& wmiResultsProc = wmiSystemReqProc.results();
+  const WmiRequest wmiSystemReq("select * from Win32_ComputerSystem");
+  const WmiRequest wmiSystemReqProc("select * from Win32_Processor");
+  const std::vector<WmiResultItem>& wmiResults = wmiSystemReq.results();
+  const std::vector<WmiResultItem>& wmiResultsProc = wmiSystemReqProc.results();
   if (!wmiResults.empty() && !wmiResultsProc.empty()) {
     long numProcs = 0;
     wmiResults[0].GetLong("NumberOfLogicalProcessors", numProcs);
@@ -65,16 +63,16 @@ QueryData genSystemInfo(QueryContext& context) {
   for (const auto& key : regResults) {
     if (key.at("name") == "Update Revision") {
       if (key.at("data").size() >= 16) {
-        unsigned long int revision = 0;
-        safeStrtoul(key.at("data").substr(8, 2), 16, revision);
-        r["cpu_microcode"] = std::to_string(revision);
+        auto revision_exp =
+            tryTo<unsigned long int>(key.at("data").substr(8, 2), 16);
+        r["cpu_microcode"] = std::to_string(revision_exp.takeOr(0ul));
       }
       break;
     }
   }
 
-  WmiRequest wmiBiosReq("select * from Win32_Bios");
-  std::vector<WmiResultItem>& wmiBiosResults = wmiBiosReq.results();
+  const WmiRequest wmiBiosReq("select * from Win32_Bios");
+  const std::vector<WmiResultItem>& wmiBiosResults = wmiBiosReq.results();
   if (wmiBiosResults.size() != 0) {
     wmiBiosResults[0].GetString("SerialNumber", r["hardware_serial"]);
   } else {

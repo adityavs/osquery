@@ -2,10 +2,8 @@
  *  Copyright (c) 2017-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <boost/filesystem/operations.hpp>
@@ -15,7 +13,7 @@
 #include <cups/cups.h>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/tables.h>
@@ -31,7 +29,6 @@ int SMJobIsEnabled(CFStringRef domain, CFStringRef service, Boolean* value);
 #endif
 
 namespace fs = boost::filesystem;
-namespace pt = boost::property_tree;
 
 namespace osquery {
 namespace tables {
@@ -46,6 +43,9 @@ const std::string kRemoteAppleManagementPath =
 const std::string kRemoteBluetoothSharingPath = "/Library/Preferences/ByHost/";
 
 const std::string kRemoteBluetoothSharingPattern = "com.apple.Bluetooth.%";
+
+const std::string kContentCachingPath =
+    "/Library/Preferences/com.apple.AssetCache.plist";
 
 bool remoteAppleManagementPlistExists() {
   auto remoteAppleManagementFileInfo =
@@ -185,6 +185,23 @@ int getBluetoothSharingStatus() {
   return 0;
 }
 
+int getContentCachingStatus() {
+  auto contentCachingStatus =
+      SQL::selectAllFrom("plist", "path", EQUALS, kContentCachingPath);
+  if (contentCachingStatus.empty()) {
+    return 0;
+  }
+  for (const auto& row : contentCachingStatus) {
+    if (row.find("key") == row.end() || row.find("value") == row.end()) {
+      continue;
+    }
+    if (row.at("key") == "Activated" && row.at("value") == INTEGER(1)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 QueryData genSharingPreferences(QueryContext& context) {
   Row r;
   r["screen_sharing"] = INTEGER(getScreenSharingStatus());
@@ -196,6 +213,7 @@ QueryData genSharingPreferences(QueryContext& context) {
   r["internet_sharing"] = INTEGER(getInterNetSharingStatus());
   r["bluetooth_sharing"] = INTEGER(getBluetoothSharingStatus());
   r["disc_sharing"] = INTEGER(getDiscSharingStatus());
+  r["content_caching"] = INTEGER(getContentCachingStatus());
   return {r};
 }
 

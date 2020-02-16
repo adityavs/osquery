@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <linux/limits.h>
@@ -13,11 +11,11 @@
 
 #include <boost/filesystem.hpp>
 
-#include <osquery/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/filesystem/linux/proc.h>
+#include <osquery/utils/conversions/split.h>
 
-#include "osquery/core/conversions.h"
-#include "osquery/filesystem/linux/proc.h"
 
 namespace osquery {
 const std::vector<std::string> kUserNamespaceList = {
@@ -56,7 +54,7 @@ Status procGetNamespaceInode(ino_t& inode,
     return Status(1, "Invalid inode value in descriptor for namespace " + path);
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 Status procGetProcessNamespaces(const std::string& process_id,
@@ -81,7 +79,7 @@ Status procGetProcessNamespaces(const std::string& process_id,
     namespace_list[namespace_name] = namespace_inode;
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
 std::string procDecodeAddressFromHex(const std::string& encoded_address,
@@ -284,17 +282,17 @@ Status procGetSocketList(int family,
 
 Status procGetSocketInodeToProcessInfoMap(const std::string& pid,
                                           SocketInodeToProcessInfoMap& result) {
-  auto callback = [](const std::string& pid,
+  auto callback = [](const std::string& _pid,
                      const std::string& fd,
                      const std::string& link,
-                     SocketInodeToProcessInfoMap& result) -> bool {
+                     SocketInodeToProcessInfoMap& _result) -> bool {
     /* We only care about sockets. But there will be other descriptors. */
     if (link.find("socket:[") != 0) {
       return true;
     }
 
     std::string inode = link.substr(8, link.size() - 9);
-    result[inode] = {pid, fd};
+    _result[inode] = {_pid, fd};
     return true;
   };
 
@@ -304,8 +302,8 @@ Status procGetSocketInodeToProcessInfoMap(const std::string& pid,
 
 Status procProcesses(std::set<std::string>& processes) {
   auto callback = [](const std::string& pid,
-                     std::set<std::string>& processes) -> bool {
-    processes.insert(pid);
+                     std::set<std::string>& _processes) -> bool {
+    _processes.insert(pid);
     return true;
   };
 
@@ -317,9 +315,8 @@ Status procDescriptors(const std::string& process,
   auto callback = [](const std::string& pid,
                      const std::string& fd,
                      const std::string& link_name,
-                     std::map<std::string, std::string>& descriptors) -> bool {
-
-    descriptors[fd] = link_name;
+                     std::map<std::string, std::string>& _descriptors) -> bool {
+    _descriptors[fd] = link_name;
     return true;
   };
 

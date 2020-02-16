@@ -1,27 +1,104 @@
-#  Copyright (c) 2014-present, Facebook, Inc.
-#  All rights reserved.
+# Copyright (c) 2014-present, Facebook, Inc.
+# All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
+# This source code is licensed in accordance with the terms specified in
+# the LICENSE file found in the root directory of this source tree.
 
-file(GLOB OSQUERY_CORE_PLATFORM "${PROCESS_FAMILY}/*.cpp")
-file(GLOB OSQUERY_CORE_PLATFORM_TESTS "tests/${PROCESS_FAMILY}/*.cpp")
+function(osqueryCoreMain)
+  add_subdirectory("plugins")
+  add_subdirectory("sql")
 
-if(APPLE)
-  set(OSQUERY_CORE_PLATFORM
-    ${OSQUERY_CORE_PLATFORM}
-    darwin/conversions.cpp
-    darwin/iokit.cpp
+  if(OSQUERY_BUILD_TESTS)
+    add_subdirectory("tests")
+  endif()
+
+  generateOsqueryCore()
+endfunction()
+
+function(generateOsqueryCore)
+  set(source_files
+    flags.cpp
+    init.cpp
+    query.cpp
+    system.cpp
+    tables.cpp
+    watcher.cpp
   )
-endif()
 
-file(GLOB OSQUERY_CORE "*.cpp")
-ADD_OSQUERY_LIBRARY(TRUE osquery_core
-  ${OSQUERY_CORE_PLATFORM}
-  ${OSQUERY_CORE}
-)
+  if(DEFINED PLATFORM_POSIX)
+    list(APPEND source_files
+      posix/initializer.cpp
+    )
 
-file(GLOB OSQUERY_CORE_TESTS "tests/*.cpp")
-ADD_OSQUERY_TEST(TRUE ${OSQUERY_CORE_TESTS} ${OSQUERY_CORE_PLATFORM_TESTS})
+  elseif(DEFINED PLATFORM_WINDOWS)
+    list(APPEND source_files
+      windows/handle.cpp
+      windows/initializer.cpp
+      windows/wmi.cpp
+    )
+  endif()
+
+  add_osquery_library(osquery_core EXCLUDE_FROM_ALL
+    ${source_files}
+  )
+
+  set(dependencies
+    osquery_headers
+    osquery_config
+    osquery_core_plugins
+    osquery_core_sql
+    osquery_filesystem
+    osquery_process
+    osquery_utils
+    osquery_utils_conversions
+    osquery_utils_info
+    osquery_utils_system_env
+    osquery_utils_system_systemutils
+    osquery_utils_system_time
+    osquery_logger
+    osquery_extensions
+    thirdparty_gflags
+    thirdparty_glog
+    thirdparty_openssl
+    thirdparty_sqlite
+  )
+
+  if(DEFINED PLATFORM_LINUX)
+    list(APPEND dependencies thirdparty_util-linux)
+  endif()
+
+  target_link_libraries(osquery_core PUBLIC
+    osquery_cxx_settings
+
+    ${dependencies}
+  )
+
+  set(public_header_files
+    watcher.h
+  )
+
+  if(DEFINED PLATFORM_WINDOWS)
+    list(APPEND windows_public_header_files
+      windows/handle.h
+      windows/ntapi.h
+      windows/wmi.h
+    )
+
+    generateIncludeNamespace(osquery_core "osquery/core" "FULL_PATH" ${windows_public_header_files})
+  endif()
+
+  generateIncludeNamespace(osquery_core "osquery/core" "FILE_ONLY" ${public_header_files})
+
+  add_test(NAME osquery_core_tests_flagstests-test COMMAND osquery_core_tests_flagstests-test)
+  add_test(NAME osquery_core_tests_systemtests-test COMMAND osquery_core_tests_systemtests-test)
+  add_test(NAME osquery_core_tests_tablestests-test COMMAND osquery_core_tests_tablestests-test)
+  add_test(NAME osquery_core_tests_watcherpermissionstests-test COMMAND osquery_core_tests_watcherpermissionstests-test)
+  add_test(NAME osquery_core_tests_querytests-test COMMAND osquery_core_tests_querytests-test)
+  add_test(NAME osquery_core_tests_processtests-test COMMAND osquery_core_tests_processtests-test)
+
+  if(DEFINED PLATFORM_WINDOWS)
+    add_test(NAME osquery_core_tests_wmitests-test COMMAND osquery_core_tests_wmitests-test)
+  endif()
+endfunction()
+
+osqueryCoreMain()

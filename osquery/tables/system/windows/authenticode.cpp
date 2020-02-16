@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <codecvt>
@@ -13,25 +11,21 @@
 #include <string>
 
 // clang-format off
-#define _WIN32_DCOM
-
-
-#include <Windows.h>
+#include <osquery/utils/system/system.h>
 #include <psapi.h>
 #include <stdlib.h>
 #include <tlhelp32.h>
 #include <wincrypt.h>
 #include <Softpub.h>
+#include <iomanip>
 // clang-format on
 
-#include <osquery/filesystem.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/tables.h>
-
-#include "osquery/core.h"
-#include "osquery/core/conversions.h"
-#include "osquery/core/windows/wmi.h"
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/utils/conversions/windows/strings.h>
 
 namespace osquery {
 template <typename T, typename DeleterType, DeleterType deleter>
@@ -211,7 +205,7 @@ Status verifySignature(SignatureInformation::Result& result,
     return Status(1, "Failed to verify the file signature");
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 Status getOriginalProgramName(SignatureInformation& signature_info,
@@ -241,12 +235,8 @@ Status getOriginalProgramName(SignatureInformation& signature_info,
     return Status(1, "Failed to access the publisher information");
   }
 
-  std::vector<std::uint8_t> publisher_info_blob_buffer;
-  publisher_info_blob_buffer.resize(static_cast<size_t>(publisher_info_size));
-  if (publisher_info_blob_buffer.size() !=
-      static_cast<size_t>(publisher_info_size)) {
-    return Status(1, "Memory allocation failure");
-  }
+  std::vector<std::uint8_t> publisher_info_blob_buffer(
+      static_cast<std::size_t>(publisher_info_size));
 
   PSPC_SP_OPUS_INFO publisher_info_blob_ptr =
       reinterpret_cast<PSPC_SP_OPUS_INFO>(publisher_info_blob_buffer.data());
@@ -266,7 +256,7 @@ Status getOriginalProgramName(SignatureInformation& signature_info,
         wstringToString(publisher_info_blob_ptr->pwszProgramName);
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 Status getCertificateInformation(SignatureInformation& signature_info,
@@ -296,13 +286,7 @@ Status getCertificateInformation(SignatureInformation& signature_info,
       return false;
     }
 
-    std::string buffer;
-    try {
-      buffer.resize(static_cast<size_t>(value_size));
-    } catch (const std::exception&) {
-      VLOG(1) << "Memory allocation error";
-      return false;
-    }
+    std::string buffer(static_cast<std::size_t>(value_size), 0);
 
     if (!CertGetNameString(certificate_context,
                            CERT_NAME_SIMPLE_DISPLAY_TYPE,
@@ -325,10 +309,10 @@ Status getCertificateInformation(SignatureInformation& signature_info,
 
   if (!L_GetCertificateDetail(
           signature_info.subject_name, certificate_context, 0)) {
-    return Status(1, "Failed to retrieve the subkect name");
+    return Status::failure("Failed to retrieve the subject name");
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 Status getSignatureInformation(SignatureInformation& signature_info,
@@ -367,11 +351,8 @@ Status getSignatureInformation(SignatureInformation& signature_info,
     return Status(1, "Failed to get the signer information size");
   }
 
-  std::vector<std::uint8_t> signer_information;
-  signer_information.resize(static_cast<size_t>(signer_info_size));
-  if (signer_information.size() != static_cast<size_t>(signer_info_size)) {
-    return Status(1, "Memory allocation error");
-  }
+  std::vector<std::uint8_t> signer_information(
+      static_cast<std::size_t>(signer_info_size));
 
   PCMSG_SIGNER_INFO signer_information_ptr =
       reinterpret_cast<PCMSG_SIGNER_INFO>(signer_information.data());
@@ -414,7 +395,7 @@ Status getSignatureInformation(SignatureInformation& signature_info,
     return status;
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 Status querySignatureInformation(SignatureInformation& signature_info,
@@ -434,7 +415,7 @@ Status querySignatureInformation(SignatureInformation& signature_info,
   }
 
   if (signature_info.result == SignatureInformation::Result::Missing) {
-    return Status(0, "Ok");
+    return Status::success();
   }
 
   status = getSignatureInformation(signature_info, utf16_path);
@@ -442,7 +423,7 @@ Status querySignatureInformation(SignatureInformation& signature_info,
     return status;
   }
 
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 namespace tables {
@@ -461,7 +442,7 @@ Status generateRow(Row& r, const std::string& path) {
   }
 
   generateRow(r, signature_info);
-  return Status(0, "Ok");
+  return Status::success();
 }
 
 QueryData genAuthenticode(QueryContext& context) {

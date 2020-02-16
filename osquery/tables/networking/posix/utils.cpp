@@ -2,14 +2,14 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <iomanip>
 #include <sstream>
+
+#include <netdb.h>
 
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <net/if.h>
@@ -28,36 +28,36 @@
 
 #include <boost/algorithm/string/trim.hpp>
 
-#include "osquery/tables/networking/utils.h"
+#include <osquery/tables/networking/posix/utils.h>
 
 namespace osquery {
 namespace tables {
 
 std::string ipAsString(const struct sockaddr* in) {
   char dst[INET6_ADDRSTRLEN] = {0};
-  void* in_addr = nullptr;
 
-  if (in->sa_family == AF_INET) {
-    in_addr = (void*)&(((struct sockaddr_in*)in)->sin_addr);
-  } else if (in->sa_family == AF_INET6) {
-    in_addr = (void*)&(((struct sockaddr_in6*)in)->sin6_addr);
-  } else {
+  size_t addrlen = in->sa_family == AF_INET ? sizeof(struct sockaddr_in)
+                                            : sizeof(struct sockaddr_in6);
+  if (getnameinfo(in, addrlen, dst, sizeof(dst), nullptr, 0, NI_NUMERICHOST) !=
+      0) {
     return "";
   }
 
-  inet_ntop(in->sa_family, in_addr, dst, sizeof(dst));
   std::string address(dst);
   boost::trim(address);
   return address;
 }
 
 std::string ipAsString(const struct in_addr* in) {
-  char dst[INET6_ADDRSTRLEN] = {0};
+  struct sockaddr_in addr;
+  addr.sin_addr = *in;
+  addr.sin_family = AF_INET;
+  addr.sin_port = 0;
+#ifdef __MAC__
+  addr.sin_len = sizeof(sockaddr_in);
+#endif
 
-  inet_ntop(AF_INET, in, dst, sizeof(dst));
-  std::string address(dst);
-  boost::trim(address);
-  return address;
+  return ipAsString(reinterpret_cast<struct sockaddr*>(&addr));
 }
 
 inline short addBits(unsigned char byte) {

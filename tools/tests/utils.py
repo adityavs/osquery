@@ -1,17 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 #  Copyright (c) 2014-present, Facebook, Inc.
 #  All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+#  This source code is licensed in accordance with the terms specified in
+#  the LICENSE file found in the root directory of this source tree.
 
 import json
 import os
@@ -88,24 +81,21 @@ def queries_from_config(config_path):
         print("Cannot open/parse config: %s" % str(e))
         exit(1)
     queries = {}
-    if "scheduledQueries" in config:
-        for query in config["scheduledQueries"]:
-            queries[query["name"]] = query["query"]
     if "schedule" in config:
-        for name, details in config["schedule"].iteritems():
+        for name, details in config["schedule"].items():
             queries[name] = details["query"]
     if "packs" in config:
-        for keys,values in config["packs"].iteritems():
+        for keys,values in config["packs"].items():
             # Check if it is an internal pack definition
             if type(values) is dict:
-                for queryname, query in values["queries"].iteritems():
+                for queryname, query in values["queries"].items():
                     queries["pack_" + queryname] = query["query"]
             else:
                 with open(values) as fp:
                     packfile = fp.read()
                     packcontent = rmcomment.sub('', packfile)
                     packqueries = json.loads(packcontent)
-                    for queryname, query in packqueries["queries"].iteritems():
+                    for queryname, query in packqueries["queries"].items():
                         queries["pack_" + queryname] = query["query"]
 
     return queries
@@ -179,7 +169,10 @@ def profile_cmd(cmd, proc=None, shell=False, timeout=0, count=1):
         if timeout > 0 and delay >= timeout + 2:
             proc.kill()
             break
+
+    # account for sleep(1) in profiling code
     duration = time.time() - start_time - 2
+    duration = max(duration, 0)
 
     utilization = [percent for percent in percents if percent != 0]
     if len(utilization) == 0:

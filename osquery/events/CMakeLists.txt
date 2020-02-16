@@ -1,83 +1,146 @@
-#  Copyright (c) 2014-present, Facebook, Inc.
-#  All rights reserved.
+# Copyright (c) 2014-present, Facebook, Inc.
+# All rights reserved.
 #
-#  This source code is licensed under both the Apache 2.0 license (found in the
-#  LICENSE file in the root directory of this source tree) and the GPLv2 (found
-#  in the COPYING file in the root directory of this source tree).
-#  You may select, at your option, one of the above-listed licenses.
+# This source code is licensed in accordance with the terms specified in
+# the LICENSE file found in the root directory of this source tree.
 
-if(APPLE)
-  ADD_OSQUERY_LINK_ADDITIONAL("-framework CoreServices")
-  ADD_OSQUERY_LINK_ADDITIONAL("-framework SystemConfiguration")
-  ADD_OSQUERY_LINK_ADDITIONAL("-framework IOKit")
-  ADD_OSQUERY_LINK_ADDITIONAL("-framework DiskArbitration")
+function(osqueryEventsMain)
 
-
-  file(GLOB OSQUERY_EVENTS_DARWIN "darwin/*.cpp")
-  ADD_OSQUERY_LIBRARY(FALSE osquery_events_darwin ${OSQUERY_EVENTS_DARWIN})
-elseif(FREEBSD)
-  file(GLOB OSQUERY_EVENTS_FREEBSD "freebsd/*.cpp")
-  ADD_OSQUERY_LIBRARY(FALSE osquery_events_freebsd ${OSQUERY_EVENTS_FREEBSD})
-elseif(WINDOWS)
-  ADD_OSQUERY_LINK_CORE("wevtapi.lib")
-  file(GLOB OSQUERY_EVENTS_WINDOWS "windows/*.cpp")
-  ADD_OSQUERY_LIBRARY(FALSE osquery_events_windows ${OSQUERY_EVENTS_WINDOWS})
-else()
-  ADD_OSQUERY_LINK_ADDITIONAL("udev")
-  ADD_OSQUERY_LINK_ADDITIONAL("audit")
-
-  file(GLOB OSQUERY_EVENTS_LINUX "linux/*.cpp")
-  ADD_OSQUERY_LIBRARY(FALSE osquery_events_linux ${OSQUERY_EVENTS_LINUX})
-endif()
-
-ADD_OSQUERY_LIBRARY(TRUE osquery_events
-  events.cpp
-)
-
-file(GLOB OSQUERY_EVENTS_TESTS "tests/*.cpp")
-ADD_OSQUERY_TEST(TRUE ${OSQUERY_EVENTS_TESTS})
-
-if(NOT WINDOWS)
-  file(GLOB OSQUERY_EVENTS_BENCHMARKS "benchmarks/*.cpp")
-  if (LINUX)
-    file(GLOB OSQUERY_EVENTS_PLATFORM_BENCHMARKS "linux/benchmarks/*.cpp")
-  elseif (DARWIN)
-    file(GLOB OSQUERY_EVENTS_PLATFORM_BENCHMARKS "darwin/benchmarks/*.cpp")
+  if(OSQUERY_BUILD_TESTS)
+    add_subdirectory("tests")
   endif()
-  ADD_OSQUERY_BENCHMARK(
-    ${OSQUERY_EVENTS_BENCHMARKS}
-    ${OSQUERY_EVENTS_PLATFORM_BENCHMARKS}
-  )
 
-  # Kernel-related userland code.
-  if(NOT SKIP_KERNEL)
-    file(GLOB OSQUERY_EVENTS_KERNEL "kernel/*.cpp")
-    ADD_OSQUERY_LIBRARY(FALSE osquery_events_kernel
-      kernel.cpp
-      ${OSQUERY_EVENTS_KERNEL}
+  generateOsqueryEvents()
+  generateOsqueryEventsEventsregistry()
+endfunction()
+
+function(generateOsqueryEvents)
+
+  if(DEFINED PLATFORM_LINUX)
+    list(APPEND source_files
+      linux/auditdnetlink.cpp
+      linux/auditeventpublisher.cpp
+      linux/inotify.cpp
+      linux/syslog.cpp
+      linux/udev.cpp
     )
 
-    # Special kernel test define when building non-SDK and non-Release.
-    if(NOT OSQUERY_BUILD_RELEASE AND NOT OSQUERY_BUILD_SDK_ONLY)
-      set_target_properties(osquery_events_kernel
-        PROPERTIES COMPILE_DEFINITIONS "KERNEL_TEST=1")
-    endif()
+  elseif(DEFINED PLATFORM_MACOS)
+    list(APPEND source_files
+      darwin/diskarbitration.cpp
+      darwin/event_taps.cpp
+      darwin/fsevents.cpp
+      darwin/iokit.cpp
+      darwin/openbsm.cpp
+      darwin/scnetwork.cpp
+    )
 
-    file(GLOB OSQUERY_EVENTS_KERNEL_TESTS "kernel/tests/*.cpp")
-    ADD_OSQUERY_KERNEL_TEST(${OSQUERY_EVENTS_KERNEL_TESTS})
-
-    file(GLOB OSQUERY_EVENTS_KERNEL_BENCHMARKS "kernel/benchmarks/*.cpp")
-    ADD_OSQUERY_KERNEL_BENCHMARK(${OSQUERY_EVENTS_KERNEL_BENCHMARKS})
+  elseif(DEFINED PLATFORM_WINDOWS)
+    list(APPEND source_files
+      windows/windows_event_log.cpp
+      windows/ntfs_event_publisher.cpp
+      windows/usn_journal_reader.cpp
+    )
   endif()
-endif()
 
-if(APPLE)
-  file(GLOB OSQUERY_DARWIN_EVENTS_TESTS "darwin/tests/*.cpp")
-  ADD_OSQUERY_TEST(FALSE ${OSQUERY_DARWIN_EVENTS_TESTS})
-elseif(LINUX)
-  file(GLOB OSQUERY_LINUX_EVENTS_TESTS "linux/tests/*.cpp")
-  ADD_OSQUERY_TEST(FALSE ${OSQUERY_LINUX_EVENTS_TESTS})
-elseif(WINDOWS)
-  file(GLOB OSQUERY_WINDOWS_EVENTS_TESTS "windows/tests/*.cpp")
-  ADD_OSQUERY_TEST(FALSE ${OSQUERY_WINDOWS_EVENTS_TESTS})
-endif()
+  add_osquery_library(osquery_events EXCLUDE_FROM_ALL
+    ${source_files}
+  )
+
+  enableLinkWholeArchive(osquery_events)
+
+  target_link_libraries(osquery_events PUBLIC
+    osquery_cxx_settings
+    osquery_headers
+    osquery_core
+    osquery_config
+    osquery_events_eventsregistry
+    osquery_hashing
+    osquery_sql
+    osquery_utils_conversions
+    osquery_utils_expected
+    osquery_utils_system_time
+    thirdparty_boost
+  )
+
+  if(DEFINED PLATFORM_LINUX)
+    target_link_libraries(osquery_events PUBLIC
+      thirdparty_libaudit
+      thirdparty_libudev
+      thirdparty_util-linux
+    )
+  endif()
+
+  set(public_header_files
+    pathset.h
+  )
+
+  generateIncludeNamespace(osquery_events "osquery/events" "FILE_ONLY" ${public_header_files})
+
+  if(DEFINED PLATFORM_LINUX)
+    set(platform_public_header_files
+      linux/auditdnetlink.h
+      linux/auditeventpublisher.h
+      linux/inotify.h
+      linux/process_events.h
+      linux/process_file_events.h
+      linux/selinux_events.h
+      linux/socket_events.h
+      linux/syslog.h
+      linux/udev.h
+    )
+
+  elseif(DEFINED PLATFORM_MACOS)
+    set(platform_public_header_files
+      darwin/diskarbitration.h
+      darwin/event_taps.h
+      darwin/fsevents.h
+      darwin/iokit.h
+      darwin/openbsm.h
+      darwin/scnetwork.h
+    )
+
+  elseif(DEFINED PLATFORM_WINDOWS)
+    set(platform_public_header_files
+      windows/windows_event_log.h
+      windows/ntfs_event_publisher.h
+      windows/usn_journal_reader.h
+    )
+  endif()
+
+  generateIncludeNamespace(osquery_events "osquery/events" "FULL_PATH" ${platform_public_header_files})
+
+  add_test(NAME osquery_events_tests_eventsdatabasetests-test COMMAND osquery_events_tests_eventsdatabasetests-test)
+
+  if(DEFINED PLATFORM_LINUX)
+    add_test(NAME osquery_events_tests_syslogtests-test COMMAND osquery_events_tests_syslogtests-test)
+    add_test(NAME osquery_events_tests_audittests-test COMMAND osquery_events_tests_audittests-test)
+    add_test(NAME osquery_events_tests_processfileeventstests-test COMMAND osquery_events_tests_processfileeventstests-test)
+    add_test(NAME osquery_events_tests_inotifytests-test COMMAND osquery_events_tests_inotifytests-test)
+  endif()
+
+  if(DEFINED PLATFORM_MACOS)
+    add_test(NAME osquery_events_tests_fseventstests-test COMMAND osquery_events_tests_fseventstests-test)
+  endif()
+
+  if(DEFINED PLATFORM_WINDOWS)
+    add_test(NAME osquery_events_tests_windowseventlogtests-test COMMAND osquery_events_tests_windowseventlogtests-test)
+    add_test(NAME osquery_events_tests_usnjournalreadertests-test COMMAND osquery_events_tests_usnjournalreadertests-test)
+  endif()
+endfunction()
+
+function(generateOsqueryEventsEventsregistry)
+  add_osquery_library(osquery_events_eventsregistry EXCLUDE_FROM_ALL events.cpp)
+
+  target_link_libraries(osquery_events_eventsregistry PUBLIC
+    osquery_cxx_settings
+    osquery_core
+    osquery_dispatcher
+    osquery_sql
+    osquery_headers
+  )
+
+  add_test(NAME osquery_events_tests-test COMMAND osquery_events_tests-test)
+endfunction()
+
+osqueryEventsMain()

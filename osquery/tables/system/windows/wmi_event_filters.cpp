@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <sstream>
@@ -24,11 +22,11 @@ QueryData genWmiFilters(QueryContext& context) {
   ss << "SELECT * FROM __EventFilter";
 
   BSTR bstr = ::SysAllocString(L"ROOT\\Subscription");
-  WmiRequest request(ss.str(), bstr);
+  const WmiRequest request(ss.str(), bstr);
   ::SysFreeString(bstr);
 
   if (request.getStatus().ok()) {
-    auto& results = request.results();
+    const auto& results = request.results();
     for (const auto& result : results) {
       Row r;
 

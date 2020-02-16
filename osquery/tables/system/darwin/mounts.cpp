@@ -2,16 +2,15 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <stdio.h>
 #include <sys/mount.h>
 
 #include <osquery/tables.h>
+#include <osquery/utils/system/filepath.h>
 
 namespace osquery {
 namespace tables {
@@ -19,10 +18,9 @@ namespace tables {
 QueryData genMounts(QueryContext& context) {
   QueryData results;
 
-  struct statfs *mnt;
+  struct statfs* mnt;
   int mnts = 0;
   int i;
-  char real_path[PATH_MAX];
 
   mnts = getmntinfo(&mnt, MNT_WAIT);
   if (mnts == 0) {
@@ -34,9 +32,7 @@ QueryData genMounts(QueryContext& context) {
     Row r;
     r["path"] = TEXT(mnt[i].f_mntonname);
     r["device"] = TEXT(mnt[i].f_mntfromname);
-    r["device_alias"] = std::string(realpath(mnt[i].f_mntfromname, real_path)
-                                        ? real_path
-                                        : mnt[i].f_mntfromname);
+    r["device_alias"] = canonicalize_file_name(mnt[i].f_mntfromname);
     r["type"] = TEXT(mnt[i].f_fstypename);
     r["flags"] = INTEGER(mnt[i].f_flags);
     r["blocks"] = BIGINT(mnt[i].f_blocks);
@@ -50,5 +46,5 @@ QueryData genMounts(QueryContext& context) {
   }
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery

@@ -2,10 +2,8 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
@@ -30,7 +28,6 @@ class EventTappingEventPublisher
     : public EventPublisher<EventTappingSubscriptionContext,
                             EventTappingEventContext> {
   DECLARE_PUBLISHER("event_tapping");
-
  public:
   Status setUp() override;
 
@@ -42,7 +39,11 @@ class EventTappingEventPublisher
 
   Status restart();
 
-  EventTappingEventPublisher() : EventPublisher() {}
+  EventTappingEventPublisher(
+      const std::string& name = "EventTappingEventPublisher")
+      : EventPublisher() {
+    runnable_name_ = name;
+  }
 
   ~EventTappingEventPublisher() override final;
 

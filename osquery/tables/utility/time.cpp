@@ -2,17 +2,16 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <ctime>
 
 #include <boost/algorithm/string/trim.hpp>
 
-#include <osquery/core.h>
+#include <osquery/utils/system/time.h>
+
 #include <osquery/flags.h>
 #include <osquery/system.h>
 #include <osquery/tables.h>
@@ -55,7 +54,17 @@ QueryData genTime(QueryContext& context) {
 
   char iso_8601[21] = {0};
   strftime(iso_8601, sizeof(iso_8601), "%FT%TZ", &gmt);
-
+#ifdef WIN32
+  if (context.isColumnUsed("win_timestamp")) {
+    FILETIME ft = {0};
+    GetSystemTimeAsFileTime(&ft);
+    LARGE_INTEGER li = {0};
+    li.LowPart = ft.dwLowDateTime;
+    li.HighPart = ft.dwHighDateTime;
+    long long int hns = li.QuadPart;
+    r["win_timestamp"] = BIGINT(hns);
+  }
+#endif
   r["weekday"] = SQL_TEXT(weekday);
   r["year"] = INTEGER(now.tm_year + 1900);
   r["month"] = INTEGER(now.tm_mon + 1);
@@ -84,5 +93,5 @@ QueryData genTime(QueryContext& context) {
   results.push_back(r);
   return results;
 }
-}
-}
+} // namespace tables
+} // namespace osquery

@@ -2,20 +2,17 @@
  *  Copyright (c) 2018-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/utils/darwin/plist.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
+#include <osquery/sql/sqlite_util.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/sql/sqlite_util.h"
-#include "osquery/tables/system/system_utils.h"
+#include <osquery/tables/system/system_utils.h>
 
 #import <OpenDirectory/OpenDirectory.h>
 
@@ -102,19 +99,21 @@ QueryData genAccountPolicyData(QueryContext& context) {
 
   // Iterate over each user
   auto users = SQL::selectAllFrom("users");
-  for (const auto& user : users) {
-    Row r;
-    auto uid = user.at("uid");
-    genAccountPolicyDataRow(uid, r);
+  @autoreleasepool {
+    for (const auto& user : users) {
+      Row r;
+      auto uid = user.at("uid");
 
-    // A blank UID implies no policy exists for the user, or the policy is
-    // corrupted. We should only return rows where we successfully read an
-    // account policy.
-    if (r["uid"] != "") {
-      results.push_back(r);
+      genAccountPolicyDataRow(uid, r);
+
+      // A blank UID implies no policy exists for the user, or the policy is
+      // corrupted. We should only return rows where we successfully read an
+      // account policy.
+      if (r["uid"] != "") {
+        results.push_back(r);
+      }
     }
   }
-
   return results;
 }
 } // namespace tables

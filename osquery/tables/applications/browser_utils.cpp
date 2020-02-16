@@ -2,18 +2,23 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#include <boost/algorithm/string/join.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+
 #include <osquery/logger.h>
-#include "osquery/tables/applications/browser_utils.h"
-#include "osquery/tables/system/system_utils.h"
+#include <osquery/tables/applications/browser_utils.h>
+#include <osquery/tables/system/system_utils.h>
+
+namespace pt = boost::property_tree;
 
 namespace osquery {
 namespace tables {
+namespace {
 
 #define kManifestFile "/manifest.json"
 
@@ -26,8 +31,75 @@ const std::map<std::string, std::string> kExtensionKeys = {
     {"author", "author"},
     {"background.persistent", "persistent"}};
 
+const std::string kExtensionPermissionKey = "permissions";
+const std::string kExtensionOptionalPermissionKey = "optional_permissions";
+const std::string kProfilePreferencesFile = "Preferences";
+const std::string kProfilePreferenceKey = "profile";
+
+Status getChromeProfileName(std::string& name, const fs::path& path) {
+  name.clear();
+
+  std::string json_data;
+  if (!forensicReadFile(path / kProfilePreferencesFile, json_data).ok()) {
+    return Status::failure("Failed to read the Preferences file for profile " +
+                           path.string());
+  }
+
+  pt::ptree tree;
+  try {
+    std::stringstream json_stream;
+    json_stream << json_data;
+    pt::read_json(json_stream, tree);
+  } catch (const pt::json_parser::json_parser_error&) {
+    return Status::failure("Failed to parse the Preferences file for profile " +
+                           path.string());
+  }
+
+  const auto& profile_obj = tree.get_child_optional(kProfilePreferenceKey);
+  if (!profile_obj) {
+    return Status::failure("The following profile is malformed: " +
+                           path.string());
+  }
+
+  name = profile_obj.get().get<std::string>("name", "");
+  if (name.empty()) {
+    return Status::failure("The following profile has no name: " +
+                           path.string());
+  }
+
+  return Status::success();
+}
+} // namespace
+
+const std::string genPermissions(const std::string& permissionTypeKey,
+                                 const pt::ptree& tree) {
+  std::string permission_list;
+
+  const auto& perm_array_obj = tree.get_child_optional(permissionTypeKey);
+  if (perm_array_obj) {
+    const auto& perm_array_contents = perm_array_obj.get();
+
+    std::vector<std::string> perm_vector;
+    perm_vector.reserve(perm_array_contents.size());
+
+    for (auto it = perm_array_contents.begin(); it != perm_array_contents.end();
+         ++it) {
+      const auto& perm_obj = *it;
+      const auto& permission =
+          perm_obj.second.get_value_optional<std::string>();
+      if (permission) {
+        perm_vector.emplace_back(*permission);
+      }
+    }
+
+    permission_list = boost::algorithm::join(perm_vector, ", ");
+  }
+  return permission_list;
+}
+
 void genExtension(const std::string& uid,
                   const std::string& path,
+                  const std::string& profile_name,
                   QueryData& results) {
   std::string json_data;
   if (!forensicReadFile(path + kManifestFile, json_data).ok()) {
@@ -46,7 +118,7 @@ void genExtension(const std::string& uid,
     return;
   }
 
-  pt::ptree messagetree;
+  pt::iptree messagetree;
   // Find out if there are localized values for fields
   if (!tree.get<std::string>("default_locale", "").empty()) {
     // Read the localized variables into a second ptree
@@ -72,6 +144,10 @@ void genExtension(const std::string& uid,
   std::string localized_prefix = "__MSG_";
   Row r;
   r["uid"] = uid;
+  r[kExtensionPermissionKey] = genPermissions(kExtensionPermissionKey, tree);
+  r[kExtensionOptionalPermissionKey] =
+      genPermissions(kExtensionOptionalPermissionKey, tree);
+  r["profile"] = profile_name;
   // Most of the keys are in the top-level JSON dictionary.
   for (const auto& it : kExtensionKeys) {
     std::string key = tree.get<std::string>(it.first, "");
@@ -102,7 +178,7 @@ void genExtension(const std::string& uid,
 }
 
 QueryData genChromeBasedExtensions(QueryContext& context,
-                                   const fs::path& sub_dir) {
+                                   const std::vector<fs::path>& chromePaths) {
   QueryData results;
 
   auto users = usersFromContext(context);
@@ -110,26 +186,41 @@ QueryData genChromeBasedExtensions(QueryContext& context,
     if (row.count("uid") > 0 && row.count("directory") > 0) {
       // For each user, enumerate all of their chrome profiles.
       std::vector<std::string> profiles;
-      fs::path extension_path = row.at("directory") / sub_dir;
-      if (!resolveFilePattern(extension_path, profiles, GLOB_FOLDERS).ok()) {
-        continue;
-      }
+      for (const auto& chromePath : chromePaths) {
+        fs::path extension_path = row.at("directory") / chromePath;
+        if (!resolveFilePattern(extension_path, profiles, GLOB_FOLDERS).ok()) {
+          continue;
+        }
 
-      // For each profile list each extension in the Extensions directory.
-      std::vector<std::string> extensions;
-      for (const auto& profile : profiles) {
-        listDirectoriesInDirectory(profile, extensions);
-      }
+        // For each profile list each extension in the Extensions directory.
+        for (const auto& profile : profiles) {
+          std::vector<std::string> extensions = {};
+          listDirectoriesInDirectory(profile, extensions);
 
-      // Generate an addons list from their extensions JSON.
-      std::vector<std::string> versions;
-      for (const auto& extension : extensions) {
-        listDirectoriesInDirectory(extension, versions);
-      }
+          if (extensions.empty()) {
+            continue;
+          }
 
-      // Extensions use /<EXTENSION>/<VERSION>/manifest.json.
-      for (const auto& version : versions) {
-        genExtension(row.at("uid"), version, results);
+          auto profile_path = fs::path(profile).parent_path().parent_path();
+
+          std::string profile_name;
+          auto status = getChromeProfileName(profile_name, profile_path);
+          if (!status.ok()) {
+            LOG(WARNING) << "Getting Chrome profile name failed: "
+                         << status.getMessage();
+          }
+
+          // Generate an addons list from their extensions JSON.
+          std::vector<std::string> versions;
+          for (const auto& extension : extensions) {
+            listDirectoriesInDirectory(extension, versions);
+          }
+
+          // Extensions use /<EXTENSION>/<VERSION>/manifest.json.
+          for (const auto& version : versions) {
+            genExtension(row.at("uid"), version, profile_name, results);
+          }
+        }
       }
     }
   }

@@ -2,31 +2,43 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
+#include <gflags/gflags.h>
 #include <gtest/gtest.h>
 
 #include <boost/filesystem.hpp>
-#include <gflags/gflags.h>
+#include <boost/format.hpp>
 
 #include <osquery/core.h>
-#include <osquery/filesystem.h>
+#include <osquery/database.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/registry_factory.h>
 #include <osquery/sql.h>
+#include <osquery/system.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/conversions.h"
-#include "osquery/tests/test_util.h"
+#include <osquery/utils/info/platform_type.h>
 
 namespace osquery {
+DECLARE_bool(disable_database);
 namespace tables {
 
-class SystemsTablesTests : public testing::Test {};
+class SystemsTablesTests : public testing::Test {
+ protected:
+  void SetUp() override {
+    Initializer::platformSetup();
+    registryAndPluginInit();
+
+    // Force registry to use ephemeral database plugin
+    FLAGS_disable_database = true;
+    DatabasePlugin::setAllowOpen(true);
+    DatabasePlugin::initPlugin();
+  }
+};
 
 TEST_F(SystemsTablesTests, test_os_version) {
   SQL results("select * from os_version");
@@ -76,19 +88,19 @@ TEST_F(SystemsTablesTests, test_processes) {
 
 TEST_F(SystemsTablesTests, test_users) {
   {
-    SQL results("select uid, uuid, username from users limit 1");
+    SQL results("select * from users limit 1");
     ASSERT_EQ(results.rows().size(), 1U);
 
     EXPECT_FALSE(results.rows()[0].at("uid").empty());
+    EXPECT_FALSE(results.rows()[0].at("username").empty());
     if (!isPlatform(PlatformType::TYPE_LINUX)) {
       EXPECT_FALSE(results.rows()[0].at("uuid").empty());
     }
-    EXPECT_FALSE(results.rows()[0].at("username").empty());
   }
 
   {
     // Make sure that we can query all users without crash or hang: Issue #3079
-    SQL results("select uid, uuid, username from users");
+    SQL results("select * from users");
     EXPECT_GT(results.rows().size(), 1U);
   }
 
@@ -97,33 +109,58 @@ TEST_F(SystemsTablesTests, test_users) {
     SQL results("select uuid, username from users where uuid = -1");
     EXPECT_EQ(results.rows().size(), 0U);
   }
+
+  {
+    // Make sure an invalid pid within the query constraint returns no rows.
+    SQL results("select * from users where uid = -1");
+    EXPECT_EQ(results.rows().size(), 0U);
+  }
+}
+
+TEST_F(SystemsTablesTests, test_groups) {
+  {
+    SQL results("select * from groups limit 1");
+    ASSERT_EQ(results.rows().size(), 1U);
+
+    EXPECT_FALSE(results.rows()[0].at("gid").empty());
+  }
+
+  {
+    // Make sure that we can query all users without crash or hang
+    SQL results("select * from groups");
+    EXPECT_GT(results.rows().size(), 1U);
+  }
+
+  {
+    // Make sure an invalid pid within the query constraint returns no rows.
+    SQL results("select * from groups where gid = -1");
+    EXPECT_EQ(results.rows().size(), 0U);
+  }
 }
 
 TEST_F(SystemsTablesTests, test_processes_memory_cpu) {
   SQL results("select * from osquery_info join processes using (pid)");
-  long long bytes;
-  safeStrtoll(results.rows()[0].at("resident_size"), 0, bytes);
+  long long bytes = std::stoll(results.rows()[0].at("resident_size"), 0, 0);
 
   // Now we expect the running test to use over 1M of RSS.
   bytes = bytes / (1024 * 1024);
-  EXPECT_GT(bytes, 1U);
+  EXPECT_GE(bytes, 1U);
 
-  safeStrtoll(results.rows()[0].at("total_size"), 0, bytes);
+  bytes = std::stoll(results.rows()[0].at("total_size"), 0, 0);
   bytes = bytes / (1024 * 1024);
-  EXPECT_GT(bytes, 1U);
+  EXPECT_GE(bytes, 1U);
 
   // Make sure user/system time are in seconds, pray we haven't actually used
   // more than 100 seconds of CPU.
   SQL results2("select * from osquery_info join processes using (pid)");
 
-  long long cpu_start, value;
-  safeStrtoll(results.rows()[0].at("user_time"), 0, cpu_start);
-  safeStrtoll(results2.rows()[0].at("user_time"), 0, value);
+  auto cpu_start = std::stoll(results.rows()[0].at("user_time"), 0, 0);
+  auto value = std::stoll(results2.rows()[0].at("user_time"), 0, 0);
   EXPECT_LT(value - cpu_start, 100U);
   EXPECT_GE(value - cpu_start, 0U);
 
-  safeStrtoll(results.rows()[0].at("user_time"), 0, cpu_start);
-  safeStrtoll(results2.rows()[0].at("user_time"), 0, value);
+  cpu_start = std::stoll(results.rows()[0].at("user_time"), 0, 0);
+  value = std::stoll(results2.rows()[0].at("user_time"), 0, 0);
   EXPECT_LT(value - cpu_start, 100U);
   EXPECT_GE(value - cpu_start, 0U);
 }
@@ -150,10 +187,10 @@ TEST_F(SystemsTablesTests, test_processes_disk_io) {
 
   SQL after("select * from osquery_info join processes using (pid)");
 
-  long long bytes_written_before, bytes_written_after;
-  safeStrtoll(
-      before.rows()[0].at("disk_bytes_written"), 0, bytes_written_before);
-  safeStrtoll(after.rows()[0].at("disk_bytes_written"), 0, bytes_written_after);
+  auto bytes_written_before =
+      std::stoll(before.rows()[0].at("disk_bytes_written"), 0, 0);
+  auto bytes_written_after =
+      std::stoll(after.rows()[0].at("disk_bytes_written"), 0, 0);
 
   EXPECT_GE(bytes_written_after - bytes_written_before, 1024 * 1024);
 }
@@ -187,12 +224,38 @@ TEST_F(SystemsTablesTests, test_abstract_joins) {
                 " left join file using (path) left join hash using (path);");
     ASSERT_EQ(results.rows().size(), 1U);
   }
+}
 
+TEST_F(SystemsTablesTests, test_table_constraints) {
   {
     // Check LIKE and = operands.
-    SQL results(
-        R"(select path from file where path = '/etc/' or path LIKE '/dev/%' or path LIKE '\Windows\%';)");
-    ASSERT_GT(results.rows().size(), 1U);
+#ifdef OSQUERY_WINDOWS
+    TCHAR windows_path[64];
+    auto windows_path_length =
+        GetSystemWindowsDirectory(windows_path, sizeof(windows_path));
+    ASSERT_FALSE(windows_path_length == 0);
+
+    std::stringstream qry_stream;
+    qry_stream << boost::format("select path from file where path LIKE '%s") %
+                      windows_path
+               << R"(\%';)";
+    std::string like_query = qry_stream.str();
+    qry_stream = std::stringstream();
+
+    qry_stream << boost::format("select path from file where path = '%s") %
+                      windows_path
+               << R"(';)";
+    std::string equal_query = qry_stream.str();
+
+#else
+    std::string like_query =
+        R"(select path from file where path LIKE '/dev/%';)";
+    std::string equal_query = "select path from file where path = '/etc/'";
+#endif
+    SQL like_results(like_query);
+    SQL equal_results(equal_query);
+    EXPECT_GT(like_results.rows().size(), 1U);
+    EXPECT_GT(equal_results.rows().size(), 0U);
   }
 }
 
@@ -201,9 +264,8 @@ TEST_F(SystemsTablesTests, test_win_drivers_query_time) {
     return;
   }
   SQL results("select * from osquery_info join processes using (pid)");
-  long long utime1, systime1;
-  safeStrtoll(results.rows()[0].at("user_time"), 0, utime1);
-  safeStrtoll(results.rows()[0].at("system_time"), 0, systime1);
+  auto utime1 = std::stoll(results.rows()[0].at("user_time"), 0, 0);
+  auto systime1 = std::stoll(results.rows()[0].at("system_time"), 0, 0);
 
   // Query the drivers table and ensure that we don't take too long to exec
   SQL drivers("select * from drivers");
@@ -212,13 +274,12 @@ TEST_F(SystemsTablesTests, test_win_drivers_query_time) {
   ASSERT_GT(drivers.rows().size(), 10U);
 
   // Get a rough idea of the time utilized by the query
-  long long utime2, systime2;
   SQL results2("select * from osquery_info join processes using (pid)");
-  safeStrtoll(results2.rows()[0].at("user_time"), 0, utime2);
-  safeStrtoll(results2.rows()[0].at("system_time"), 0, systime2);
+  auto utime2 = std::stoll(results2.rows()[0].at("user_time"), 0, 0);
+  auto systime2 = std::stoll(results2.rows()[0].at("system_time"), 0, 0);
 
-  EXPECT_LT(utime2 - utime1, 10U);
-  EXPECT_LT(systime2 - systime1, 10U);
+  EXPECT_LT(utime2 - utime1, 10000U);
+  EXPECT_LT(systime2 - systime1, 10000U);
 }
 
 TEST_F(SystemsTablesTests, test_win_crashes_parsing) {
@@ -243,6 +304,7 @@ class HashTableTest : public testing::Test {
   const std::string contentSha1 = "21bd89f4580ef635e87f655fab5807a01e0ff2e9";
   const std::string contentSha256 =
       "6f1c16ac918f64721d14ff4bb3c51fe25ffde92f795ce6dbeb45722ce9d6e05c";
+  const std::string contentSsdeep = "3:Ttn:Jn";
   const std::string badContentMd5 = "e1cd6c58b0d4d9d7bcbfc0ec2b55ce94";
 
   void SetContent(int n) {
@@ -257,8 +319,12 @@ class HashTableTest : public testing::Test {
     tmpPath = boost::filesystem::temp_directory_path();
     tmpPath /= boost::filesystem::unique_path(
         "osquery_hash_t_test-%%%%-%%%%-%%%%-%%%%");
-    qry = std::string("select md5, sha1, sha256 from hash where path='") +
-          tmpPath.string() + "'";
+    auto maybe_ssdeep = isPlatform(PlatformType::TYPE_POSIX) ? ", ssdeep" : "";
+    std::stringstream qry_stream;
+    qry_stream << boost::format(
+                      "select md5, sha1, sha256%s from hash where path='%s'") %
+                      maybe_ssdeep % tmpPath.string();
+    qry = qry_stream.str();
   }
 
   virtual void TearDown() {
@@ -277,6 +343,9 @@ TEST_F(HashTableTest, hashes_are_correct) {
   EXPECT_EQ(rows[0].at("md5"), contentMd5);
   EXPECT_EQ(rows[0].at("sha1"), contentSha1);
   EXPECT_EQ(rows[0].at("sha256"), contentSha256);
+  if (isPlatform(PlatformType::TYPE_POSIX)) {
+    EXPECT_EQ(rows[0].at("ssdeep"), contentSsdeep);
+  }
 }
 
 TEST_F(HashTableTest, test_cache_works) {

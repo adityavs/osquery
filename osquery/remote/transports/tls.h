@@ -2,18 +2,22 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #pragma once
 
-#include <osquery/flags.h>
+#include <gtest/gtest_prod.h>
 
-#include "osquery/remote/http_client.h"
-#include "osquery/remote/requests.h"
+// clang-format off
+// Keep it on top of all other includes to fix double include WinSock.h header file
+// which is windows specific boost build problem
+#include <osquery/remote/http_client.h>
+// clang-format on
+
+#include <osquery/flags.h>
+#include <osquery/remote/requests.h>
 
 namespace osquery {
 
@@ -67,11 +71,27 @@ class TLSTransport : public Transport {
   /**
    * @brief Class destructor
    */
-  virtual ~TLSTransport() {}
+  virtual ~TLSTransport() = default;
 
  public:
   TLSTransport();
 
+  /**
+   * This returns the restrictive (best practice) set of options.
+   * They include a limited cipher suite as well as the potential client
+   * certificates.
+   *
+   * Use these options with a TLS client communicating with osquery-related
+   * infrastructure.
+   */
+  http::Client::Options getInternalOptions();
+
+  /**
+   * This returns basic/generial options.
+   *
+   * Use these options if you are communicating with AWS or generic Internet
+   * infrastrucutre.
+   */
   http::Client::Options getOptions();
 
  private:
@@ -103,7 +123,7 @@ class TLSTransport : public Transport {
   std::string server_certificate_file_;
 
   /// Testing-only, disable peer verification.
-  bool verify_peer_;
+  bool verify_peer_{true};
 
  protected:
   /**
@@ -123,8 +143,8 @@ class TLSTransport : public Transport {
   FRIEND_TEST(TLSTransportsTests, test_call_verify_peer);
   FRIEND_TEST(TLSTransportsTests, test_call_server_cert_pinning);
   FRIEND_TEST(TLSTransportsTests, test_call_client_auth);
-  FRIEND_TEST(TLSTransportsTests, test_call_http);
+  FRIEND_TEST(TLSTransportsTests, test_wrong_hostname);
 
   friend class TestDistributedPlugin;
 };
-}
+} // namespace osquery

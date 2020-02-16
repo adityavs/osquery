@@ -2,19 +2,17 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #include <boost/algorithm/string/replace.hpp>
 
 #include <osquery/tables.h>
 
-#include "osquery/core/conversions.h"
-#include "osquery/core/windows/wmi.h"
-#include "osquery/tables/networking/windows/interfaces.h"
+#include <osquery/utils/conversions/tryto.h>
+#include <osquery/core/windows/wmi.h>
+#include <osquery/tables/networking/windows/interfaces.h>
 
 namespace osquery {
 namespace tables {
@@ -41,19 +39,18 @@ const std::map<unsigned char, const std::string> kMapOfState = {
 QueryData genIPv4ArpCache(QueryContext& context) {
   QueryData results;
   auto interfaces = genInterfaceDetails(context);
-  WmiRequest wmiSystemReq("select * from MSFT_NetNeighbor",
-                          (BSTR)L"ROOT\\StandardCimv2");
-  auto& wmiResults = wmiSystemReq.results();
+  const WmiRequest wmiSystemReq("select * from MSFT_NetNeighbor",
+                                (BSTR)L"ROOT\\StandardCimv2");
+  const auto& wmiResults = wmiSystemReq.results();
   std::map<long, std::string> mapOfInterfaces = {
       {1, ""}, // loopback
   };
 
   for (const auto& iface : interfaces) {
-    long interfaceIndex;
 
     if (iface.count("interface") > 0) {
-      safeStrtol(iface.at("interface"), 10, interfaceIndex);
-      mapOfInterfaces[interfaceIndex] =
+      long interface_index = tryTo<long>(iface.at("interface"), 10).takeOr(0l);
+      mapOfInterfaces[interface_index] =
           iface.count("mac") > 0 ? iface.at("mac") : "";
     }
   }

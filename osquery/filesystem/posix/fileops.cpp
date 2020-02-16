@@ -2,11 +2,12 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
+
+#include <osquery/filesystem/filesystem.h>
+#include <osquery/filesystem/fileops.h>
 
 #include <glob.h>
 #include <pwd.h>
@@ -18,12 +19,8 @@
 #include <sys/time.h>
 #include <sys/types.h>
 
+#include <boost/filesystem.hpp>
 #include <boost/optional.hpp>
-
-#include <osquery/filesystem.h>
-
-#include "osquery/core/process.h"
-#include "osquery/filesystem/fileops.h"
 
 namespace fs = boost::filesystem;
 namespace errc = boost::system::errc;
@@ -122,7 +119,7 @@ Status PlatformFile::isOwnerRoot() const {
   }
 
   if (owner_id == 0) {
-    return Status(0, "OK");
+    return Status::success();
   }
   return Status(1, "Owner is not root");
 }
@@ -138,7 +135,7 @@ Status PlatformFile::isOwnerCurrentUser() const {
   }
 
   if (owner_id == ::getuid()) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "Owner is not current user");
@@ -151,7 +148,7 @@ Status PlatformFile::isExecutable() const {
   }
 
   if ((file_stat.st_mode & S_IXUSR) == S_IXUSR) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "Not executable");
@@ -166,7 +163,7 @@ Status PlatformFile::hasSafePermissions() const {
   // We allow user write for now, since our main threat is external
   // modification by other users
   if ((file.st_mode & S_IWOTH) == 0) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "Writable");
@@ -281,6 +278,10 @@ boost::optional<std::string> getHomeDirectory() {
   }
 }
 
+bool platformSetSafeDbPerms(const std::string& path) {
+  return platformChmod(path, S_IRWXU);
+}
+
 bool platformChmod(const std::string& path, mode_t perms) {
   return (::chmod(path.c_str(), perms) == 0);
 }
@@ -288,16 +289,16 @@ bool platformChmod(const std::string& path, mode_t perms) {
 std::vector<std::string> platformGlob(const std::string& find_path) {
   std::vector<std::string> results;
 
-  glob_t data;
+  auto data = (glob_t*)alloca(sizeof(glob_t));
   ::glob(
-      find_path.c_str(), GLOB_TILDE | GLOB_MARK | GLOB_BRACE, nullptr, &data);
-  size_t count = data.gl_pathc;
+      find_path.c_str(), GLOB_TILDE | GLOB_MARK | GLOB_BRACE, nullptr, data);
+  size_t count = data->gl_pathc;
 
   for (size_t index = 0; index < count; index++) {
-    results.push_back(data.gl_pathv[index]);
+    results.push_back(data->gl_pathv[index]);
   }
 
-  ::globfree(&data);
+  ::globfree(data);
   return results;
 }
 
@@ -312,7 +313,7 @@ Status platformIsTmpDir(const fs::path& dir) {
   }
 
   if (dir_stat.st_mode & (1 << 9)) {
-    return Status(0, "OK");
+    return Status::success();
   }
 
   return Status(1, "");
@@ -324,7 +325,7 @@ Status platformIsFileAccessible(const fs::path& path) {
   if (::lstat(path.c_str(), &link_stat) < 0) {
     return Status(1, "File is not acccessible");
   }
-  return Status(0, "OK");
+  return Status::success();
 }
 
 bool platformIsatty(FILE* f) {

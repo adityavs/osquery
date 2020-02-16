@@ -2,18 +2,18 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
+
+#include <osquery/utils/json/json.h>
 
 #include <osquery/database.h>
 #include <osquery/flags.h>
 #include <osquery/logger.h>
+#include <osquery/registry_factory.h>
 #include <osquery/tables.h>
-
-#include "osquery/core/json.h"
+#include <osquery/utils/conversions/tryto.h>
 
 namespace osquery {
 
@@ -24,15 +24,7 @@ CREATE_LAZY_REGISTRY(TablePlugin, "table");
 size_t TablePlugin::kCacheInterval = 0;
 size_t TablePlugin::kCacheStep = 0;
 
-const std::map<ColumnType, std::string> kColumnTypeNames = {
-    {UNKNOWN_TYPE, "UNKNOWN"},
-    {TEXT_TYPE, "TEXT"},
-    {INTEGER_TYPE, "INTEGER"},
-    {BIGINT_TYPE, "BIGINT"},
-    {UNSIGNED_BIGINT_TYPE, "UNSIGNED BIGINT"},
-    {DOUBLE_TYPE, "DOUBLE"},
-    {BLOB_TYPE, "BLOB"},
-};
+#define kDisableRowId "WITHOUT ROWID"
 
 Status TablePlugin::addExternal(const std::string& name,
                                 const PluginResponse& response) {
@@ -69,16 +61,47 @@ void TablePlugin::setRequestFromContext(const QueryContext& context,
   }
 
   doc.add("constraints", constraints);
+
+  if (context.colsUsed) {
+    auto colsUsed = doc.getArray();
+    for (const auto& columnName : *context.colsUsed) {
+      doc.pushCopy(columnName, colsUsed);
+    }
+    doc.add("colsUsed", colsUsed);
+  }
+
+  if (context.colsUsedBitset) {
+    doc.add("colsUsedBitset", context.colsUsedBitset->to_ullong());
+  }
+
   doc.toString(request["context"]);
 }
 
-void TablePlugin::setContextFromRequest(const PluginRequest& request,
-                                        QueryContext& context) {
+QueryContext TablePlugin::getContextFromRequest(
+    const PluginRequest& request) const {
+  QueryContext context;
+  if (request.count("context") == 0) {
+    return context;
+  }
+
   auto doc = JSON::newObject();
   doc.fromString(request.at("context"));
+  if (doc.doc().HasMember("colsUsed")) {
+    UsedColumns colsUsed;
+    for (const auto& columnName : doc.doc()["colsUsed"].GetArray()) {
+      colsUsed.insert(columnName.GetString());
+    }
+    context.colsUsed = colsUsed;
+  }
+  if (doc.doc().HasMember("colsUsedBitset")) {
+    context.colsUsedBitset = doc.doc()["colsUsedBitset"].GetUint64();
+  } else if (context.colsUsed) {
+    context.colsUsedBitset = usedColumnsToBitset(*context.colsUsed);
+  }
+
   if (!doc.doc().HasMember("constraints") ||
       !doc.doc()["constraints"].IsArray()) {
-    return;
+    return context;
   }
 
   // Set the context limit and deserialize each column constraint list.
@@ -86,40 +109,65 @@ void TablePlugin::setContextFromRequest(const PluginRequest& request,
     auto column_name = constraint["name"].GetString();
     context.constraints[column_name].deserialize(constraint);
   }
+
+  return context;
+}
+
+UsedColumnsBitset TablePlugin::usedColumnsToBitset(
+    const UsedColumns usedColumns) const {
+  UsedColumnsBitset result;
+
+  const auto columns = this->columns();
+  const auto aliases = this->aliasedColumns();
+  for (size_t i = 0; i < columns.size(); i++) {
+    auto column_name = std::get<0>(columns[i]);
+    const auto& aliased_name = aliases.find(column_name);
+    if (aliased_name != aliases.end()) {
+      column_name = aliased_name->second;
+    }
+    if (usedColumns.find(column_name) != usedColumns.end()) {
+      result.set(i);
+    }
+  }
+
+  return result;
 }
 
 Status TablePlugin::call(const PluginRequest& request,
                          PluginResponse& response) {
   response.clear();
+
   // TablePlugin API calling requires an action.
   if (request.count("action") == 0) {
     return Status(1, "Table plugins must include a request action");
   }
 
-  if (request.at("action") == "generate") {
-    // The "generate" action runs the table implementation using a PluginRequest
-    // with optional serialized QueryContext and returns the QueryData results
-    // as the PluginRequest data.
+  const auto& action = request.at("action");
 
-    // Create a fake table implementation for caching.
-    QueryContext context;
-    if (request.count("context") > 0) {
-      setContextFromRequest(request, context);
-    }
-    response = generate(context);
-  } else if (request.at("action") == "columns") {
-    // The "columns" action returns a PluginRequest filled with column
-    // information such as name and type.
+  if (action == "generate") {
+    auto context = getContextFromRequest(request);
+    TableRows result = generate(context);
+    response = tableRowsToPluginResponse(result);
+  } else if (action == "delete") {
+    auto context = getContextFromRequest(request);
+    response = delete_(context, request);
+  } else if (action == "insert") {
+    auto context = getContextFromRequest(request);
+    response = insert(context, request);
+  } else if (action == "update") {
+    auto context = getContextFromRequest(request);
+    response = update(context, request);
+  } else if (action == "columns") {
     response = routeInfo();
   } else {
-    return Status(1, "Unknown table plugin action: " + request.at("action"));
+    return Status(1, "Unknown table plugin action: " + action);
   }
 
-  return Status(0, "OK");
+  return Status::success();
 }
 
-std::string TablePlugin::columnDefinition() const {
-  return osquery::columnDefinition(columns());
+std::string TablePlugin::columnDefinition(bool is_extension) const {
+  return osquery::columnDefinition(columns(), is_extension);
 }
 
 PluginResponse TablePlugin::routeInfo() const {
@@ -179,34 +227,34 @@ bool TablePlugin::isCached(size_t step, const QueryContext& ctx) const {
   return (step < last_cached_ + last_interval_ && cacheAllowed(columns(), ctx));
 }
 
-QueryData TablePlugin::getCache() const {
+TableRows TablePlugin::getCache() const {
   VLOG(1) << "Retrieving results from cache for table: " << getName();
   // Lookup results from database and deserialize.
   std::string content;
   getDatabaseValue(kQueries, "cache." + getName(), content);
-  QueryData results;
-  deserializeQueryDataJSON(content, results);
+  TableRows results;
+  deserializeTableRowsJSON(content, results);
   return results;
 }
 
 void TablePlugin::setCache(size_t step,
                            size_t interval,
                            const QueryContext& ctx,
-                           const QueryData& results) {
+                           const TableRows& results) {
   if (FLAGS_disable_caching || !cacheAllowed(columns(), ctx)) {
     return;
   }
 
   // Serialize QueryData and save to database.
   std::string content;
-  if (serializeQueryDataJSON(results, content)) {
+  if (serializeTableRowsJSON(results, content)) {
     last_cached_ = step;
     last_interval_ = interval;
     setDatabaseValue(kQueries, "cache." + getName(), content);
   }
 }
 
-std::string columnDefinition(const TableColumns& columns) {
+std::string columnDefinition(const TableColumns& columns, bool is_extension) {
   std::map<std::string, bool> epilog;
   bool indexed = false;
   std::vector<std::string> pkeys;
@@ -217,12 +265,12 @@ std::string columnDefinition(const TableColumns& columns) {
     statement +=
         '`' + std::get<0>(column) + "` " + columnTypeName(std::get<1>(column));
     auto& options = std::get<2>(column);
+    if (options & ColumnOptions::INDEX) {
+      indexed = true;
+    }
     if (options & (ColumnOptions::INDEX | ColumnOptions::ADDITIONAL)) {
-      if (options & ColumnOptions::INDEX) {
-        indexed = true;
-      }
       pkeys.push_back(std::get<0>(column));
-      epilog["WITHOUT ROWID"] = true;
+      epilog[kDisableRowId] = true;
     }
     if (options & ColumnOptions::HIDDEN) {
       statement += " HIDDEN";
@@ -232,10 +280,13 @@ std::string columnDefinition(const TableColumns& columns) {
     }
   }
 
-  // If there are only 'additional' columns (rare), do not attempt a pkey.
-  if (!indexed) {
-    epilog["WITHOUT ROWID"] = false;
+  // If there are only 'additional' columns (rare), pkey is the 'unique row'.
+  // Otherwise an additional constraint will create duplicate rowids.
+  if (!indexed && epilog[kDisableRowId]) {
     pkeys.clear();
+    for (const auto& column : columns) {
+      pkeys.push_back(std::get<0>(column));
+    }
   }
 
   // Append the primary keys, if any were defined.
@@ -250,6 +301,13 @@ std::string columnDefinition(const TableColumns& columns) {
     statement += ')';
   }
 
+  // Tables implemented by extension can be made read/write; make sure to always
+  // keep the rowid column, as we need it to reference rows when handling UPDATE
+  // and DELETE queries
+  if (is_extension) {
+    epilog[kDisableRowId] = false;
+  }
+
   statement += ')';
   for (auto& ei : epilog) {
     if (ei.second) {
@@ -259,38 +317,49 @@ std::string columnDefinition(const TableColumns& columns) {
   return statement;
 }
 
-std::string columnDefinition(const PluginResponse& response, bool aliases) {
+std::string columnDefinition(const PluginResponse& response,
+                             bool aliases,
+                             bool is_extension) {
   TableColumns columns;
   // Maintain a map of column to the type, for alias type lookups.
   std::map<std::string, ColumnType> column_types;
   for (const auto& column : response) {
-    if (column.count("id") == 0) {
+    auto id = column.find("id");
+    if (id == column.end()) {
       continue;
     }
 
-    if (column.at("id") == "column" && column.count("name") &&
-        column.count("type")) {
-      auto options =
-          (column.count("op"))
-              ? (ColumnOptions)AS_LITERAL(INTEGER_LITERAL, column.at("op"))
-              : ColumnOptions::DEFAULT;
-      auto column_type = columnTypeName(column.at("type"));
-      columns.push_back(make_tuple(column.at("name"), column_type, options));
+    auto cname = column.find("name");
+    auto ctype = column.find("type");
+    if (id->second == "column" && cname != column.end() &&
+        ctype != column.end()) {
+      auto options = ColumnOptions::DEFAULT;
+
+      auto cop = column.find("op");
+      if (cop != column.end()) {
+        auto op = tryTo<int>(cop->second);
+        if (op) {
+          options = static_cast<ColumnOptions>(op.take());
+        }
+      }
+      auto column_type = columnTypeName(ctype->second);
+      columns.push_back(make_tuple(cname->second, column_type, options));
       if (aliases) {
-        column_types[column.at("name")] = column_type;
+        column_types[cname->second] = column_type;
       }
-    } else if (column.at("id") == "columnAlias" && column.count("name") &&
-               column.count("target") && aliases) {
-      const auto& target = column.at("target");
-      if (column_types.count(target) == 0) {
-        // No type was defined for the alias target.
-        continue;
+    } else if (id->second == "columnAlias" && cname != column.end() &&
+               aliases) {
+      auto ctarget = column.find("target");
+      if (ctarget != column.end()) {
+        auto target_ctype = column_types.find(ctarget->second);
+        if (target_ctype != column_types.end()) {
+          columns.push_back(make_tuple(
+              cname->second, target_ctype->second, ColumnOptions::HIDDEN));
+        }
       }
-      columns.push_back(make_tuple(
-          column.at("name"), column_types.at(target), ColumnOptions::HIDDEN));
     }
   }
-  return columnDefinition(columns);
+  return columnDefinition(columns, is_extension);
 }
 
 ColumnType columnTypeName(const std::string& type) {
@@ -317,21 +386,23 @@ bool ConstraintList::exists(const ConstraintOperatorFlag ops) const {
 
 bool ConstraintList::matches(const std::string& expr) const {
   // Support each SQL affinity type casting.
-  try {
-    if (affinity == TEXT_TYPE) {
-      return literal_matches<TEXT_LITERAL>(expr);
-    } else if (affinity == INTEGER_TYPE) {
-      INTEGER_LITERAL lexpr = AS_LITERAL(INTEGER_LITERAL, expr);
-      return literal_matches<INTEGER_LITERAL>(lexpr);
-    } else if (affinity == BIGINT_TYPE) {
-      BIGINT_LITERAL lexpr = AS_LITERAL(BIGINT_LITERAL, expr);
-      return literal_matches<BIGINT_LITERAL>(lexpr);
-    } else if (affinity == UNSIGNED_BIGINT_TYPE) {
-      UNSIGNED_BIGINT_LITERAL lexpr = AS_LITERAL(UNSIGNED_BIGINT_LITERAL, expr);
-      return literal_matches<UNSIGNED_BIGINT_LITERAL>(lexpr);
+  if (affinity == TEXT_TYPE) {
+    return literal_matches<TEXT_LITERAL>(expr);
+  } else if (affinity == INTEGER_TYPE) {
+    auto lexpr = tryTo<INTEGER_LITERAL>(expr);
+    if (lexpr) {
+      return literal_matches<INTEGER_LITERAL>(lexpr.take());
     }
-  } catch (const boost::bad_lexical_cast& /* e */) {
-    // Unsupported affinity type or unable to cast content type.
+  } else if (affinity == BIGINT_TYPE) {
+    auto lexpr = tryTo<BIGINT_LITERAL>(expr);
+    if (lexpr) {
+      return literal_matches<BIGINT_LITERAL>(lexpr.take());
+    }
+  } else if (affinity == UNSIGNED_BIGINT_TYPE) {
+    auto lexpr = tryTo<UNSIGNED_BIGINT_LITERAL>(expr);
+    if (lexpr) {
+      return literal_matches<UNSIGNED_BIGINT_LITERAL>(lexpr.take());
+    }
   }
 
   return false;
@@ -341,17 +412,21 @@ template <typename T>
 bool ConstraintList::literal_matches(const T& base_expr) const {
   bool aggregate = true;
   for (size_t i = 0; i < constraints_.size(); ++i) {
-    T constraint_expr = AS_LITERAL(T, constraints_[i].expr);
+    auto constraint_expr = tryTo<T>(constraints_[i].expr);
+    if (!constraint_expr) {
+      // Cannot cast input constraint to column type.
+      return false;
+    }
     if (constraints_[i].op == EQUALS) {
-      aggregate = aggregate && (base_expr == constraint_expr);
+      aggregate = aggregate && (base_expr == constraint_expr.take());
     } else if (constraints_[i].op == GREATER_THAN) {
-      aggregate = aggregate && (base_expr > constraint_expr);
+      aggregate = aggregate && (base_expr > constraint_expr.take());
     } else if (constraints_[i].op == LESS_THAN) {
-      aggregate = aggregate && (base_expr < constraint_expr);
+      aggregate = aggregate && (base_expr < constraint_expr.take());
     } else if (constraints_[i].op == GREATER_THAN_OR_EQUALS) {
-      aggregate = aggregate && (base_expr >= constraint_expr);
+      aggregate = aggregate && (base_expr >= constraint_expr.take());
     } else if (constraints_[i].op == LESS_THAN_OR_EQUALS) {
-      aggregate = aggregate && (base_expr <= constraint_expr);
+      aggregate = aggregate && (base_expr <= constraint_expr.take());
     } else {
       // Unsupported constraint. Should match every thing.
       return true;
@@ -374,6 +449,35 @@ std::set<std::string> ConstraintList::getAll(ConstraintOperator op) const {
   }
   return set;
 }
+
+template <typename T>
+std::set<T> ConstraintList::getAll(ConstraintOperator /* op */) const {
+  std::set<T> cs;
+  for (const auto& item : constraints_) {
+    auto exp = tryTo<T>(item.expr);
+    if (exp) {
+      cs.insert(exp.take());
+    }
+  }
+  return cs;
+}
+
+template <>
+std::set<std::string> ConstraintList::getAll(ConstraintOperator op) const {
+  return getAll(op);
+}
+
+/// Explicit getAll for INTEGER.
+template std::set<INTEGER_LITERAL> ConstraintList::getAll<int>(
+    ConstraintOperator) const;
+
+/// Explicit getAll for BIGINT.
+template std::set<long long> ConstraintList::getAll<long long>(
+    ConstraintOperator) const;
+
+/// Explicit getAll for UNSIGNED_BIGINT.
+template std::set<unsigned long long>
+    ConstraintList::getAll<unsigned long long>(ConstraintOperator) const;
 
 void ConstraintList::serialize(JSON& doc, rapidjson::Value& obj) const {
   auto expressions = doc.getArray();
@@ -407,6 +511,20 @@ void ConstraintList::deserialize(const rapidjson::Value& obj) {
   affinity = columnTypeName(affinity_name);
 }
 
+bool QueryContext::isColumnUsed(const std::string& colName) const {
+  return !colsUsed || colsUsed->find(colName) != colsUsed->end();
+}
+
+bool QueryContext::isAnyColumnUsed(
+    std::initializer_list<std::string> colNames) const {
+  for (auto& colName : colNames) {
+    if (isColumnUsed(colName)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void QueryContext::useCache(bool use_cache) {
   use_cache_ = use_cache;
 }
@@ -415,27 +533,17 @@ bool QueryContext::useCache() const {
   return use_cache_;
 }
 
-void QueryContext::setCache(const std::string& index, Row _cache) {
-  table_->cache[index] = std::move(_cache);
-}
-
 void QueryContext::setCache(const std::string& index,
-                            const std::string& key,
-                            std::string _item) {
-  table_->cache[index][key] = std::move(_item);
+                            const TableRowHolder& cache) {
+  table_->cache[index] = cache->clone();
 }
 
 bool QueryContext::isCached(const std::string& index) const {
   return (table_->cache.count(index) != 0);
 }
 
-const Row& QueryContext::getCache(const std::string& index) {
-  return table_->cache[index];
-}
-
-const std::string& QueryContext::getCache(const std::string& index,
-                                          const std::string& key) {
-  return table_->cache[index][key];
+TableRowHolder QueryContext::getCache(const std::string& index) {
+  return table_->cache[index]->clone();
 }
 
 bool QueryContext::hasConstraint(const std::string& column,
@@ -460,4 +568,4 @@ Status QueryContext::expandConstraints(
   }
   return Status(0);
 }
-}
+} // namespace osquery

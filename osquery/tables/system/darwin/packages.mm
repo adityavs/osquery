@@ -2,23 +2,21 @@
  *  Copyright (c) 2014-present, Facebook, Inc.
  *  All rights reserved.
  *
- *  This source code is licensed under both the Apache 2.0 license (found in the
- *  LICENSE file in the root directory of this source tree) and the GPLv2 (found
- *  in the COPYING file in the root directory of this source tree).
- *  You may select, at your option, one of the above-listed licenses.
+ *  This source code is licensed in accordance with the terms specified in
+ *  the LICENSE file found in the root directory of this source tree.
  */
 
 #import <Foundation/Foundation.h>
 
 #include <CoreServices/CoreServices.h>
 
-#include <osquery/filesystem.h>
+// Package BOM structure headers
+#include <osquery/utils/darwin/plist.h>
+#include <osquery/filesystem/filesystem.h>
 #include <osquery/logger.h>
 #include <osquery/sql.h>
 #include <osquery/tables.h>
-
-// Package BOM structure headers
-#include "osquery/tables/system/darwin/packages.h"
+#include <osquery/tables/system/darwin/packages.h>
 
 namespace fs = boost::filesystem;
 namespace pt = boost::property_tree;
@@ -314,80 +312,80 @@ void genPackageReceipt(const std::string& path, QueryData& results) {
  * @return true of the APIs succeeded, otherwise false.
  */
 static inline bool genPackagesFromPackageKit(QueryData& results) {
-  auto bundle_url = CFURLCreateWithFileSystemPath(
-      kCFAllocatorDefault,
-      CFSTR("/System/Library/PrivateFrameworks/PackageKit.framework"),
-      kCFURLPOSIXPathStyle,
-      true);
-  if (bundle_url == nullptr) {
-    return false;
-  }
+  @autoreleasepool {
+    auto bundle_url = CFURLCreateWithFileSystemPath(
+        kCFAllocatorDefault,
+        CFSTR("/System/Library/PrivateFrameworks/PackageKit.framework"),
+        kCFURLPOSIXPathStyle,
+        true);
+    if (bundle_url == nullptr) {
+      return false;
+    }
 
-  auto bundle = CFBundleCreate(kCFAllocatorDefault, bundle_url);
-  CFRelease(bundle_url);
-  if (bundle == nullptr) {
-    return false;
-  }
+    auto bundle = CFBundleCreate(kCFAllocatorDefault, bundle_url);
+    CFRelease(bundle_url);
+    if (bundle == nullptr) {
+      return false;
+    }
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
 
-  NSArray* packages = nullptr;
-  if (CFBundleLoadExecutable(bundle)) {
-    auto cls = NSClassFromString(@"PKReceipt");
-    if (cls != nil) {
-      SEL sls = NSSelectorFromString(@"receiptsOnVolumeAtPath:");
-      @try {
-        id receipts = [cls performSelector:sls withObject:@"/"];
-        if ([receipts isKindOfClass:[NSArray class]]) {
-          packages = (NSArray*)receipts;
-        }
-      } @catch (NSException* exception) {
-        // The class did not respond to the selector.
-      }
-    }
-    CFBundleUnloadExecutable(bundle);
-  }
-
-  CFRelease(bundle);
-
-  if (packages == nullptr) {
-    // No packages were found.
-    return false;
-  }
-
-  for (id pkg in packages) {
-    Row r;
-    for (auto& pm : kPKReceiptKeys) {
-      @try {
-        auto selector = [NSString stringWithUTF8String:pm.second.c_str()];
-        auto sls = NSSelectorFromString(selector);
-        id value = [pkg performSelector:sls];
-
-        if ([value isKindOfClass:[NSString class]]) {
-          r[pm.first] = [value UTF8String];
-        } else if ([value isKindOfClass:[NSDate class]]) {
-          auto seconds =
-              [[NSNumber alloc] initWithDouble:[value timeIntervalSince1970]];
-          r[pm.first] = [[seconds stringValue] UTF8String];
-        } else if ([value isKindOfClass:[NSArray class]]) {
-          for (id first in value) {
-            r[pm.first] = [first UTF8String];
-            break;
+    NSArray* packages = nullptr;
+    if (CFBundleLoadExecutable(bundle)) {
+      auto cls = NSClassFromString(@"PKReceipt");
+      if (cls != nil) {
+        SEL sls = NSSelectorFromString(@"receiptsOnVolumeAtPath:");
+        @try {
+          id receipts = [cls performSelector:sls withObject:@"/"];
+          if ([receipts isKindOfClass:[NSArray class]]) {
+            packages = (NSArray*)receipts;
           }
+        } @catch (NSException* exception) {
+          // The class did not respond to the selector.
         }
-      } @catch (NSException* ex) {
-        // The class did not respond to the selector.
-        // The type of data replied may have changes.
-        VLOG(1) << "Could not select " << pm.second << ": "
-                << [[ex name] UTF8String];
       }
+      CFBundleUnloadExecutable(bundle);
     }
-    results.push_back(r);
-  }
 
+    CFRelease(bundle);
+
+    if (packages == nullptr) {
+      // No packages were found.
+      return false;
+    }
+
+    for (id pkg in packages) {
+      Row r;
+      for (auto& pm : kPKReceiptKeys) {
+        @try {
+          auto selector = [NSString stringWithUTF8String:pm.second.c_str()];
+          auto sls = NSSelectorFromString(selector);
+          id value = [pkg performSelector:sls];
+
+          if ([value isKindOfClass:[NSString class]]) {
+            r[pm.first] = [value UTF8String];
+          } else if ([value isKindOfClass:[NSDate class]]) {
+            auto seconds =
+                [[NSNumber alloc] initWithDouble:[value timeIntervalSince1970]];
+            r[pm.first] = [[seconds stringValue] UTF8String];
+          } else if ([value isKindOfClass:[NSArray class]]) {
+            for (id first in value) {
+              r[pm.first] = [first UTF8String];
+              break;
+            }
+          }
+        } @catch (NSException* ex) {
+          // The class did not respond to the selector.
+          // The type of data replied may have changes.
+          VLOG(1) << "Could not select " << pm.second << ": "
+                  << [[ex name] UTF8String];
+        }
+      }
+      results.push_back(r);
+    }
 #pragma clang diagnostic pop
-
+  }
   // Add a final assumption that PackageKit will have found 1 package.
   return (results.empty()) ? false : true;
 }
